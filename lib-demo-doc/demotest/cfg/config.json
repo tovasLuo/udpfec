@@ -1,0 +1,22 @@
+{
+    "cli":{
+        "userName"  : "root",
+        "listenIp"  : "127.0.0.1",
+        "listenPort": 20005
+    },
+
+    "logLevel" : 4,
+
+    "testSpeed" : {
+        "listenEndPort" : 50001,
+        "listenIp" :
+        [
+            {
+                "IpAddress" : "192.168.1.5"
+            }
+        ],
+        "listenStartPort" : 50001
+    },
+
+	"sendIpAddress" : "192.168.1.5"
+}

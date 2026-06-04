@@ -1,0 +1,72 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <Filter Include="源文件">
+      <UniqueIdentifier>{4FC737F1-C7A5-4376-A066-2A32D752A2FF}</UniqueIdentifier>
+      <Extensions>cpp;c;cc;cxx;def;odl;idl;hpj;bat;asm;asmx</Extensions>
+    </Filter>
+    <Filter Include="头文件">
+      <UniqueIdentifier>{93995380-89BD-4b04-88EB-625FBE52EBFB}</UniqueIdentifier>
+      <Extensions>h;hh;hpp;hxx;hm;inl;inc;ipp;xsd</Extensions>
+    </Filter>
+    <Filter Include="资源文件">
+      <UniqueIdentifier>{67DA6AB6-F800-4c08-8B7A-83BB121AAD01}</UniqueIdentifier>
+      <Extensions>rc;ico;cur;bmp;dlg;rc2;rct;bin;rgs;gif;jpg;jpeg;jpe;resx;tiff;tif;png;wav;mfcribbon-ms</Extensions>
+    </Filter>
+    <Filter Include="源文件\boot">
+      <UniqueIdentifier>{8404f654-2b0f-4dc6-9c23-d5ffeba6e904}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="源文件\config">
+      <UniqueIdentifier>{f1d52a50-20b1-4251-893d-3c9f935839de}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="源文件\init">
+      <UniqueIdentifier>{4381a949-c8d0-482a-8ec9-60cf18f6f8eb}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="源文件\oam">
+      <UniqueIdentifier>{add6c044-8c28-4778-a4bd-8513a4c66326}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="源文件\tran">
+      <UniqueIdentifier>{8d9c9dc1-803b-448d-a0a0-7efe92fe3e3c}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="源文件\utils">
+      <UniqueIdentifier>{d4663cad-6765-4d05-aecf-1d94b574cb43}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="..\..\..\src\boot\boot.cpp">
+      <Filter>源文件\boot</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\..\src\config\configreader.cpp">
+      <Filter>源文件\config</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\..\src\init\init.cpp">
+      <Filter>源文件\init</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\..\src\tran\tran.cpp">
+      <Filter>源文件\tran</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\..\src\oam\oam.cpp">
+      <Filter>源文件\oam</Filter>
+    </ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="..\..\..\src\config\configreader.h">
+      <Filter>源文件\config</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\..\src\init\init.h">
+      <Filter>源文件\init</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\..\src\util\errorcode.h">
+      <Filter>源文件\utils</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\..\src\util\macrodefine.h">
+      <Filter>源文件\utils</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\..\src\tran\tran.h">
+      <Filter>源文件\tran</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\..\src\oam\oam.h">
+      <Filter>源文件\oam</Filter>
+    </ClInclude>
+  </ItemGroup>
+</Project>
