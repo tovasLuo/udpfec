@@ -1377,6 +1377,18 @@ u32 GtpSession::Fec2RestoreFrameReceive(void *session, GtpHandler gtp_hdl, GtpPa
                s_obj->pb_dt_.peer_ip_, (u32)(s_obj->pb_dt_.peer_port_), ret_value);
     }
 
+    // Register the FEC-recovered SN in data_win_r_ so the next ACK bitmap includes it.
+    // Without this, data_win_r_ has no record of the recovered packet, the ACK omits the SN,
+    // and the sender's ARQ waits for RTO then retransmits a packet already delivered to the app.
+    u32 win_ret = SnEntrySlidWin(s_obj->data_win_r_, pack->pack_sn_, s_obj->last_active_ts_us_);
+    if (GTP_OK != win_ret) {
+        GtpLog(s_obj->cb_.write_log_cb_, kGtpSessionMd, kGtpLogLevelWarning,
+               "%s:%u<-->%s:%u fec restore: SnEntrySlidWin(data_win_r_) failed(0x%08x) pack_sn=%u.\r\n",
+               s_obj->pb_dt_.self_ip_, (u32)(s_obj->pb_dt_.self_port_),
+               s_obj->pb_dt_.peer_ip_, (u32)(s_obj->pb_dt_.peer_port_),
+               win_ret, pack->pack_sn_);
+    }
+
     return ret_value;
 }
 
