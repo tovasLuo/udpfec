@@ -25,6 +25,12 @@
 #include <memory.h>
 #include <string.h>
 
+#if defined(__SSE2__)
+#include <emmintrin.h>
+#elif defined(__ARM_NEON__)
+#include <arm_neon.h>
+#endif
+
 using namespace std;
 
 #ifdef __cplusplus
@@ -261,37 +267,67 @@ void XorEncode(u8 *data, const u32 &data_size, u8 *code, const u32 &code_size, u
     result_size = data_size;
 
 xor_code_start_pos_:
-    if (8 == sizeof(void*)) {
+
+#if defined(__SSE2__)
+    // SSE2: 16 bytes per iteration (2× the 64-bit scalar path).
+    // _mm_loadu / _mm_storeu handle unaligned pointers correctly.
+    {
+        u32 sse_loops = data_size >> 4;
+        encoded_num   = sse_loops << 4;
+
+        const __m128i *dp = (const __m128i*)data;
+        __m128i       *cp = (__m128i*)code;
+
+        for (nloop = 0; nloop < sse_loops; ++nloop) {
+            _mm_storeu_si128(cp + nloop,
+                _mm_xor_si128(_mm_loadu_si128(cp + nloop),
+                              _mm_loadu_si128(dp + nloop)));
+        }
+    }
+#elif defined(__ARM_NEON__)
+    // NEON: 16 bytes per iteration.
+    {
+        u32 neon_loops = data_size >> 4;
+        encoded_num    = neon_loops << 4;
+
+        const uint8_t *dp = data;
+        uint8_t       *cp = code;
+
+        for (nloop = 0; nloop < neon_loops; ++nloop) {
+            uint8x16_t dv = vld1q_u8(dp + (nloop << 4));
+            uint8x16_t cv = vld1q_u8(cp + (nloop << 4));
+            vst1q_u8(cp + (nloop << 4), veorq_u8(cv, dv));
+        }
+    }
+#elif defined(__x86_64__) || defined(_M_X64)
+    // 64-bit scalar fallback.
+    {
         u64 *data_ptr = (u64*)data;
         u64 *code_ptr = (u64*)code;
 
         xor_num     = (data_size >> 3);
         encoded_num = (xor_num << 3);
 
-        nloop = 0;
-        while (xor_num > nloop) {
+        for (nloop = 0; nloop < xor_num; ++nloop) {
             code_ptr[nloop] ^= data_ptr[nloop];
-            nloop += 1;
         }
-
-        goto xor_code_byte_pos_;
     }
-
-    if (4 == sizeof(void*)) {
+#else
+    // 32-bit scalar fallback.
+    {
         u32 *data_ptr = (u32*)data;
         u32 *code_ptr = (u32*)code;
 
         xor_num     = (data_size >> 2);
         encoded_num = (xor_num << 2);
 
-        nloop = 0;
-        while (xor_num > nloop) {
+        for (nloop = 0; nloop < xor_num; ++nloop) {
             code_ptr[nloop] ^= data_ptr[nloop];
-            nloop += 1;
         }
     }
+#endif
 
-xor_code_byte_pos_:
+    // Tail bytes (0-15 remaining).
     while (data_size > encoded_num) {
         code[encoded_num] ^= data[encoded_num];
         encoded_num += 1;
@@ -939,9 +975,20 @@ h_first_fec_encode_pos_:
     }
 
     if (0 == v_pos) {
-        pack_mem_pool_.FreeTranBuf((u8*)(encode_.encode_matrix_.h_fec_code_[h_pos].fec_pack_));
-        encode_.encode_matrix_.h_fec_code_[h_pos].fec_pack_  = NULL;
-        encode_.encode_matrix_.h_fec_code_[h_pos].tran_addr_ = NULL;
+        Fec2CodePackMgr &hmgr = encode_.encode_matrix_.h_fec_code_[h_pos];
+        if (data_size <= (u32)(hmgr.tran_addr_->stream_key_)) {
+            memcpy(hmgr.fec_pack_->fec_code_, data, data_size);
+            hmgr.fec_pack_->code_len_       = (u16)data_size;
+            hmgr.fec_pack_->code_book_id_   = encode_.encode_matrix_.code_book_id_;
+            hmgr.fec_pack_->encode_bit_map_ = (u8)(0x01 << v_pos);
+            hmgr.fec_pack_->pack_sn_        = encode_.encode_matrix_.start_pack_sn_;
+            hmgr.fec_pack_->fec_encode_dir_ = (u8)(Fec2CodeDir::kHorizontal);
+            hmgr.fec_pack_->fec_encode_pos_ = (u8)h_pos;
+            goto h_fec_encode_exit_pos_;
+        }
+        pack_mem_pool_.FreeTranBuf((u8*)(hmgr.fec_pack_));
+        hmgr.fec_pack_  = NULL;
+        hmgr.tran_addr_ = NULL;
         goto h_first_fec_encode_pos_;
     }
 
@@ -1009,10 +1056,20 @@ v_first_fec_encode_pos_:
     }
 
     if (0 == h_pos) {
-        pack_mem_pool_.FreeTranBuf((u8*)(encode_.encode_matrix_.v_fec_code_[v_pos].fec_pack_));
-        encode_.encode_matrix_.v_fec_code_[v_pos].fec_pack_  = NULL;
-        encode_.encode_matrix_.v_fec_code_[v_pos].tran_addr_ = NULL;
-
+        Fec2CodePackMgr &vmgr = encode_.encode_matrix_.v_fec_code_[v_pos];
+        if (data_size <= (u32)(vmgr.tran_addr_->stream_key_)) {
+            memcpy(vmgr.fec_pack_->fec_code_, data, data_size);
+            vmgr.fec_pack_->code_len_       = (u16)data_size;
+            vmgr.fec_pack_->code_book_id_   = encode_.encode_matrix_.code_book_id_;
+            vmgr.fec_pack_->encode_bit_map_ = (u8)(0x01 << h_pos);
+            vmgr.fec_pack_->pack_sn_        = encode_.encode_matrix_.start_pack_sn_;
+            vmgr.fec_pack_->fec_encode_dir_ = (u8)(Fec2CodeDir::kVertical);
+            vmgr.fec_pack_->fec_encode_pos_ = (u8)v_pos;
+            goto v_fec_encode_exit_pos_;
+        }
+        pack_mem_pool_.FreeTranBuf((u8*)(vmgr.fec_pack_));
+        vmgr.fec_pack_  = NULL;
+        vmgr.tran_addr_ = NULL;
         goto v_first_fec_encode_pos_;
     }
 
@@ -1088,7 +1145,16 @@ uh_first_fec_encode_pos_:
     }
 
     if (h_pos == h_pos_start) {
-        // Start of a new matrix block for this diagonal: reinitialize.
+        if (data_size <= (u32)(mgr.tran_addr_->stream_key_)) {
+            memcpy(mgr.fec_pack_->fec_code_, data, data_size);
+            mgr.fec_pack_->code_len_       = (u16)data_size;
+            mgr.fec_pack_->code_book_id_   = encode_.encode_matrix_.code_book_id_;
+            mgr.fec_pack_->encode_bit_map_ = (u8)(0x01 << h_pos);
+            mgr.fec_pack_->pack_sn_        = encode_.encode_matrix_.start_pack_sn_;
+            mgr.fec_pack_->fec_encode_dir_ = (u8)(Fec2CodeDir::kUpHill);
+            mgr.fec_pack_->fec_encode_pos_ = (u8)uh_idx;
+            goto uh_fec_encode_exit_pos_;
+        }
         pack_mem_pool_.FreeTranBuf((u8*)(mgr.fec_pack_));
         mgr.fec_pack_  = NULL;
         mgr.tran_addr_ = NULL;
@@ -1165,6 +1231,16 @@ dh_first_fec_encode_pos_:
     }
 
     if (h_pos == h_pos_start) {
+        if (data_size <= (u32)(mgr.tran_addr_->stream_key_)) {
+            memcpy(mgr.fec_pack_->fec_code_, data, data_size);
+            mgr.fec_pack_->code_len_       = (u16)data_size;
+            mgr.fec_pack_->code_book_id_   = encode_.encode_matrix_.code_book_id_;
+            mgr.fec_pack_->encode_bit_map_ = (u8)(0x01 << h_pos);
+            mgr.fec_pack_->pack_sn_        = encode_.encode_matrix_.start_pack_sn_;
+            mgr.fec_pack_->fec_encode_dir_ = (u8)(Fec2CodeDir::kDownHill);
+            mgr.fec_pack_->fec_encode_pos_ = (u8)dh_idx;
+            goto dh_fec_encode_exit_pos_;
+        }
         pack_mem_pool_.FreeTranBuf((u8*)(mgr.fec_pack_));
         mgr.fec_pack_  = NULL;
         mgr.tran_addr_ = NULL;
@@ -1235,29 +1311,14 @@ void GtpFec2::CachedFecEncodePack(Fec2CodePackMgr *fec_code_mgr, Fec2CodePack *f
         pack_mem_pool_.FreeTranBuf((u8*)(fec_code_mgr->fec_pack_));
     }
 
-    // TODO(Albert.Feng) :: don't malloc new mem, can use the fec_code_pack.
-    GtpAddr *tran_addr = NULL;
+    // Zero-copy: bump the refcount on the incoming TranBuf so PackPostHandler's
+    // FreeTranBuf only decrements to 1, not 0. The actual free happens when the
+    // decode matrix is cleared (via Fec2EnDeCodeMatrix::Clear → FreeTranBuf).
+    // GtpAddr sits at fec_code_pack - TP_ADDR_RSV_SIZE within the same TranBuf block.
+    pack_mem_pool_.TranBufUseRefAddOne((u8*)fec_code_pack);
 
-    u8 *new_buf  = NULL;
-    u32 mem_size = 0;
-    u32 mem_spec = 0;
-
-    mem_spec = GtpPackSizeToMemSpec(fec_code_pack->pack_size_);
-    new_buf  = pack_mem_pool_.MallocTranBuf(NULL, 0, &mem_size, (void**)(&tran_addr), (BufSizeType)mem_spec);
-    if (NULL == new_buf) {
-        const string &err_info = pack_mem_pool_.Error();
-        GtpLog(write_log_cb_, kGtpFecMd, kGtpLogLevelError, "Call MallocTranBuf() failed(%s).\r\n", err_info.c_str());
-
-        const string &stat_info = pack_mem_pool_.TranMemPoolStatInfo();
-        GtpLog(write_log_cb_, kGtpArqMd, kGtpLogLevelWarning, "%s\r\n", stat_info.c_str());
-
-        return;
-    }
-
-    memcpy(new_buf, fec_code_pack, (u32)(fec_code_pack->pack_size_));
-
-    fec_code_mgr->fec_pack_  = (Fec2CodePack*)new_buf;
-    fec_code_mgr->tran_addr_ = tran_addr;
+    fec_code_mgr->fec_pack_  = fec_code_pack;
+    fec_code_mgr->tran_addr_ = (GtpAddr*)((u8*)fec_code_pack - TP_ADDR_RSV_SIZE);
 
     return;
 }

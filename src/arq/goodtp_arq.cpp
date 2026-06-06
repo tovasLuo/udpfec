@@ -29,7 +29,7 @@ using namespace std;
         /*pop head node*/ \
         (list).head_ = (list).head_->nxt_node_;\
         if (NULL != (list).head_) {\
-            (list).head_->pre_node_ = (list).head_;\
+            (list).head_->pre_node_ = NULL;\
         } else {\
             (list).tail_ = NULL;\
         }\
