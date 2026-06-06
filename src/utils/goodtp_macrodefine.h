@@ -229,7 +229,8 @@
 
 #define MIN_RTT_EXIST_TM_SZ_US  (35000)
 
-#define MIN_ENHANCE_BOOST_PPS   (200)
+// MIN_ENHANCE_BOOST_PPS removed: the PPS gate was suppressing boost even under packet loss.
+// boost_switch_ / max_boost_times_ (driven by LinkQualityCallback) is the correct control.
 
 // new fec
 #define MAX_FEC2_MODE_BOOK_ID    (6)

@@ -146,14 +146,14 @@ u32 GtpArq::PacketEntryList(GtpPacket *pack, GtpAddr *tran_addr, const u32 &firs
     pack_mem_pool_.TranBufUseRefAddOne((u8*)pack);
 
     if ((GTP_OFF == boost_switch_) || (0 == max_boost_times_)) {
-        // good network.
+        // good network: boost is controlled by LinkQualityCallback, no need to clone.
         return GTP_OK;
     }
 
-    if (MIN_ENHANCE_BOOST_PPS < pb_dt_->send_stat_.data_pack_pps_) {
-        return GTP_OK;
-    }
-
+    // When the network is bad (boost_switch_=ON), clone regardless of PPS.
+    // The old MIN_ENHANCE_BOOST_PPS(200) gate was redundant: it disabled boost for any
+    // session with pps > 200 (typical for 60fps games), even while the network was lossy.
+    // Boost node lifetime is one RTT; in-flight node count stays well within the pool limit.
     CloneBoostNode(node, ts_us);
 
     return GTP_OK;
