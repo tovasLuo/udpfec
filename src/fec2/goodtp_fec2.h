@@ -104,6 +104,12 @@ PRIVATE:
                            Fec2CodePackMgr &fec_code_mgr, const Fec2EnDeCodeMatrix &decode_matrix);
     u32  RestoreDataByVDir(const goodtp_pos &v_start_pos, const goodtp_pos &res_pos, const u8 &h_size,
                       const u8 &v_size, Fec2CodePackMgr &fec_code_mgr, const Fec2EnDeCodeMatrix &decode_matrix);
+    u32  RestoreDataByUHDir(const goodtp_pos &uh_start_pos, const goodtp_pos &res_pos, const u8 &h_size,
+                       const encode_pos &uh_encode_pos, Fec2CodePackMgr &fec_code_mgr,
+                       const Fec2EnDeCodeMatrix &decode_matrix);
+    u32  RestoreDataByDHDir(const goodtp_pos &dh_start_pos, const goodtp_pos &res_pos, const u8 &h_size,
+                       const encode_pos &dh_encode_pos, Fec2CodePackMgr &fec_code_mgr,
+                       const Fec2EnDeCodeMatrix &decode_matrix);
 
     u32  ReAllocateEncodeMem(const u32 &new_size, Fec2CodePackMgr &fec_code_mgr);
     void TryRecoveryPackByFecPack(const encode_pos &fec_encode_pos, const Fec2CodeDir &fec_encode_dir,
@@ -112,10 +118,17 @@ PRIVATE:
                                    const Fec2TryRestoreType &restored_type);
     void ClearReceiveUnUsedResource(const goodtp_pos &current_pos_in_cache);
 
+    void UphillEncode(const encode_pos &h_pos, const encode_pos &v_pos, u8 *data, const u32 &data_size);
+    void DownhillEncode(const encode_pos &h_pos, const encode_pos &v_pos, u8 *data, const u32 &data_size);
+
     goodtp_pos CalcRestorePosByHDir(const goodtp_pos &start_cache_pos, const encode_pos &h_pos,
                                     Fec2EnDeCodeMatrix &decode_matrix);
     goodtp_pos CalcRestorePosByVDir(const goodtp_pos &start_cache_pos, const encode_pos &v_pos,
                                     Fec2EnDeCodeMatrix &decode_matrix);
+    goodtp_pos CalcRestorePosByUHDir(const goodtp_pos &start_cache_pos, const encode_pos &uh_pos,
+                                     Fec2EnDeCodeMatrix &decode_matrix);
+    goodtp_pos CalcRestorePosByDHDir(const goodtp_pos &start_cache_pos, const encode_pos &dh_pos,
+                                     Fec2EnDeCodeMatrix &decode_matrix);
 
     u32  CalcRecvMatrixIdByPackSn(const u32 &pack_sn);
     void ClearNotBelongMatrixPack(const Fec2EnDeCodeMatrix &decode_matrix);

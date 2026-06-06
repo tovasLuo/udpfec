@@ -890,11 +890,11 @@ block_encode_start_pos_:
     }
 
     if (GTP_YES == encode_.encode_matrix_.uh_flag_) {
-        return GTP_OK;
+        UphillEncode(h_pos, v_pos, (u8*)pack, (u32)(pack->pack_size_));
     }
 
     if (GTP_YES == encode_.encode_matrix_.dh_flag_) {
-        return GTP_OK;
+        DownhillEncode(h_pos, v_pos, (u8*)pack, (u32)(pack->pack_size_));
     }
 
     return GTP_OK;
@@ -1039,6 +1039,160 @@ v_fec_encode_exit_pos_:
     }
 
     return;
+}
+
+void GtpFec2::UphillEncode(const encode_pos &h_pos, const encode_pos &v_pos, u8 *data, const u32 &data_size) {
+    // UH diagonal: h_pos + v_pos = sum = uh_idx + 1.
+    // Skip single-element diagonals (sum == 0 or sum == 2*h_size-2).
+    int uh_sum   = (int)h_pos + (int)v_pos;
+    int uh_h_sz  = (int)(encode_.encode_matrix_.h_size_);
+
+    if (uh_sum < 1 || uh_sum > (2 * uh_h_sz - 3)) {
+        return;
+    }
+
+    encode_pos uh_idx     = (encode_pos)(uh_sum - 1);
+    encode_pos h_pos_start = (encode_pos)((uh_sum > uh_h_sz - 1) ? (uh_sum - uh_h_sz + 1) : 0);
+
+    u32 com_var  = 0;
+    u32 mem_spec = 0;
+    u8 *new_mem  = NULL;
+    GtpAddr *tran_addr = NULL;
+
+    Fec2CodePackMgr &mgr = encode_.encode_matrix_.uh_fec_code_[uh_idx];
+
+    if (NULL == mgr.fec_pack_) {
+uh_first_fec_encode_pos_:
+        mem_spec = GtpPackSizeToMemSpec(data_size);
+        new_mem  = pack_mem_pool_.MallocTranBuf(NULL, 0, &com_var, (void**)(&tran_addr), (BufSizeType)mem_spec);
+        if (NULL == new_mem) {
+            const string err = pack_mem_pool_.Error();
+            GtpLog(write_log_cb_, kGtpFecMd, kGtpLogLevelError, "Call MallocTranBuf() failed(%s)\r\n", err.c_str());
+            return;
+        }
+
+        mgr.fec_pack_  = (Fec2CodePack*)(new_mem - sizeof(Fec2CodePack));
+        mgr.tran_addr_ = tran_addr;
+
+        memcpy(mgr.fec_pack_->fec_code_, data, data_size);
+
+        mgr.fec_pack_->code_len_       = (u16)data_size;
+        mgr.fec_pack_->code_book_id_   = encode_.encode_matrix_.code_book_id_;
+        mgr.fec_pack_->encode_bit_map_ = (u8)(0x01 << h_pos);
+        mgr.fec_pack_->pack_sn_        = encode_.encode_matrix_.start_pack_sn_;
+        mgr.fec_pack_->fec_encode_dir_ = (u8)(Fec2CodeDir::kUpHill);
+        mgr.fec_pack_->fec_encode_pos_ = (u8)uh_idx;
+        mgr.tran_addr_->stream_key_    = (u64)com_var;
+
+        goto uh_fec_encode_exit_pos_;
+    }
+
+    if (h_pos == h_pos_start) {
+        // Start of a new matrix block for this diagonal: reinitialize.
+        pack_mem_pool_.FreeTranBuf((u8*)(mgr.fec_pack_));
+        mgr.fec_pack_  = NULL;
+        mgr.tran_addr_ = NULL;
+        goto uh_first_fec_encode_pos_;
+    }
+
+    if (data_size > ((u32)(mgr.tran_addr_->stream_key_))) {
+        com_var = ReAllocateEncodeMem(data_size, mgr);
+        if (GTP_OK != com_var) {
+            GtpLog(write_log_cb_, kGtpFecMd, kGtpLogLevelError,
+                   "Call ReAllocateEncodeMem failed(0x%08x) when uphill encode.\r\n", com_var);
+            return;
+        }
+    }
+
+    mgr.fec_pack_->encode_bit_map_ |= (u8)(0x01 << h_pos);
+
+    XorEncode(data, data_size, &(mgr.fec_pack_->fec_code_[0]),
+              (u32)(mgr.fec_pack_->code_len_), &com_var);
+
+    mgr.fec_pack_->code_len_ = (u16)com_var;
+
+uh_fec_encode_exit_pos_:
+    // End of diagonal: next step (+1 row, -1 col) would leave the matrix.
+    if (((encode_pos)(encode_.encode_matrix_.h_size_ - 1) == h_pos) || (0 == v_pos)) {
+        SendFecCodePacket(mgr);
+    }
+}
+
+void GtpFec2::DownhillEncode(const encode_pos &h_pos, const encode_pos &v_pos, u8 *data, const u32 &data_size) {
+    // DH diagonal: h_pos - v_pos = diff = dh_idx - (h_size-2).
+    // Skip single-element diagonals (|diff| == h_size-1).
+    int dh_diff  = (int)h_pos - (int)v_pos;
+    int dh_h_sz  = (int)(encode_.encode_matrix_.h_size_);
+
+    if (dh_diff <= -(dh_h_sz - 1) || dh_diff >= (dh_h_sz - 1)) {
+        return;
+    }
+
+    encode_pos dh_idx     = (encode_pos)(dh_diff + dh_h_sz - 2);
+    encode_pos h_pos_start = (encode_pos)((dh_diff > 0) ? dh_diff : 0);
+
+    u32 com_var  = 0;
+    u32 mem_spec = 0;
+    u8 *new_mem  = NULL;
+    GtpAddr *tran_addr = NULL;
+
+    Fec2CodePackMgr &mgr = encode_.encode_matrix_.dh_fec_code_[dh_idx];
+
+    if (NULL == mgr.fec_pack_) {
+dh_first_fec_encode_pos_:
+        mem_spec = GtpPackSizeToMemSpec(data_size);
+        new_mem  = pack_mem_pool_.MallocTranBuf(NULL, 0, &com_var, (void**)(&tran_addr), (BufSizeType)mem_spec);
+        if (NULL == new_mem) {
+            const string err = pack_mem_pool_.Error();
+            GtpLog(write_log_cb_, kGtpFecMd, kGtpLogLevelError, "Call MallocTranBuf() failed(%s)\r\n", err.c_str());
+            return;
+        }
+
+        mgr.fec_pack_  = (Fec2CodePack*)(new_mem - sizeof(Fec2CodePack));
+        mgr.tran_addr_ = tran_addr;
+
+        memcpy(mgr.fec_pack_->fec_code_, data, data_size);
+
+        mgr.fec_pack_->code_len_       = (u16)data_size;
+        mgr.fec_pack_->code_book_id_   = encode_.encode_matrix_.code_book_id_;
+        mgr.fec_pack_->encode_bit_map_ = (u8)(0x01 << h_pos);
+        mgr.fec_pack_->pack_sn_        = encode_.encode_matrix_.start_pack_sn_;
+        mgr.fec_pack_->fec_encode_dir_ = (u8)(Fec2CodeDir::kDownHill);
+        mgr.fec_pack_->fec_encode_pos_ = (u8)dh_idx;
+        mgr.tran_addr_->stream_key_    = (u64)com_var;
+
+        goto dh_fec_encode_exit_pos_;
+    }
+
+    if (h_pos == h_pos_start) {
+        pack_mem_pool_.FreeTranBuf((u8*)(mgr.fec_pack_));
+        mgr.fec_pack_  = NULL;
+        mgr.tran_addr_ = NULL;
+        goto dh_first_fec_encode_pos_;
+    }
+
+    if (data_size > ((u32)(mgr.tran_addr_->stream_key_))) {
+        com_var = ReAllocateEncodeMem(data_size, mgr);
+        if (GTP_OK != com_var) {
+            GtpLog(write_log_cb_, kGtpFecMd, kGtpLogLevelError,
+                   "Call ReAllocateEncodeMem failed(0x%08x) when downhill encode.\r\n", com_var);
+            return;
+        }
+    }
+
+    mgr.fec_pack_->encode_bit_map_ |= (u8)(0x01 << h_pos);
+
+    XorEncode(data, data_size, &(mgr.fec_pack_->fec_code_[0]),
+              (u32)(mgr.fec_pack_->code_len_), &com_var);
+
+    mgr.fec_pack_->code_len_ = (u16)com_var;
+
+dh_fec_encode_exit_pos_:
+    // End of diagonal: next step (+1 row, +1 col) would leave the matrix.
+    if (((encode_pos)(encode_.encode_matrix_.h_size_ - 1) == h_pos) ||
+        ((encode_pos)(encode_.encode_matrix_.v_size_ - 1) == v_pos)) {
+        SendFecCodePacket(mgr);
+    }
 }
 
 void GtpFec2::SendFecCodePacket(Fec2CodePackMgr &fec_code_mgr) {
@@ -1260,6 +1414,155 @@ v_restore_next_pos_:
     return GTP_OK;
 }
 
+u32 GtpFec2::RestoreDataByUHDir(const goodtp_pos &uh_start_pos, const goodtp_pos &res_pos, const u8 &h_size,
+                                 const encode_pos &uh_encode_pos, Fec2CodePackMgr &fec_code_mgr,
+                                 const Fec2EnDeCodeMatrix &decode_matrix) {
+    u8  sum        = uh_encode_pos + 1;
+    u8  h_pos_start = (sum > h_size - 1) ? (u8)(sum - h_size + 1) : (u8)0;
+    u8  h_pos_end   = (sum < h_size) ? sum : (u8)(h_size - 1);
+    u8  diag_count  = h_pos_end - h_pos_start + 1;
+
+    goodtp_pos move_pos = uh_start_pos;
+    u8  loop     = 0;
+    u8  bitmap   = (u8)(0x01 << h_pos_start);
+    u32 coded_sz = 0;
+
+    while (diag_count > loop) {
+        if (0x00 == (fec_code_mgr.fec_pack_->encode_bit_map_ & bitmap)) {
+            goto uh_restore_next_pos_;
+        }
+
+        if (NULL == decode_.fec_buf_.pack_cache_[move_pos]) {
+            goto uh_restore_next_pos_;
+        }
+
+        XorEncode(&(decode_.fec_buf_.pack_cache_[move_pos]->payload_[0]),
+                  (u32)(decode_.fec_buf_.pack_cache_[move_pos]->payload_len_),
+                  &(fec_code_mgr.fec_pack_->fec_code_[0]),
+                  (u32)(fec_code_mgr.fec_pack_->code_len_), &coded_sz);
+
+        if (coded_sz != (u32)(fec_code_mgr.fec_pack_->code_len_)) {
+            GtpLog(write_log_cb_, kGtpFecMd, kGtpLogLevelNotice, "fec code size changed when uphill decoding"
+                   "(%u != %u uh_id=%u block_size=%u).\r\n",
+                   (u32)(fec_code_mgr.fec_pack_->code_len_), coded_sz,
+                   (u32)uh_encode_pos, (u32)(decode_matrix.matrix_size_));
+        }
+
+        fec_code_mgr.fec_pack_->code_len_ = (u16)coded_sz;
+
+uh_restore_next_pos_:
+        loop     += 1;
+        move_pos  = (move_pos + h_size - 1) & ((goodtp_pos)FEC2_CACHE_CAPACITY_MASK);
+        bitmap  <<= 1;
+    }
+
+    GtpPacket *pack = (GtpPacket*)(&(fec_code_mgr.fec_pack_->fec_code_[0]));
+
+    if (res_pos != CalcPosInPackCache(pack->pack_sn_)) {
+        GtpLog(write_log_cb_, kGtpFecMd, kGtpLogLevelError,
+               "fec restore abnormal by uphill(pack_sn=%u res_pos=%u calc_res_pos=%u).\r\n",
+               pack->pack_sn_, (u32)res_pos, (u32)CalcPosInPackCache(pack->pack_sn_));
+
+        pack_mem_pool_.FreeTranBuf((u8*)(fec_code_mgr.fec_pack_));
+        fec_code_mgr.fec_pack_  = NULL;
+        fec_code_mgr.tran_addr_ = NULL;
+
+        RETURN_ERR(kGtpFecMd, kFecRestoreFailedErr);
+    }
+
+    memcpy(fec_code_mgr.tran_addr_, &(pb_dt_->tran_addr_), sizeof(GtpAddr));
+
+    coded_sz = restorePackRecv_cb_(pb_dt_->session_, pb_dt_->gtp_hdl_, pack, fec_code_mgr.tran_addr_,
+                  &(decode_.fec_res_sucess_sum_), &(decode_.fec_res_failed_sum_), &(decode_.fec_res_repeat_sum_));
+    if (GTP_OK != coded_sz) {
+        GtpLog(write_log_cb_, kGtpFecMd, kGtpLogLevelError,
+               "call restorePackRecv_cb_() failed(0x%08x) in uphill.\r\n", coded_sz);
+    }
+
+    decode_.fec_buf_.PushPack(pack, GTP_NO);
+    pack_mem_pool_.FreeTranBuf((u8*)pack);
+
+    fec_code_mgr.fec_pack_  = NULL;
+    fec_code_mgr.tran_addr_ = NULL;
+
+    return GTP_OK;
+}
+
+u32 GtpFec2::RestoreDataByDHDir(const goodtp_pos &dh_start_pos, const goodtp_pos &res_pos, const u8 &h_size,
+                                 const encode_pos &dh_encode_pos, Fec2CodePackMgr &fec_code_mgr,
+                                 const Fec2EnDeCodeMatrix &decode_matrix) {
+    int dh_diff    = (int)dh_encode_pos - (int)(h_size - 2);
+    u8  h_pos_start = (dh_diff > 0) ? (u8)dh_diff : (u8)0;
+    u8  h_pos_end   = ((int)(h_size - 1) + dh_diff < (int)(h_size - 1))
+                      ? (u8)((int)(h_size - 1) + dh_diff) : (u8)(h_size - 1);
+    u8  diag_count  = h_pos_end - h_pos_start + 1;
+
+    goodtp_pos move_pos = dh_start_pos;
+    u8  loop     = 0;
+    u8  bitmap   = (u8)(0x01 << h_pos_start);
+    u32 coded_sz = 0;
+
+    while (diag_count > loop) {
+        if (0x00 == (fec_code_mgr.fec_pack_->encode_bit_map_ & bitmap)) {
+            goto dh_restore_next_pos_;
+        }
+
+        if (NULL == decode_.fec_buf_.pack_cache_[move_pos]) {
+            goto dh_restore_next_pos_;
+        }
+
+        XorEncode(&(decode_.fec_buf_.pack_cache_[move_pos]->payload_[0]),
+                  (u32)(decode_.fec_buf_.pack_cache_[move_pos]->payload_len_),
+                  &(fec_code_mgr.fec_pack_->fec_code_[0]),
+                  (u32)(fec_code_mgr.fec_pack_->code_len_), &coded_sz);
+
+        if (coded_sz != (u32)(fec_code_mgr.fec_pack_->code_len_)) {
+            GtpLog(write_log_cb_, kGtpFecMd, kGtpLogLevelNotice, "fec code size changed when downhill decoding"
+                   "(%u != %u dh_id=%u block_size=%u).\r\n",
+                   (u32)(fec_code_mgr.fec_pack_->code_len_), coded_sz,
+                   (u32)dh_encode_pos, (u32)(decode_matrix.matrix_size_));
+        }
+
+        fec_code_mgr.fec_pack_->code_len_ = (u16)coded_sz;
+
+dh_restore_next_pos_:
+        loop     += 1;
+        move_pos  = (move_pos + h_size + 1) & ((goodtp_pos)FEC2_CACHE_CAPACITY_MASK);
+        bitmap  <<= 1;
+    }
+
+    GtpPacket *pack = (GtpPacket*)(&(fec_code_mgr.fec_pack_->fec_code_[0]));
+
+    if (res_pos != CalcPosInPackCache(pack->pack_sn_)) {
+        GtpLog(write_log_cb_, kGtpFecMd, kGtpLogLevelError,
+               "fec restore abnormal by downhill(pack_sn=%u res_pos=%u calc_res_pos=%u).\r\n",
+               pack->pack_sn_, (u32)res_pos, (u32)CalcPosInPackCache(pack->pack_sn_));
+
+        pack_mem_pool_.FreeTranBuf((u8*)(fec_code_mgr.fec_pack_));
+        fec_code_mgr.fec_pack_  = NULL;
+        fec_code_mgr.tran_addr_ = NULL;
+
+        RETURN_ERR(kGtpFecMd, kFecRestoreFailedErr);
+    }
+
+    memcpy(fec_code_mgr.tran_addr_, &(pb_dt_->tran_addr_), sizeof(GtpAddr));
+
+    coded_sz = restorePackRecv_cb_(pb_dt_->session_, pb_dt_->gtp_hdl_, pack, fec_code_mgr.tran_addr_,
+                  &(decode_.fec_res_sucess_sum_), &(decode_.fec_res_failed_sum_), &(decode_.fec_res_repeat_sum_));
+    if (GTP_OK != coded_sz) {
+        GtpLog(write_log_cb_, kGtpFecMd, kGtpLogLevelError,
+               "call restorePackRecv_cb_() failed(0x%08x) in downhill.\r\n", coded_sz);
+    }
+
+    decode_.fec_buf_.PushPack(pack, GTP_NO);
+    pack_mem_pool_.FreeTranBuf((u8*)pack);
+
+    fec_code_mgr.fec_pack_  = NULL;
+    fec_code_mgr.tran_addr_ = NULL;
+
+    return GTP_OK;
+}
+
 u32 GtpFec2::ReAllocateEncodeMem(const u32 &new_size, Fec2CodePackMgr &fec_code_mgr) {
     u32 mem_spec = 0;
     u32 mem_size = 0;
@@ -1405,6 +1708,31 @@ void GtpFec2::TryRecoveryPackByFecPack(const encode_pos &fec_encode_pos, const F
                    decode_matrix.start_pack_sn_);
             break;
         }
+
+        {
+        u8 h_size      = (u8)(decode_matrix.h_size_);
+        u8 uh_sum      = fec_encode_pos + 1;
+        u8 h_pos_start = (uh_sum > h_size - 1) ? (u8)(uh_sum - h_size + 1) : (u8)0;
+        u8 v_pos_start = uh_sum - h_pos_start;
+
+        goodtp_pos uh_start_pos = (start_pos + (goodtp_pos)h_pos_start * h_size
+                                   + (goodtp_pos)v_pos_start)
+                                  & ((goodtp_pos)FEC2_CACHE_CAPACITY_MASK);
+
+        res_pos = CalcRestorePosByUHDir(uh_start_pos, fec_encode_pos, decode_matrix);
+        if (MAX_FEC2_CACHE_CAPACITY <= res_pos) {
+            break;
+        }
+
+        nret = RestoreDataByUHDir(uh_start_pos, res_pos, h_size, fec_encode_pos,
+                                   decode_matrix.uh_fec_code_[fec_encode_pos], decode_matrix);
+        if (GTP_OK != nret) {
+            GtpLog(write_log_cb_, kGtpFecMd, kGtpLogLevelError,
+                   "Call RestoreDataByUHDir() failed(0x%08x).\r\n", nret);
+        }
+
+        TryRecoveryPackByDataPack(res_pos, decode_matrix, Fec2TryRestoreType::kFec2RestoreUpHill);
+        }
         break;
     }
 
@@ -1414,6 +1742,31 @@ void GtpFec2::TryRecoveryPackByFecPack(const encode_pos &fec_encode_pos, const F
                    "block_start_pos=%u block_start_sn=%u).\r\n", (u32)fec_encode_pos, start_pos,
                    decode_matrix.start_pack_sn_);
             break;
+        }
+
+        {
+        u8 h_size      = (u8)(decode_matrix.h_size_);
+        int dh_diff    = (int)fec_encode_pos - (int)(h_size - 2);
+        u8 h_pos_start = (dh_diff > 0) ? (u8)dh_diff  : (u8)0;
+        u8 v_pos_start = (dh_diff < 0) ? (u8)(-dh_diff) : (u8)0;
+
+        goodtp_pos dh_start_pos = (start_pos + (goodtp_pos)h_pos_start * h_size
+                                   + (goodtp_pos)v_pos_start)
+                                  & ((goodtp_pos)FEC2_CACHE_CAPACITY_MASK);
+
+        res_pos = CalcRestorePosByDHDir(dh_start_pos, fec_encode_pos, decode_matrix);
+        if (MAX_FEC2_CACHE_CAPACITY <= res_pos) {
+            break;
+        }
+
+        nret = RestoreDataByDHDir(dh_start_pos, res_pos, h_size, fec_encode_pos,
+                                   decode_matrix.dh_fec_code_[fec_encode_pos], decode_matrix);
+        if (GTP_OK != nret) {
+            GtpLog(write_log_cb_, kGtpFecMd, kGtpLogLevelError,
+                   "Call RestoreDataByDHDir() failed(0x%08x).\r\n", nret);
+        }
+
+        TryRecoveryPackByDataPack(res_pos, decode_matrix, Fec2TryRestoreType::kFec2RestoreDownHill);
         }
         break;
     }
@@ -1545,7 +1898,38 @@ try_restore_uh_pack_pos_:
     }
 
     if (GTP_YES == decode_matrix.uh_flag_) {
-        goto try_restore_dh_pack_pos_;
+        {
+        int uh_sum_int = (int)h_pos + (int)v_pos;
+        int uh_max     = 2 * (int)(decode_matrix.h_size_) - 3;
+
+        if (uh_sum_int >= 1 && uh_sum_int <= uh_max) {
+            encode_pos uh_idx = (encode_pos)(uh_sum_int - 1);
+
+            if (NULL != decode_matrix.uh_fec_code_[uh_idx].fec_pack_) {
+                u8 h_size      = (u8)(decode_matrix.h_size_);
+                u8 uh_sum      = (u8)uh_sum_int;
+                u8 h_pos_start = (uh_sum > h_size - 1) ? (u8)(uh_sum - h_size + 1) : (u8)0;
+                u8 v_pos_start = uh_sum - h_pos_start;
+
+                goodtp_pos uh_start = (decode_matrix.start_pos_
+                                       + (goodtp_pos)h_pos_start * h_size
+                                       + (goodtp_pos)v_pos_start)
+                                      & ((goodtp_pos)FEC2_CACHE_CAPACITY_MASK);
+
+                res_pos = CalcRestorePosByUHDir(uh_start, uh_idx, decode_matrix);
+                if (MAX_FEC2_CACHE_CAPACITY > res_pos) {
+                    nret = RestoreDataByUHDir(uh_start, res_pos, h_size, uh_idx,
+                                              decode_matrix.uh_fec_code_[uh_idx], decode_matrix);
+                    if (GTP_OK != nret) {
+                        GtpLog(write_log_cb_, kGtpFecMd, kGtpLogLevelError,
+                               "Call RestoreDataByUHDir() failed(0x%08x) by data.\r\n", nret);
+                    }
+                    TryRecoveryPackByDataPack(res_pos, decode_matrix,
+                                              Fec2TryRestoreType::kFec2RestoreUpHill);
+                }
+            }
+        }
+        }
     }
 
 try_restore_dh_pack_pos_:
@@ -1554,7 +1938,37 @@ try_restore_dh_pack_pos_:
     }
 
     if (GTP_YES == decode_matrix.dh_flag_) {
-        return;
+        {
+        int dh_diff_int = (int)h_pos - (int)v_pos;
+        int dh_h_sz     = (int)(decode_matrix.h_size_);
+
+        if (dh_diff_int > -(dh_h_sz - 1) && dh_diff_int < (dh_h_sz - 1)) {
+            encode_pos dh_idx = (encode_pos)(dh_diff_int + dh_h_sz - 2);
+
+            if (NULL != decode_matrix.dh_fec_code_[dh_idx].fec_pack_) {
+                u8 h_size      = (u8)(decode_matrix.h_size_);
+                u8 h_pos_start = (dh_diff_int > 0) ? (u8)dh_diff_int  : (u8)0;
+                u8 v_pos_start = (dh_diff_int < 0) ? (u8)(-dh_diff_int) : (u8)0;
+
+                goodtp_pos dh_start = (decode_matrix.start_pos_
+                                       + (goodtp_pos)h_pos_start * h_size
+                                       + (goodtp_pos)v_pos_start)
+                                      & ((goodtp_pos)FEC2_CACHE_CAPACITY_MASK);
+
+                res_pos = CalcRestorePosByDHDir(dh_start, dh_idx, decode_matrix);
+                if (MAX_FEC2_CACHE_CAPACITY > res_pos) {
+                    nret = RestoreDataByDHDir(dh_start, res_pos, h_size, dh_idx,
+                                              decode_matrix.dh_fec_code_[dh_idx], decode_matrix);
+                    if (GTP_OK != nret) {
+                        GtpLog(write_log_cb_, kGtpFecMd, kGtpLogLevelError,
+                               "Call RestoreDataByDHDir() failed(0x%08x) by data.\r\n", nret);
+                    }
+                    TryRecoveryPackByDataPack(res_pos, decode_matrix,
+                                              Fec2TryRestoreType::kFec2RestoreDownHill);
+                }
+            }
+        }
+        }
     }
 
 try_restore_data_exit_pos_:
@@ -1788,7 +2202,281 @@ v_calc_restore_pos_check_pos_:
     return res_pos;
 }
 
+goodtp_pos GtpFec2::CalcRestorePosByUHDir(const goodtp_pos &start_cache_pos, const encode_pos &uh_pos,
+                                           Fec2EnDeCodeMatrix &decode_matrix) {
+    u8  sum        = uh_pos + 1;
+    u8  h_size     = (u8)(decode_matrix.h_size_);
+    u8  h_pos_start = (sum > h_size - 1) ? (u8)(sum - h_size + 1) : (u8)0;
+    u8  h_pos_end   = (sum < h_size) ? sum : (u8)(h_size - 1);
+    u8  diag_count  = h_pos_end - h_pos_start + 1;
+
+    goodtp_pos res_pos  = 0xFFFF;
+    goodtp_pos move_pos = start_cache_pos;
+    u8  loop      = 0;
+    u8  bitmap    = (u8)(0x01 << h_pos_start);
+    u8  unrcv_num = 0;
+    u8  rcved_num = 0;
+    u32 start_sn  = decode_matrix.start_pack_sn_;
+    u32 end_sn    = decode_matrix.start_pack_sn_ + decode_matrix.matrix_size_;
+
+    GtpPacket *pack = NULL;
+
+    if (start_sn <= end_sn) {
+        while (diag_count > loop) {
+            if (NULL == decode_.fec_buf_.pack_cache_[move_pos]) {
+uh_calc_restore_null_pos_:
+                if (0x00 != (decode_matrix.uh_fec_code_[uh_pos].fec_pack_->encode_bit_map_ & bitmap)) {
+                    res_pos    = move_pos;
+                    unrcv_num += 1;
+                }
+                goto uh_calc_restore_loop_next_pos_;
+            }
+
+            pack = (GtpPacket*)(decode_.fec_buf_.pack_cache_[move_pos]->payload_);
+
+            if ((start_sn > pack->pack_sn_) || (end_sn <= pack->pack_sn_)) {
+                decode_.fec_buf_.PopPack(move_pos);
+                goto uh_calc_restore_null_pos_;
+            }
+
+            if (0x00 != (decode_matrix.uh_fec_code_[uh_pos].fec_pack_->encode_bit_map_ & bitmap)) {
+                rcved_num += 1;
+                goto uh_calc_restore_loop_next_pos_;
+            }
+
+            GtpLog(write_log_cb_, kGtpFecMd, kGtpLogLevelNotice, "encode/decode mismatch for uphill "
+                   "(bit_map=0x%02x start_sn=%u cur_sn=%u uh_id=%u block_size=%u).\r\n",
+                   (u32)(decode_matrix.uh_fec_code_[uh_pos].fec_pack_->encode_bit_map_),
+                   start_sn, pack->pack_sn_, (u32)uh_pos, (u32)(decode_matrix.matrix_size_));
+
+uh_calc_restore_loop_next_pos_:
+            loop     += 1;
+            move_pos  = (move_pos + h_size - 1) & ((goodtp_pos)FEC2_CACHE_CAPACITY_MASK);
+            bitmap  <<= 1;
+        }
+        goto uh_calc_restore_check_pos_;
+    }
+
+    while (diag_count > loop) {
+        if (NULL == decode_.fec_buf_.pack_cache_[move_pos]) {
+uh_calc_restore_null_pos1_:
+            if (0x00 != (decode_matrix.uh_fec_code_[uh_pos].fec_pack_->encode_bit_map_ & bitmap)) {
+                res_pos    = move_pos;
+                unrcv_num += 1;
+            }
+            goto uh_calc_restore_loop_next_pos1_;
+        }
+
+        pack = (GtpPacket*)(decode_.fec_buf_.pack_cache_[move_pos]->payload_);
+
+        if ((start_sn > pack->pack_sn_) && (end_sn <= pack->pack_sn_)) {
+            decode_.fec_buf_.PopPack(move_pos);
+            goto uh_calc_restore_null_pos1_;
+        }
+
+        if (0x00 != (decode_matrix.uh_fec_code_[uh_pos].fec_pack_->encode_bit_map_ & bitmap)) {
+            rcved_num += 1;
+            goto uh_calc_restore_loop_next_pos1_;
+        }
+
+        GtpLog(write_log_cb_, kGtpFecMd, kGtpLogLevelError, "encode/decode mismatch for uphill "
+               "(bit_map=0x%02x start_sn=%u cur_sn=%u uh_id=%u block_size=%u).\r\n",
+               (u32)(decode_matrix.uh_fec_code_[uh_pos].fec_pack_->encode_bit_map_),
+               start_sn, pack->pack_sn_, (u32)uh_pos, (u32)(decode_matrix.matrix_size_));
+
+uh_calc_restore_loop_next_pos1_:
+        loop     += 1;
+        move_pos  = (move_pos + h_size - 1) & ((goodtp_pos)FEC2_CACHE_CAPACITY_MASK);
+        bitmap  <<= 1;
+    }
+
+uh_calc_restore_check_pos_:
+    if ((0 == unrcv_num) || (rcved_num == (u8)(diag_count))) {
+        pack_mem_pool_.FreeTranBuf((u8*)(decode_matrix.uh_fec_code_[uh_pos].fec_pack_));
+        decode_matrix.uh_fec_code_[uh_pos].fec_pack_  = NULL;
+        decode_matrix.uh_fec_code_[uh_pos].tran_addr_ = NULL;
+        return 0xFFFF;
+    }
+
+    if (1 != unrcv_num) {
+        return 0xFFFF;
+    }
+
+    return res_pos;
+}
+
+goodtp_pos GtpFec2::CalcRestorePosByDHDir(const goodtp_pos &start_cache_pos, const encode_pos &dh_pos,
+                                           Fec2EnDeCodeMatrix &decode_matrix) {
+    int dh_diff    = (int)dh_pos - (int)(decode_matrix.h_size_ - 2);
+    u8  h_size     = (u8)(decode_matrix.h_size_);
+    u8  h_pos_start = (dh_diff > 0) ? (u8)dh_diff : (u8)0;
+    u8  h_pos_end   = ((int)(h_size - 1) + dh_diff < (int)(h_size - 1))
+                      ? (u8)((int)(h_size - 1) + dh_diff) : (u8)(h_size - 1);
+    u8  diag_count  = h_pos_end - h_pos_start + 1;
+
+    goodtp_pos res_pos  = 0xFFFF;
+    goodtp_pos move_pos = start_cache_pos;
+    u8  loop      = 0;
+    u8  bitmap    = (u8)(0x01 << h_pos_start);
+    u8  unrcv_num = 0;
+    u8  rcved_num = 0;
+    u32 start_sn  = decode_matrix.start_pack_sn_;
+    u32 end_sn    = decode_matrix.start_pack_sn_ + decode_matrix.matrix_size_;
+
+    GtpPacket *pack = NULL;
+
+    if (start_sn <= end_sn) {
+        while (diag_count > loop) {
+            if (NULL == decode_.fec_buf_.pack_cache_[move_pos]) {
+dh_calc_restore_null_pos_:
+                if (0x00 != (decode_matrix.dh_fec_code_[dh_pos].fec_pack_->encode_bit_map_ & bitmap)) {
+                    res_pos    = move_pos;
+                    unrcv_num += 1;
+                }
+                goto dh_calc_restore_loop_next_pos_;
+            }
+
+            pack = (GtpPacket*)(decode_.fec_buf_.pack_cache_[move_pos]->payload_);
+
+            if ((start_sn > pack->pack_sn_) || (end_sn <= pack->pack_sn_)) {
+                decode_.fec_buf_.PopPack(move_pos);
+                goto dh_calc_restore_null_pos_;
+            }
+
+            if (0x00 != (decode_matrix.dh_fec_code_[dh_pos].fec_pack_->encode_bit_map_ & bitmap)) {
+                rcved_num += 1;
+                goto dh_calc_restore_loop_next_pos_;
+            }
+
+            GtpLog(write_log_cb_, kGtpFecMd, kGtpLogLevelNotice, "encode/decode mismatch for downhill "
+                   "(bit_map=0x%02x start_sn=%u cur_sn=%u dh_id=%u block_size=%u).\r\n",
+                   (u32)(decode_matrix.dh_fec_code_[dh_pos].fec_pack_->encode_bit_map_),
+                   start_sn, pack->pack_sn_, (u32)dh_pos, (u32)(decode_matrix.matrix_size_));
+
+dh_calc_restore_loop_next_pos_:
+            loop     += 1;
+            move_pos  = (move_pos + h_size + 1) & ((goodtp_pos)FEC2_CACHE_CAPACITY_MASK);
+            bitmap  <<= 1;
+        }
+        goto dh_calc_restore_check_pos_;
+    }
+
+    while (diag_count > loop) {
+        if (NULL == decode_.fec_buf_.pack_cache_[move_pos]) {
+dh_calc_restore_null_pos1_:
+            if (0x00 != (decode_matrix.dh_fec_code_[dh_pos].fec_pack_->encode_bit_map_ & bitmap)) {
+                res_pos    = move_pos;
+                unrcv_num += 1;
+            }
+            goto dh_calc_restore_loop_next_pos1_;
+        }
+
+        pack = (GtpPacket*)(decode_.fec_buf_.pack_cache_[move_pos]->payload_);
+
+        if ((start_sn > pack->pack_sn_) && (end_sn <= pack->pack_sn_)) {
+            decode_.fec_buf_.PopPack(move_pos);
+            goto dh_calc_restore_null_pos1_;
+        }
+
+        if (0x00 != (decode_matrix.dh_fec_code_[dh_pos].fec_pack_->encode_bit_map_ & bitmap)) {
+            rcved_num += 1;
+            goto dh_calc_restore_loop_next_pos1_;
+        }
+
+        GtpLog(write_log_cb_, kGtpFecMd, kGtpLogLevelError, "encode/decode mismatch for downhill "
+               "(bit_map=0x%02x start_sn=%u cur_sn=%u dh_id=%u block_size=%u).\r\n",
+               (u32)(decode_matrix.dh_fec_code_[dh_pos].fec_pack_->encode_bit_map_),
+               start_sn, pack->pack_sn_, (u32)dh_pos, (u32)(decode_matrix.matrix_size_));
+
+dh_calc_restore_loop_next_pos1_:
+        loop     += 1;
+        move_pos  = (move_pos + h_size + 1) & ((goodtp_pos)FEC2_CACHE_CAPACITY_MASK);
+        bitmap  <<= 1;
+    }
+
+dh_calc_restore_check_pos_:
+    if ((0 == unrcv_num) || (rcved_num == (u8)(diag_count))) {
+        pack_mem_pool_.FreeTranBuf((u8*)(decode_matrix.dh_fec_code_[dh_pos].fec_pack_));
+        decode_matrix.dh_fec_code_[dh_pos].fec_pack_  = NULL;
+        decode_matrix.dh_fec_code_[dh_pos].tran_addr_ = NULL;
+        return 0xFFFF;
+    }
+
+    if (1 != unrcv_num) {
+        return 0xFFFF;
+    }
+
+    return res_pos;
+}
+
 void GtpFec2::ClearReceiveUnUsedResource(const goodtp_pos &current_pos_in_cache) {
+    // PushPack has already placed the new packet at current_pos_in_cache (possibly overwriting
+    // an old entry). Scan all active decode matrices: if a matrix claims this cache slot but
+    // the new packet's SN falls outside that matrix's SN range, the slot was lapped — the
+    // matrix can never be fully recovered and must be cleared before its stale FEC data
+    // causes a false XOR reconstruction.
+
+    if (NULL == decode_.fec_buf_.pack_cache_[current_pos_in_cache]) {
+        return;
+    }
+
+    GtpPacket *cur_pack = (GtpPacket*)(decode_.fec_buf_.pack_cache_[current_pos_in_cache]->payload_);
+    u32 cur_sn = cur_pack->pack_sn_;
+
+    u16 m_id = 0;
+    while (MAX_RECV_FEC2_MATRIX_NUM > m_id) {
+        Fec2EnDeCodeMatrix &dm = decode_.decode_matrix_[m_id];
+
+        if (GTP_NO == dm.using_flag_) {
+            m_id += 1;
+            continue;
+        }
+
+        // Compute offset of current_pos_in_cache relative to this matrix's start_pos_.
+        // Using modular subtraction avoids branch-heavy range checks.
+        goodtp_pos block_offset = (current_pos_in_cache + MAX_FEC2_CACHE_CAPACITY - dm.start_pos_)
+                                   & ((goodtp_pos)FEC2_CACHE_CAPACITY_MASK);
+
+        if (block_offset >= (goodtp_pos)(dm.matrix_size_)) {
+            // current_pos_in_cache is outside this matrix's cache range.
+            m_id += 1;
+            continue;
+        }
+
+        // current_pos_in_cache is inside this matrix's range.
+        // Check whether the new packet's SN actually belongs to this matrix.
+        u32 matrix_end_sn = dm.start_pack_sn_ + dm.matrix_size_;
+        if (GTP_YES == CheckPackSnInBlock(cur_sn, dm.start_pack_sn_, matrix_end_sn)) {
+            // Same block: the new packet is a legitimate member; nothing is stale.
+            m_id += 1;
+            continue;
+        }
+
+        // The slot was lapped by a newer SN block.  Free the other cache entries that
+        // belong to this stale matrix (skip current_pos_in_cache — that slot now holds
+        // valid new data and must not be freed), then reset the matrix.
+        goodtp_pos clear_pos = dm.start_pos_;
+        u8 steps = 0;
+        while (steps < dm.matrix_size_) {
+            if ((clear_pos != current_pos_in_cache) && (NULL != decode_.fec_buf_.pack_cache_[clear_pos])) {
+                decode_.fec_buf_.PopPack(clear_pos);
+            }
+            steps    += 1;
+            clear_pos = (clear_pos + 1) & ((goodtp_pos)FEC2_CACHE_CAPACITY_MASK);
+        }
+
+        dm.Clear(pack_mem_pool_);   // frees H/V/UH/DH FEC packs, sets using_flag_ = GTP_NO
+
+        #ifdef _SELFDEBUG
+        GtpLog(write_log_cb_, kGtpFecMd, kGtpLogLevelDebug,
+               "ClearReceiveUnUsedResource: cleared stale matrix(m_id=%u start_sn=%u end_sn=%u "
+               "new_sn=%u start_pos=%u cur_pos=%u).\r\n",
+               (u32)m_id, dm.start_pack_sn_, matrix_end_sn, cur_sn,
+               (u32)(dm.start_pos_), (u32)current_pos_in_cache);
+        #endif
+
+        m_id += 1;
+    }
 }
 
 void GtpFec2::ClearNotBelongMatrixPack(const Fec2EnDeCodeMatrix &decode_matrix) {
