@@ -33,3 +33,7 @@ target_link_libraries(echo_client PRIVATE ${COMMON_LIBS})
 # ── FEC 丢包测试 ──
 add_executable(fec_loss_test fec_loss_test.cpp)
 target_link_libraries(fec_loss_test PRIVATE ${COMMON_LIBS})
+
+# ── 全方位专业测试 ──
+add_executable(game_net_test game_net_test.cpp)
+target_link_libraries(game_net_test PRIVATE ${COMMON_LIBS})
