@@ -29,3 +29,7 @@ target_link_libraries(echo_server PRIVATE ${COMMON_LIBS})
 # ── 客户端 ──
 add_executable(echo_client client.cpp)
 target_link_libraries(echo_client PRIVATE ${COMMON_LIBS})
+
+# ── FEC 丢包测试 ──
+add_executable(fec_loss_test fec_loss_test.cpp)
+target_link_libraries(fec_loss_test PRIVATE ${COMMON_LIBS})
