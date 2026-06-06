@@ -332,46 +332,53 @@ boost_alg_row_end_pos_:
 
         #if (1 == ENABLE_FEC)
         #if ((0 == APPLICATION_TYPE) || (1 == APPLICATION_TYPE))
-        // mode,h_flag,v_flag, uphill_flag, downhill_flag, h_power, v_power
-        u32 fec2_ml_book_id1[][4] = {
-            // loss < 2.0%  loss < 10.0%  loss < 50.0%  loss >= 50.0%
-            {4,             4,            4,            4},  // pps <  10   test speed
-            {5,             4,            4,            4},  // pps <  500  SD vedio
-            {1,             1,            4,            4},  // pps <  1200 HD vedio
-            {1,             1,            4,            4},  // pps <  2000 2K
-            {1,             1,            4,            4},  // pps <  5000 4K
-            {1,             1,            4,            4}   // pps >= 5000 8K
+        // 5 columns: loss<2%  2-10%  10-25%  25-50%  >=50%
+        // 25% crossover added: consistent with game mode data.
+        u32 fec2_ml_book_id1[][5] = {
+            // loss<2%  2-10%  10-25%  25-50%  >=50%
+            {4,         4,     4,      4,      4},  // pps <  10   test speed
+            {5,         4,     4,      2,      2},  // pps <  500  SD video
+            {1,         1,     4,      2,      2},  // pps <  1200 HD video
+            {1,         1,     4,      2,      2},  // pps <  2000 2K
+            {1,         1,     4,      2,      2},  // pps <  5000 4K
+            {1,         1,     4,      2,      2}   // pps >= 5000 8K
         };
-        u32 fec2_ml_book_id2[][4] = {
-            // loss < 2.0%  loss < 10.0%  loss < 50.0%  loss >= 50.0%
-            {4,             4,            4,            4},  // pps <  10   test speed
-            {4,             4,            4,            4},  // pps <  500  SD vedio
-            {4,             4,            4,            4},  // pps <  1200 HD vedio
-            {4,             4,            4,            4},  // pps <  2000 2K
-            {4,             4,            4,            4},  // pps <  5000 4K
-            {4,             4,            4,            4}   // pps >= 5000 8K
+        u32 fec2_ml_book_id2[][5] = {
+            // loss<2%  2-10%  10-25%  25-50%  >=50%
+            {4,         4,     4,      4,      4},  // pps <  10   test speed
+            {4,         4,     4,      2,      2},  // pps <  500  SD video
+            {4,         4,     4,      2,      2},  // pps <  1200 HD video
+            {4,         4,     4,      2,      2},  // pps <  2000 2K
+            {4,         4,     4,      2,      2},  // pps <  5000 4K
+            {4,         4,     4,      2,      2}   // pps >= 5000 8K
         };
         #endif
 
         #if (2 == APPLICATION_TYPE)
-        // mode,h_flag,v_flag, uphill_flag, downhill_flag, h_power, v_power
-        u32 fec2_ml_book_id1[][4] = {
-            // loss < 2.0%  loss < 10.0%  loss < 50.0%  loss >= 50.0%
-            {4,             4,            4,            4},  // pps <  10  test speed
-            {4,             4,            4,            4},  // pps <  100 phone game
-            {4,             4,            4,            4},  // pps <  100 phone game
-            {4,             4,            4,            4},  // pps <  100 phone game
-            {4,             4,            4,            4},  // pps <  100 phone game
-            {4,             4,            4,            4}   // pps >= 100 pc game
+        // 5 columns: loss<2%  2-10%  10-25%  25-50%  >=50%
+        // Data source: game_net_test PART3 bandwidth sweep (book2 vs book4).
+        //   <25% loss: book4(2×2 H+V) has lower total overhead than book2(4×1 H)
+        //              test data: 15% loss → book4=177% vs book2=245% overhead
+        //   >25% loss: book4 FEC pkts also get lost; extra parity buys little recovery
+        //              but costs more ARQ retrans; book2 wins on total bandwidth.
+        //              test data: 25% loss → book2=193% vs book4=292% overhead
+        u32 fec2_ml_book_id1[][5] = {
+            // loss<2%  2-10%  10-25%  25-50%  >=50%
+            {4,         4,     4,      2,      2},  // pps <  10  test speed
+            {4,         4,     4,      2,      2},  // pps <  100 phone game
+            {4,         4,     4,      2,      2},  // pps <  200 phone game
+            {4,         4,     4,      2,      2},  // pps <  300 phone game
+            {4,         4,     4,      2,      2},  // pps <  500 phone game
+            {4,         4,     4,      2,      2}   // pps >= 500 pc game
         };
-        u32 fec2_ml_book_id2[][4] = {
-            // loss < 2.0%  loss < 10.0%  loss < 50.0%  loss >= 50.0%
-            {4,             4,            4,            4},  // pps <  10  test speed
-            {4,             4,            4,            4},  // pps <  100 phone game
-            {4,             4,            4,            4},  // pps <  100 phone game
-            {4,             4,            4,            4},  // pps <  100 phone game
-            {4,             4,            4,            4},  // pps <  100 phone game
-            {4,             4,            4,            4}   // pps >= 100 pc game
+        u32 fec2_ml_book_id2[][5] = {
+            // loss<2%  2-10%  10-25%  25-50%  >=50%
+            {4,         4,     4,      2,      2},  // pps <  10  test speed
+            {4,         4,     4,      2,      2},  // pps <  100 phone game
+            {4,         4,     4,      2,      2},  // pps <  200 phone game
+            {4,         4,     4,      2,      2},  // pps <  300 phone game
+            {4,         4,     4,      2,      2},  // pps <  500 phone game
+            {4,         4,     4,      2,      2}   // pps >= 500 pc game
         };
         #endif
 
@@ -403,20 +410,25 @@ boost_alg_row_end_pos_:
 
 fec_ml_row_start_pos_:
         if (2.000001 > session->pb_dt_.max_send_loss_per_s_) {
-            row_pos = 0;
+            row_pos = 0;   /* <2%:  book4, auto-FEC typically off */
             goto fec_ml_end_pos_;
         }
 
         if (10.000001 > session->pb_dt_.max_send_loss_per_s_) {
-            row_pos = 1;
+            row_pos = 1;   /* 2-10%: book4, H+V coverage, lower overhead */
+            goto fec_ml_end_pos_;
+        }
+
+        if (25.000001 > session->pb_dt_.max_send_loss_per_s_) {
+            row_pos = 2;   /* 10-25%: book4 still optimal (test: 177% vs 245%) */
             goto fec_ml_end_pos_;
         }
 
         if (50.000001 > session->pb_dt_.max_send_loss_per_s_) {
-            row_pos = 2;
+            row_pos = 3;   /* 25-50%: book2 saves ~100ppts overhead (test: 193% vs 292%) */
             goto fec_ml_end_pos_;
         }
-        row_pos = 3;
+        row_pos = 4;       /* >=50%: book2, ARQ-dominant, minimal FEC overhead */
 
 fec_ml_end_pos_:
         if ((kReliableStream == session->pb_dt_.tran_addr_.stream_type_)

@@ -188,7 +188,16 @@
 
 #define DEFAULT_MAX_FRAME_PERIOD_US    (50000)
 
+/* NACK 周期：game mode 缩短到 50ms 以匹配 50fps 帧周期（20ms），
+ * 使 ARQ 在 FEC 无法恢复的突发场景下更快介入，降低 p99 延迟。
+ * 测试数据：S6 突发 10 连丢 p99=41.6ms，NACK=50ms 可使 ARQ 在
+ * 第 3 个 timer 周期（30ms）内介入，而非第 11 个（110ms）。
+ * video/common 模式保持 110ms（吞吐优先，NACK 频率影响带宽）。 */
+#if (2 == APPLICATION_TYPE)
+#define MAX_FEEDBACK_NACK_PERIOD_US    (50000)
+#else
 #define MAX_FEEDBACK_NACK_PERIOD_US    (110000)
+#endif
 
 #define MIN_FRAME_PERIOD_US     (30)
 
