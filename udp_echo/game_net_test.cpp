@@ -229,6 +229,7 @@ static uint32_t     g_sent_pkt = 0, g_recv_pkt = 0;
 static uint32_t     g_sent_frm = 0, g_recv_frm = 0;
 static uint64_t     g_app_payload = 0;
 static uint32_t     g_fec_anomaly = 0;
+static uint32_t     g_quintuple_cnt = 0;
 
 /* ─────────── GoodTP 回调 ─────────── */
 static uint32_t SendCbA(GtpHandler_p, void *pack, uint32_t sz, GtpAddr *addr) {
@@ -269,12 +270,16 @@ static uint32_t SendCbB(GtpHandler_p, void *pack, uint32_t sz, GtpAddr *) {
 static uint32_t RecvCbA(GtpHandler_p, void *, uint32_t, GtpAddr *) { return GTP_OK; }
 
 static void LogCb(uint32_t lv, const char *fmt, ...) {
-    if (lv > 3) return;
-    char buf[256];
+    if (lv > 4) return;
+    char buf[512];
     va_list ap; va_start(ap,fmt); vsnprintf(buf,sizeof(buf),fmt,ap); va_end(ap);
     if (strstr(buf,"fec restore abnormal")) g_fec_anomaly++;
+    if (strstr(buf,"quintuple may be mixed")) {
+        g_quintuple_cnt++;
+        fprintf(stderr, "[SN-WARN] %s", buf);
+    }
 }
-static uint32_t LogLvCb() { return 3; }
+static uint32_t LogLvCb() { return 4; }
 
 /* ─────────── 非阻塞收包并递交给 GoodTP ─────────── */
 static void recv_and_deliver(int sfd, GtpHandler_p hdl,
@@ -347,7 +352,7 @@ SceneResult run_scene(const SceneCfg &cfg) {
     g_bw_a.reset(); g_bw_b.reset(); g_ds.reset();
     g_dropped = 0; g_sent_pkt = 0; g_recv_pkt = 0;
     g_sent_frm = 0; g_recv_frm = 0; g_app_payload = 0;
-    g_fec_anomaly = 0;
+    g_fec_anomaly = 0; g_quintuple_cnt = 0;
 
     /* 预分配帧记录 */
     /* pps = 总包/秒；frame_interval = pkts_per_frm/pps；frames = pps/pkts_per_frm × duration */
@@ -535,8 +540,8 @@ static void print_result(const SceneResult &r, int book_id, int pps) {
     printf("  %-44s book=%d pps=%d\n", r.name, book_id, pps);
     printf("  丢包(模拟)%5.1f%% | 包交付率%6.2f%% | 帧完整率%6.2f%%\n",
            eff_loss, delivery, frm_succ);
-    printf("  FEC恢复%4u  ARQ(rto)%4u  ARQ(ack)%4u  FEC异常%u\n",
-           r.fec_rec, r.arq_rto, r.arq_ack, g_fec_anomaly);
+    printf("  FEC恢复%4u  ARQ(rto)%4u  ARQ(ack)%4u  FEC异常%u  SN跳跃告警%u\n",
+           r.fec_rec, r.arq_rto, r.arq_ack, g_fec_anomaly, g_quintuple_cnt);
     printf("  延迟 p50=%uµs  p99=%uµs\n", r.p50, r.p99);
     printf("  带宽 A→B%.0fKB FEC占%.1f%% 重传占%.1f%% B→A控制%.1f%% 总开销%.1f%%\n",
            tx_a/1024.0, fec_pct, retr_pct, ack_pct, overhead);
