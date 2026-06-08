@@ -591,15 +591,17 @@ int main() {
     }
 
     /* ══════════════════════════════════════════════════
-     * PART 2: FEC 策略对比（15% 丢包）
+     * PART 2: FEC 自适应策略观测（15% 丢包）
+     * 注意：GoodTP 内部根据 PPS+丢包率自动选择 book_id；
+     *       cfg.book_id 字段保留但不传入库，此处观测自适应行为。
      * ══════════════════════════════════════════════════ */
-    printf("\n【PART 2】FEC book_id 对比（15%% 丢包 / 150pps）\n");
+    printf("\n【PART 2】FEC 自适应策略观测（15%% 丢包 / 150pps；GoodTP内部自适应选book）\n");
 
     struct { int book_id; const char *label; } books[] = {
-        {2, "book2: 4×1 H   (25%% FEC开销)"},
-        {5, "book5: 2×1 H   (50%% FEC开销)"},
-        {4, "book4: 2×2 H+V (100%% FEC开销)"},
-        {3, "book3: 2×2 全向(150%% FEC开销)"},
+        {2, "B1 观测run1（同参数重复1）"},
+        {5, "B2 观测run2（同参数重复2）"},
+        {4, "B3 观测run3（同参数重复3）"},
+        {3, "B4 观测run4（同参数重复4）"},
     };
 
     struct BwRow { int book; double fec_pct, total_ovhd, delivery; uint32_t fec_rec, arq_rto; };
@@ -696,6 +698,90 @@ int main() {
     printf("     book4 FEC开销≈70%%（自动FEC管理会在稳定后逐步降低FEC发送）\n");
     printf("     ACK/NACK/RTT控制包≈20-30%%\n");
     printf("     建议：0%%丢包超过1s → auto-FEC自动关闭，降至控制包开销\n");
+    /* ══════════════════════════════════════════════════
+     * PART 4: 延迟基准 — PPS 变化对延迟的影响（0%丢包 + 10%丢包）
+     * 关注：FEC矩阵填充时间 = block_size/pps，低PPS下FEC恢复延迟大
+     * ══════════════════════════════════════════════════ */
+    printf("\n【PART 4】延迟基准：PPS vs 延迟（0%%丢包 / 10%%丢包，book4，pkts_per_frm=2）\n");
+    printf("  FEC矩阵填充时间 = 4包/pps → 30pps=133ms  60pps=67ms  150pps=27ms  300pps=13ms\n");
+    sep('-');
+    printf("  %-10s %-6s %10s %10s %8s %8s %8s\n",
+           "场景","pps","p50(µs)","p99(µs)","帧完整率","FEC恢复","SN告警");
+
+    struct P4Row { int pps; int loss; uint32_t p50,p99; double frm; uint32_t fec,sn; };
+    std::vector<P4Row> p4rows;
+
+    int p4_pps[]  = {30, 60, 100, 150, 300};
+    int p4_loss[] = {0, 10};
+    for (int loss : p4_loss) {
+        for (int pps : p4_pps) {
+            SceneCfg cfg{};
+            char nm[64]; snprintf(nm,sizeof(nm),"P4 loss=%d%% pps=%d", loss, pps);
+            cfg.name = nm;
+            cfg.loss.model = (loss==0) ? LOSS_NONE : LOSS_RANDOM;
+            cfg.loss.loss_pct = loss;
+            cfg.pps = pps; cfg.pkts_per_frm = 2; cfg.duration_s = 8; cfg.book_id = 4;
+            auto r = run_scene(cfg);
+            double frm = r.frm_total > 0 ? r.frm_complete*100.0/r.frm_total : 0;
+            printf("  %-10s %-6d %10u %10u %7.2f%% %8u %8u\n",
+                   (loss==0?"0%丢包":"10%丢包"), pps, r.p50, r.p99, frm, r.fec_rec, g_quintuple_cnt);
+            P4Row row{pps,loss,r.p50,r.p99,frm,r.fec_rec,g_quintuple_cnt};
+            p4rows.push_back(row);
+        }
+    }
+
+    /* ══════════════════════════════════════════════════
+     * PART 5: 延迟随丢包率变化（150pps，book4自适应，6s）
+     * 关注：0→5%→10%→20% 延迟是否可接受，拐点在哪
+     * ══════════════════════════════════════════════════ */
+    printf("\n【PART 5】丢包率 → 延迟扫描（150pps / book4自适应 / 6s）\n");
+    sep('-');
+    printf("  %-8s %10s %10s %8s %8s %8s %8s\n",
+           "丢包率","p50(µs)","p99(µs)","帧完整率","FEC恢复","ARQ-RTO","SN告警");
+
+    int p5_losses[] = {0,1,2,5,10,20,30,45};
+    for (int loss : p5_losses) {
+        SceneCfg cfg{};
+        char nm[64]; snprintf(nm,sizeof(nm),"P5 loss=%d%%", loss);
+        cfg.name = nm;
+        cfg.loss.model = (loss==0) ? LOSS_NONE : LOSS_RANDOM;
+        cfg.loss.loss_pct = loss;
+        cfg.pps = 150; cfg.pkts_per_frm = 3; cfg.duration_s = 6; cfg.book_id = 4;
+        auto r = run_scene(cfg);
+        double frm = r.frm_total > 0 ? r.frm_complete*100.0/r.frm_total : 0;
+        printf("  %-8d %10u %10u %7.2f%% %8u %8u %8u\n",
+               loss, r.p50, r.p99, frm, r.fec_rec, r.arq_rto, g_quintuple_cnt);
+    }
+
+    /* ══════════════════════════════════════════════════
+     * PART 6: 极端与边界场景
+     * ══════════════════════════════════════════════════ */
+    printf("\n【PART 6】极端与边界场景\n");
+
+    struct { const char *name; LossCfg loss; int reorder; int pps; int dur; } p6[] = {
+        /* 50% 随机：FEC完全饱和，ARQ接管 */
+        {"E1 随机50%%（极端）150pps",    {LOSS_RANDOM,50},  0, 150, 6},
+        /* 高PPS下突发：300pps突发5连，FEC矩阵13ms填满，覆盖能力强 */
+        {"E2 突发5连/40间隔 300pps",     {LOSS_BURST,0,5,40},0, 300, 6},
+        /* 低PPS下突发：30pps突发5连，矩阵133ms，延迟极大 */
+        {"E3 突发5连/40间隔 30pps",      {LOSS_BURST,0,5,40},0, 30,  8},
+        /* 高强度突发：20连丢/200间隔 ~9%丢包但每次跨越5个FEC矩阵 */
+        {"E4 突发20连/200间隔 150pps",   {LOSS_BURST,0,20,200},0,150, 8},
+        /* 乱序+30%丢包 复合最坏情况 */
+        {"E5 乱序win=4 + 30%% 150pps",  {LOSS_RANDOM,30},  4, 150, 8},
+        /* 300pps 20%丢包：高速游戏场景+中等丢包 */
+        {"E6 随机20%% 300pps FPS场景",  {LOSS_RANDOM,20},  0, 300, 6},
+        /* 间歇断流：100包平静/20包断 模拟无线信道切换 */
+        {"E7 间歇20断/100平静 150pps",  {LOSS_INTERMIT,0,5,40,100,20},0,150,8},
+    };
+
+    for (auto &sc : p6) {
+        SceneCfg cfg{};
+        cfg.name = sc.name; cfg.loss = sc.loss; cfg.reorder_win = sc.reorder;
+        cfg.pps = sc.pps; cfg.pkts_per_frm = 2; cfg.duration_s = sc.dur; cfg.book_id = 4;
+        sep(); print_result(run_scene(cfg), 4, sc.pps);
+    }
+
     sep('=');
     printf("  测试完成\n");
     sep('=');
