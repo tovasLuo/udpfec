@@ -7,9 +7,10 @@
  *   用 MSG_DONTWAIT 非阻塞收包，规避原有多线程竞争问题。
  *
  * 覆盖维度：
- *   PART 1 — 9 种丢包/乱序场景（随机/突发/间歇/乱序/复合）
- *   PART 2 — 4 种 FEC book_id 对比（15% 丢包）
+ *   PART 1 — 9 种丢包/乱序场景（pkts_per_frm=1 均匀发包，150pps）
+ *   PART 2 — FEC 自适应策略观测（15% 丢包）
  *   PART 3 — 带宽效率扫描（book2 vs book4，0-35% loss）
+ *   PART 7 — 发包节奏对比（pkts_per_frm=1/2/3/4，10% 丢包，量化改善）
  *
  * 关键指标：
  *   帧交付率 / 帧完整率（游戏稳定性）/ FEC恢复 / ARQ重传
@@ -567,9 +568,11 @@ int main() {
     sep('=',88); printf("  GoodTP 全方位专业测试（单线程单实例驱动，符合设计约束）\n"); sep('=',88);
 
     /* ══════════════════════════════════════════════════
-     * PART 1: 核心场景（150pps / 3包帧 / book4 / 6s）
+     * PART 1: 核心场景（150pps / 1包/帧（均匀发包）/ book4 / 6s）
+     * Direction A：每 tick 发 1 包（6.7ms间距），FEC矩阵均匀填充
      * ══════════════════════════════════════════════════ */
-    printf("\n【PART 1】核心功能与游戏稳定性（150pps / 3包/帧 / book_id=4）\n");
+    printf("\n【PART 1】核心功能与游戏稳定性（150pps / 1包/帧-均匀发包 / book_id=4）\n");
+    printf("  方向A：pkts_per_frm=1，每包间距6.7ms，FEC矩阵在4×6.7ms=26.7ms内均匀填充\n");
 
     struct { const char *name; LossCfg loss; int reorder; } p1[] = {
         {"S1 零丢包（好网络基准）",           {LOSS_NONE}, 0},
@@ -586,7 +589,7 @@ int main() {
     for (auto &sc : p1) {
         SceneCfg cfg{};
         cfg.name = sc.name; cfg.loss = sc.loss; cfg.reorder_win = sc.reorder;
-        cfg.pps = 150; cfg.pkts_per_frm = 3; cfg.duration_s = 6; cfg.book_id = 4;
+        cfg.pps = 150; cfg.pkts_per_frm = 1; cfg.duration_s = 6; cfg.book_id = 4;
         sep(); print_result(run_scene(cfg), 4, 150);
     }
 
@@ -731,10 +734,10 @@ int main() {
     }
 
     /* ══════════════════════════════════════════════════
-     * PART 5: 延迟随丢包率变化（150pps，book4自适应，6s）
+     * PART 5: 延迟随丢包率变化（150pps，pkts_per_frm=1均匀，book4自适应，6s）
      * 关注：0→5%→10%→20% 延迟是否可接受，拐点在哪
      * ══════════════════════════════════════════════════ */
-    printf("\n【PART 5】丢包率 → 延迟扫描（150pps / book4自适应 / 6s）\n");
+    printf("\n【PART 5】丢包率 → 延迟扫描（150pps / pkts_per_frm=1均匀 / book4自适应 / 6s）\n");
     sep('-');
     printf("  %-8s %10s %10s %8s %8s %8s %8s\n",
            "丢包率","p50(µs)","p99(µs)","帧完整率","FEC恢复","ARQ-RTO","SN告警");
@@ -746,7 +749,7 @@ int main() {
         cfg.name = nm;
         cfg.loss.model = (loss==0) ? LOSS_NONE : LOSS_RANDOM;
         cfg.loss.loss_pct = loss;
-        cfg.pps = 150; cfg.pkts_per_frm = 3; cfg.duration_s = 6; cfg.book_id = 4;
+        cfg.pps = 150; cfg.pkts_per_frm = 1; cfg.duration_s = 6; cfg.book_id = 4;
         auto r = run_scene(cfg);
         double frm = r.frm_total > 0 ? r.frm_complete*100.0/r.frm_total : 0;
         printf("  %-8d %10u %10u %7.2f%% %8u %8u %8u\n",
@@ -781,6 +784,43 @@ int main() {
         cfg.pps = sc.pps; cfg.pkts_per_frm = 2; cfg.duration_s = sc.dur; cfg.book_id = 4;
         sep(); print_result(run_scene(cfg), 4, sc.pps);
     }
+
+    /* ══════════════════════════════════════════════════
+     * PART 7: 发包节奏对比（Direction A 量化）
+     * 对比 pkts_per_frm=1/2/3/4 在不同丢包率下的 p99 延迟
+     * 理论：FEC 矩阵填充时间 = block_size/pps；FEC 发送时机影响恢复延迟
+     * ══════════════════════════════════════════════════ */
+    printf("\n【PART 7】发包节奏对比（Direction A 量化，150pps，book4）\n");
+    printf("  理论：pkts_per_frm 越接近 block_size/2=2，FEC 矩阵完成越均衡，恢复延迟越低\n");
+    sep('-');
+    printf("  %-12s %-8s %10s %10s %8s %8s\n",
+           "pkts_per_frm","丢包率%","p50(µs)","p99(µs)","帧完整率","FEC恢复");
+
+    int p7_ppf[]  = {1, 2, 3, 4};
+    int p7_loss[] = {0, 5, 10, 20};
+    for (int loss : p7_loss) {
+        sep('-',60);
+        for (int ppf : p7_ppf) {
+            SceneCfg cfg{};
+            char nm[64]; snprintf(nm,sizeof(nm),"P7 ppf=%d loss=%d%%", ppf, loss);
+            cfg.name = nm;
+            cfg.loss.model = (loss==0) ? LOSS_NONE : LOSS_RANDOM;
+            cfg.loss.loss_pct = loss;
+            cfg.pps = 150; cfg.pkts_per_frm = ppf; cfg.duration_s = 6; cfg.book_id = 4;
+            auto r = run_scene(cfg);
+            double frm = r.frm_total > 0 ? r.frm_complete*100.0/r.frm_total : 0;
+            printf("  %-12d %-8d %10u %10u %7.2f%% %8u\n",
+                   ppf, loss, r.p50, r.p99, frm, r.fec_rec);
+        }
+    }
+
+    sep('=');
+    printf("  PART 7 发包节奏影响小结\n");
+    printf("  interval = pkts_per_frm/pps；FEC矩阵（block=4）分组：\n");
+    printf("    ppf=1: 4帧填满矩阵，均匀间距6.7ms，最早FEC在第2帧（+6.7ms）\n");
+    printf("    ppf=2: 2帧填满矩阵，间距13.3ms，最早FEC在第2帧（+13.3ms）\n");
+    printf("    ppf=3: 2帧填满矩阵，间距20ms，首帧3包次帧1包，FEC在第2帧（+20ms）\n");
+    printf("    ppf=4: 1帧填满矩阵，FEC与数据同帧发出，理论上恢复延迟最低（~loopback）\n");
 
     sep('=');
     printf("  测试完成\n");
