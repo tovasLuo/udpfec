@@ -140,6 +140,7 @@ proc_sender_network_quality_pos_:
         session->pb_dt_.UpdatedMaxLoss(loss);
 
         if (FLOAT_ZERO >= session->pb_dt_.max_send_loss_per_s_) {
+            session->net_bad_pending_cnt_ = 0;
             if (((u8)(NetQuality::kNetQualityBad)) == session->net_quality_) {
                 if ((session->last_gen_loss_ts_us_ + MIN_ZERO_LOSS_EXIST_US) <= session->last_active_ts_us_) {
                     session->net_quality_          = ((u8)(NetQuality::kNetQualityGood));
@@ -207,6 +208,12 @@ fec_mode_to_default_pos_:
         }
 
         if (((u8)(NetQuality::kNetQualityGood)) == session->net_quality_) {
+            session->net_bad_pending_cnt_++;
+            if (session->net_bad_pending_cnt_ < 2) {
+                session->last_gen_loss_ts_us_ = session->last_active_ts_us_;
+                goto sender_qualiti_proc_start_pos_;
+            }
+            session->net_bad_pending_cnt_ = 0;
             first_bad             = GTP_YES;
             session->net_quality_ = ((u8)(NetQuality::kNetQualityBad));
         }
@@ -420,7 +427,12 @@ fec_ml_row_start_pos_:
         }
 
         if (25.000001 > session->pb_dt_.max_send_loss_per_s_) {
-            row_pos = 2;   /* 10-25%: book4 still optimal (test: 177% vs 245%) */
+            /* hysteresis: if currently on book2, require loss < 23% to switch back to book4 */
+            if ((2 == session->fec2_obj_.GetUsingBookId()) && (23.000001 <= session->pb_dt_.max_send_loss_per_s_)) {
+                row_pos = 3;
+            } else {
+                row_pos = 2;   /* 10-25%: book4 still optimal (test: 177% vs 245%) */
+            }
             goto fec_ml_end_pos_;
         }
 
@@ -713,7 +725,8 @@ void WinSnBitmapCallback(slid_win_hdl win_hdl, void *cntxt_hdl, const void *bit_
         return;
     }
 
-    u64 now_ts_us = GtpSysTimestampUs();
+    u64 now_ts_us  = GtpSysTimestampUs();
+    u64 real_ts_us = now_ts_us;  // preserve before possible RTT-delta modification
 
     u8 *chg_len_zone = NULL;
 
@@ -783,6 +796,10 @@ void WinSnBitmapCallback(slid_win_hdl win_hdl, void *cntxt_hdl, const void *bit_
         }
 
         nack_pack->pack_size_ = (u16)pack_size;
+
+        if (3 <= nack_data->nack_num_) {
+            session->nack_burst_detected_ = 1;
+        }
 
         memcpy(chg_len_zone, nack_data->nack_, ((u32)(nack_data->nack_num_)) << 1);
 
@@ -885,7 +902,7 @@ session_send_ack_nack_pos_:
     session->pb_dt_.send_stat_.net_pack_sum_    += 1;
     session->pb_dt_.send_stat_.net_bitrate_sum_ += pack_size;
 
-    session->last_feedback_nack_ts_us_    = now_ts_us;
+    session->last_feedback_nack_ts_us_ = real_ts_us;
 
     return;
 }
@@ -924,8 +941,12 @@ GtpSession::GtpSession(const goodtp_sock &sfd, const u8 dst_sock_addr[], const u
     net_quality_((u8)(NetQuality::kNetQualityGood)),
     rpt_snd_qualit_(GTP_NO),
     session_health_((u8)(SessionHealthState::kHealthNoraml)),
+    net_bad_pending_cnt_(0),
+    nack_burst_detected_(0),
+    new_gap_detected_(0),
     cur_cache_loss_idx_(0),
     test_rtt_period_us_(TEST_RTT_PERIOD_US),
+    recv_max_data_sn_(0),
     loss_sum_(0),
     self_session_ttl_us_((u32)ttl),
     self_bin_port_(0),
@@ -1002,8 +1023,12 @@ GtpSession::GtpSession(GtpAddr *tran_addr, const GtpHandler &gtp_hdl, GtpMemPool
     net_quality_((u8)(NetQuality::kNetQualityGood)),
     rpt_snd_qualit_(GTP_NO),
     session_health_((u8)(SessionHealthState::kHealthNoraml)),
+    net_bad_pending_cnt_(0),
+    nack_burst_detected_(0),
+    new_gap_detected_(0),
     cur_cache_loss_idx_(0),
     test_rtt_period_us_(TEST_RTT_PERIOD_US),
+    recv_max_data_sn_(0),
     loss_sum_(0),
     self_session_ttl_us_((u32)ttl),
     self_bin_port_(0),
@@ -2106,6 +2131,16 @@ u32 GtpSession::PackPostHandler(GtpPacket *pack, const u32 &size, GtpAddr *tran_
                 #endif
             }
 
+            // Method B: detect first new gap → start 2-shot NACK countdown (4ms apart)
+            if (recv_max_data_sn_ != 0) {
+                if ((i32)(pack->pack_sn_ - recv_max_data_sn_) > 1) {
+                    new_gap_detected_ = 2;
+                }
+            }
+            if (recv_max_data_sn_ == 0 || (i32)(pack->pack_sn_ - recv_max_data_sn_) > 0) {
+                recv_max_data_sn_ = pack->pack_sn_;
+            }
+
             break;
         }
 
@@ -2403,12 +2438,31 @@ timer_handler_continue_pos_:
         SendSetRecvRttPacket();
     }
 
+    // Method B: 2-shot NACK for gap loss protection (tick N and N+4ms, independent drop probability)
+    if (new_gap_detected_ > 0) {
+        new_gap_detected_--;
+        nret = CalcQualityByHandler(data_win_r_, ts_us, GTP_YES);
+        if (GTP_OK != nret) {
+            GtpLog(cb_.write_log_cb_, kGtpSessionMd, kGtpLogLevelError,
+                   "new_gap CalcQualityByHandler() failed(0x%08x %s).\r\n",
+                   nret, WinErrorInfo(data_win_r_, nret));
+        }
+        if (0xFFFFFFFFFFFFFFFF != recv_idle_calc_loss_ts_us) {
+            recv_idle_calc_loss_ts_us = ts_us;
+        }
+    }
+
     if ((0xFFFFFFFFFFFFFFFF != recv_idle_calc_loss_ts_us)
      && ((recv_idle_calc_loss_ts_us + recv_idle_calc_period_us_) <= ts_us)) {
-        if (MAX_FEEDBACK_NACK_PERIOD_US >= (ts_us - last_feedback_nack_ts_us_)) {
+        {
+        u32 burst_flag = nack_burst_detected_;
+        nack_burst_detected_ = 0;
+        if ((GTP_NO == burst_flag) &&
+            (MAX_FEEDBACK_NACK_PERIOD_US >= (ts_us - last_feedback_nack_ts_us_))) {
             nret = CalcQualityByHandler(data_win_r_, ts_us, GTP_NO);
         } else {
             nret = CalcQualityByHandler(data_win_r_, ts_us, GTP_YES);
+        }
         }
 
         if (GTP_OK != nret) {
@@ -3017,6 +3071,15 @@ u32 GtpSession::PrintHarqParam(u8 *out_str, const u32 &mem_size) {
     PrintAfterHandlerReturn(str_len, wrt_num, free_sz, wrt_pos);
 
     wrt_num = (u32)snprintf((char*)wrt_pos, free_sz, "\r\n  harq_node_num= %u", arq_.arq_list_.node_num_);
+    PrintAfterHandlerReturn(str_len, wrt_num, free_sz, wrt_pos);
+
+    wrt_num = (u32)snprintf((char*)wrt_pos, free_sz, "\r\n ack_resend_counter= %u", arq_.ack_resend_counter_);
+    PrintAfterHandlerReturn(str_len, wrt_num, free_sz, wrt_pos);
+
+    wrt_num = (u32)snprintf((char*)wrt_pos, free_sz, "\r\n rto_resend_counter= %u", arq_.rto_resend_counter_);
+    PrintAfterHandlerReturn(str_len, wrt_num, free_sz, wrt_pos);
+
+    wrt_num = (u32)snprintf((char*)wrt_pos, free_sz, "\r\n boost_resend_counter= %u", arq_.arq_list_.ai_repair_sum_);
     PrintAfterHandlerReturn(str_len, wrt_num, free_sz, wrt_pos);
 
     return str_len;

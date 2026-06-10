@@ -70,7 +70,7 @@ float EWMA::Formula(uint16_t temp_tail) {
 
 float EWMA::NewFactor(const SendingFrequence &sf) {
     // 1. clear the timeout sf
-    // ClearTimeoutSendingFreq();
+    ClearTimeoutSendingFreq();
     // 2. write the new sf to the array.
     NewSendingFreq(sf);
     // 3. calculate the factor

@@ -90,6 +90,7 @@ class GtpFec2 {
     u32  CacheDataPack(GtpPacket *pack, const u64 &ts_us);
     void ChangeFecMode(const u32 &new_code_book_id);
     u32  PrintFec2Param(u8 *out_str, const u32 &mem_size);
+    inline u8 GetUsingBookId() const { return using_fec_book_id_; }
     void ClearResource(const f32 &loss, const u64 &ts_us);
 
 PRIVATE:

@@ -204,11 +204,14 @@ PRIVATE:
     u32 max_frm_prd_updt_flg_:1;
     u32 net_quality_:2;
     u32 rpt_snd_qualit_:1;     // GTP_NO: hasn't reported sending quality, GTP_YES: has reported sending quality.
-    u32 session_health_:3;
-    u32 bit_rsv_:4;
+    u32 session_health_:2;       // SessionHealthState max=2, 2 bits sufficient
+    u32 net_bad_pending_cnt_:2;  // reorder hysteresis: consecutive loss callbacks before flipping to bad
+    u32 nack_burst_detected_:1;  // set when nack_num>=3; bypasses NACK rate-limit for 1 extra tick
+    u32 new_gap_detected_:2;    // countdown 2→1→0: fire NACK each tick while >0 (2-shot for loss protection)
     u32 cur_cache_loss_idx_:8;
 
     u32 test_rtt_period_us_;
+    u32 recv_max_data_sn_;   // max data SN seen on receive side; 0=uninitialized
 
     u32 loss_sum_;
     u32 self_session_ttl_us_;

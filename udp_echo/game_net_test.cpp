@@ -211,8 +211,13 @@ struct SceneResult {
     uint64_t app_payload=0;
     BwStat   bw_a, bw_b;
     uint32_t dropped=0;
-    uint32_t fec_rec=0, arq_rto=0, arq_ack=0;
+    uint32_t fec_rec=0, arq_rto=0, arq_ack=0, arq_boost=0;
     uint32_t p50=0, p99=0;
+    /* 算法内部状态（从 GetAlgorithmParam 解析） */
+    uint32_t book_id_actual = 0;
+    bool     net_bad        = false;
+    uint32_t max_boost      = 0;
+    bool     alg_top_off    = false;
 };
 
 /* ─────────── 全局两端状态（场景级别重置） ─────────── */
@@ -271,7 +276,7 @@ static uint32_t SendCbB(GtpHandler_p, void *pack, uint32_t sz, GtpAddr *) {
 static uint32_t RecvCbA(GtpHandler_p, void *, uint32_t, GtpAddr *) { return GTP_OK; }
 
 static void LogCb(uint32_t lv, const char *fmt, ...) {
-    if (lv > 4) return;
+    if (lv > 5) return;   /* Notice(5)+Error/Warn visible */
     char buf[512];
     va_list ap; va_start(ap,fmt); vsnprintf(buf,sizeof(buf),fmt,ap); va_end(ap);
     if (strstr(buf,"fec restore abnormal")) g_fec_anomaly++;
@@ -279,8 +284,13 @@ static void LogCb(uint32_t lv, const char *fmt, ...) {
         g_quintuple_cnt++;
         fprintf(stderr, "[SN-WARN] %s", buf);
     }
+    /* emit error/warning/notice to stderr for post-analysis */
+    if (lv <= 5) {
+        const char *tag = (lv<=2)?"[CRIT]":(lv==3)?"[ERR]":(lv==4)?"[WARN]":"[NOTICE]";
+        fprintf(stderr, "%s %s", tag, buf);
+    }
 }
-static uint32_t LogLvCb() { return 4; }
+static uint32_t LogLvCb() { return 5; }
 
 /* ─────────── 非阻塞收包并递交给 GoodTP ─────────── */
 static void recv_and_deliver(int sfd, GtpHandler_p hdl,
@@ -500,9 +510,26 @@ SceneResult run_scene(const SceneCfg &cfg) {
     GetAlgorithmParam(g_hdl_b, ip_b, ip_a, alg_b, sizeof(alg_b));
 
     const char *p;
-    if ((p = strstr((char*)alg, "rto_resend_num")))  sscanf(p, "rto_resend_num= %u", &res.arq_rto);
-    if ((p = strstr((char*)alg, "ack_resend_num")))  sscanf(p, "ack_resend_num= %u", &res.arq_ack);
+    if ((p = strstr((char*)alg, "rto_resend_counter")))   sscanf(p, "rto_resend_counter= %u",   &res.arq_rto);
+    if ((p = strstr((char*)alg, "ack_resend_counter")))   sscanf(p, "ack_resend_counter= %u",   &res.arq_ack);
+    if ((p = strstr((char*)alg, "boost_resend_counter"))) sscanf(p, "boost_resend_counter= %u", &res.arq_boost);
     if ((p = strstr((char*)alg_b,"fec_res_to_app_sum"))) sscanf(p, "fec_res_to_app_sum= %u",&res.fec_rec);
+    /* 解析内部算法状态（发送端 A 的视角） */
+    if ((p = strstr((char*)alg, "book_id="))) {
+        sscanf(p, "book_id= %u", &res.book_id_actual);
+    }
+    if ((p = strstr((char*)alg, "net_quality="))) {
+        char tmp[16]="good";
+        sscanf(p, "net_quality= %15s", tmp);
+        res.net_bad = (tmp[0]=='b');
+    }
+    if ((p = strstr((char*)alg, "max_boost_num=")))
+        sscanf(p, "max_boost_num= %u", &res.max_boost);
+    if ((p = strstr((char*)alg, "alg_top_switch="))) {
+        char tmp[8]="On";
+        sscanf(p, "alg_top_switch= %7s", tmp);
+        res.alg_top_off = (tmp[0]=='O' && tmp[1]=='f');
+    }
 
     res.sent_pkt     = g_sent_pkt;
     res.recv_pkt     = g_recv_pkt;
@@ -530,7 +557,7 @@ static void sep(char c='-', int w=88) { for(int i=0;i<w;i++) putchar(c); putchar
 static void print_result(const SceneResult &r, int book_id, int pps) {
     double delivery  = r.sent_pkt > 0 ? r.recv_pkt * 100.0 / r.sent_pkt : 0;
     double frm_succ  = r.frm_total > 0 ? r.frm_complete * 100.0 / r.frm_total : 0;
-    double eff_loss  = r.dropped > 0 ? r.dropped * 100.0 / (r.sent_pkt + r.dropped) : 0;
+    double eff_loss  = r.sent_pkt > 0 ? (1.0 - (double)r.recv_pkt / r.sent_pkt) * 100.0 : 0;
     uint64_t tx_a    = r.bw_a.total_b;
     uint64_t tx_b    = r.bw_b.total_b;
     double fec_pct   = tx_a > 0 ? r.bw_a.fec_b * 100.0 / tx_a : 0;
@@ -541,11 +568,14 @@ static void print_result(const SceneResult &r, int book_id, int pps) {
     printf("  %-44s book=%d pps=%d\n", r.name, book_id, pps);
     printf("  丢包(模拟)%5.1f%% | 包交付率%6.2f%% | 帧完整率%6.2f%%\n",
            eff_loss, delivery, frm_succ);
-    printf("  FEC恢复%4u  ARQ(rto)%4u  ARQ(ack)%4u  FEC异常%u  SN跳跃告警%u\n",
-           r.fec_rec, r.arq_rto, r.arq_ack, g_fec_anomaly, g_quintuple_cnt);
+    printf("  FEC恢复%4u  ARQ(rto)%4u  ARQ(ack)%4u  ARQ(boost)%4u  FEC异常%u  SN跳跃告警%u\n",
+           r.fec_rec, r.arq_rto, r.arq_ack, r.arq_boost, g_fec_anomaly, g_quintuple_cnt);
     printf("  延迟 p50=%uµs  p99=%uµs\n", r.p50, r.p99);
     printf("  带宽 A→B%.0fKB FEC占%.1f%% 重传占%.1f%% B→A控制%.1f%% 总开销%.1f%%\n",
            tx_a/1024.0, fec_pct, retr_pct, ack_pct, overhead);
+    printf("  [算法] book_id实=%u  net=%s  boost上限=%u  alg_top=%s\n",
+           r.book_id_actual, r.net_bad?"bad ":"good", r.max_boost,
+           r.alg_top_off?"Off":"On");
 
     const char *s;
     if (frm_succ>=99.5) s="★★★★★ 极好";
@@ -742,6 +772,13 @@ int main() {
     printf("  %-8s %10s %10s %8s %8s %8s %8s\n",
            "丢包率","p50(µs)","p99(µs)","帧完整率","FEC恢复","ARQ-RTO","SN告警");
 
+    struct P5Row {
+        int loss; uint32_t p50,p99; double frm;
+        uint32_t fec,arq; uint32_t book; bool net_bad; uint32_t boost; bool top_off;
+        double fec_pct, ovhd;
+    };
+    std::vector<P5Row> p5rows;
+
     int p5_losses[] = {0,1,2,5,10,20,30,45};
     for (int loss : p5_losses) {
         SceneCfg cfg{};
@@ -754,7 +791,35 @@ int main() {
         double frm = r.frm_total > 0 ? r.frm_complete*100.0/r.frm_total : 0;
         printf("  %-8d %10u %10u %7.2f%% %8u %8u %8u\n",
                loss, r.p50, r.p99, frm, r.fec_rec, r.arq_rto, g_quintuple_cnt);
+        P5Row row{};
+        row.loss=loss; row.p50=r.p50; row.p99=r.p99; row.frm=frm;
+        row.fec=r.fec_rec; row.arq=r.arq_rto;
+        row.book=r.book_id_actual; row.net_bad=r.net_bad;
+        row.boost=r.max_boost; row.top_off=r.alg_top_off;
+        row.fec_pct = r.bw_a.total_b>0 ? r.bw_a.fec_b*100.0/r.bw_a.total_b : 0;
+        uint64_t tt = r.bw_a.total_b + r.bw_b.total_b;
+        row.ovhd    = r.app_payload>0 ? (tt-r.app_payload)*100.0/r.app_payload : 0;
+        p5rows.push_back(row);
     }
+
+    sep('=');
+    printf("  【PART 5 综合对照表】GoodTP 各丢包率下内部状态完整汇总\n");
+    sep('-',100);
+    printf("  %-6s %-6s %-6s %-6s %-5s %-5s %-8s %-10s %-10s %-9s %-9s\n",
+           "丢包%","book","net","boost","top","FEC","ARQ",
+           "p50(µs)","p99(µs)","FEC带宽%","总开销%");
+    sep('-',100);
+    for (auto &r : p5rows) {
+        printf("  %-6d %-6u %-6s %-6u %-5s %-5u %-8u %-10u %-10u %-9.1f %-9.1f\n",
+               r.loss, r.book,
+               r.net_bad?"bad":"good",
+               r.boost,
+               r.top_off?"Off":"On",
+               r.fec, r.arq,
+               r.p50, r.p99,
+               r.fec_pct, r.ovhd);
+    }
+    sep('=');
 
     /* ══════════════════════════════════════════════════
      * PART 6: 极端与边界场景
@@ -793,13 +858,13 @@ int main() {
     printf("\n【PART 7】发包节奏对比（Direction A 量化，150pps，book4）\n");
     printf("  理论：pkts_per_frm 越接近 block_size/2=2，FEC 矩阵完成越均衡，恢复延迟越低\n");
     sep('-');
-    printf("  %-12s %-8s %10s %10s %8s %8s\n",
-           "pkts_per_frm","丢包率%","p50(µs)","p99(µs)","帧完整率","FEC恢复");
+    printf("  %-6s %-6s %10s %10s %8s %8s %9s %9s\n",
+           "ppf","丢包%","p50(µs)","p99(µs)","帧完整率","FEC恢复","FEC带宽%","总开销%");
 
     int p7_ppf[]  = {1, 2, 3, 4};
     int p7_loss[] = {0, 5, 10, 20};
     for (int loss : p7_loss) {
-        sep('-',60);
+        sep('-',80);
         for (int ppf : p7_ppf) {
             SceneCfg cfg{};
             char nm[64]; snprintf(nm,sizeof(nm),"P7 ppf=%d loss=%d%%", ppf, loss);
@@ -809,8 +874,11 @@ int main() {
             cfg.pps = 150; cfg.pkts_per_frm = ppf; cfg.duration_s = 6; cfg.book_id = 4;
             auto r = run_scene(cfg);
             double frm = r.frm_total > 0 ? r.frm_complete*100.0/r.frm_total : 0;
-            printf("  %-12d %-8d %10u %10u %7.2f%% %8u\n",
-                   ppf, loss, r.p50, r.p99, frm, r.fec_rec);
+            double fec_pct = r.bw_a.total_b>0 ? r.bw_a.fec_b*100.0/r.bw_a.total_b : 0;
+            uint64_t tt    = r.bw_a.total_b + r.bw_b.total_b;
+            double ovhd    = r.app_payload>0 ? (tt-r.app_payload)*100.0/r.app_payload : 0;
+            printf("  %-6d %-6d %10u %10u %7.2f%% %8u %8.1f%% %8.1f%%\n",
+                   ppf, loss, r.p50, r.p99, frm, r.fec_rec, fec_pct, ovhd);
         }
     }
 
@@ -822,6 +890,40 @@ int main() {
     printf("    ppf=3: 2帧填满矩阵，间距20ms，首帧3包次帧1包，FEC在第2帧（+20ms）\n");
     printf("    ppf=4: 1帧填满矩阵，FEC与数据同帧发出，理论上恢复延迟最低（~loopback）\n");
 
+    /* ══════════════════════════════════════════════════
+     * PART 8: 低 PPS 专项延迟测试（ppf=1 均匀发包，10%/5% 丢包）
+     * 目标：量化 Method B 在 5-30pps 真实游戏 pps 区间的收益
+     * V-FEC 理论下界 = 2/pps：5pps=400ms 10pps=200ms 15pps=133ms 20pps=100ms 25pps=80ms 30pps=67ms
+     * ══════════════════════════════════════════════════ */
+    printf("\n【PART 8】低PPS专项延迟测试（ppf=1均匀 / book4 / 10s）\n");
+    printf("  V-FEC理论下界 = 2/pps：5pps=400ms 10pps=200ms 20pps=100ms 30pps=67ms\n");
+    sep('-');
+    printf("  %-6s %-6s %10s %10s %8s %8s %8s %10s\n",
+           "pps","丢包%","p50(µs)","p99(µs)","帧完整率","FEC恢复","ARQ(ack)","总开销%");
+    sep('-');
+
+    int p8_pps[]  = {5, 10, 15, 20, 25, 30};
+    int p8_loss[] = {5, 10};
+    for (int loss : p8_loss) {
+        for (int pps : p8_pps) {
+            SceneCfg cfg{};
+            char nm[64]; snprintf(nm,sizeof(nm),"P8 %dpps %d%%", pps, loss);
+            cfg.name = nm;
+            cfg.loss.model = LOSS_RANDOM;
+            cfg.loss.loss_pct = loss;
+            cfg.pps = pps;
+            cfg.pkts_per_frm = 1;   // 均匀发包，ppf=1
+            cfg.duration_s = 10;
+            cfg.book_id = 4;
+            auto r = run_scene(cfg);
+            double frm  = r.frm_total > 0 ? r.frm_complete*100.0/r.frm_total : 0;
+            uint64_t tt = r.bw_a.total_b + r.bw_b.total_b;
+            double ovhd = r.app_payload>0 ? (tt-r.app_payload)*100.0/r.app_payload : 0;
+            printf("  %-6d %-6d %10u %10u %7.2f%% %8u %8u %9.1f%%\n",
+                   pps, loss, r.p50, r.p99, frm, r.fec_rec, r.arq_ack, ovhd);
+        }
+        sep('-');
+    }
     sep('=');
     printf("  测试完成\n");
     sep('=');

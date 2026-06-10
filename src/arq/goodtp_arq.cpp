@@ -413,8 +413,10 @@ arq_32bit_quick_resend_pos_:
 ack_32bit_del_node_pos_:
 #endif
         // cached the first for deleting boost or harq node with the same first sn.
-        first_sn_vec[first_sn_num] = cur_node->first_pack_sn_;
-        first_sn_num += 1;
+        if (first_sn_num < MAX_RSV_WIN_SIZE) {
+            first_sn_vec[first_sn_num] = cur_node->first_pack_sn_;
+            first_sn_num += 1;
+        }
 
         gtp_pack_vec[cach_pos] = cur_node->pack_;
 
@@ -570,8 +572,10 @@ arq_64bit_quick_resend_pos_:
 ack_64bit_del_node_pos_:
 #endif
         // cached the first for deleting boost or harq node with the same first sn.
-        first_sn_vec[first_sn_num] = cur_node->first_pack_sn_;
-        first_sn_num += 1;
+        if (first_sn_num < MAX_RSV_WIN_SIZE) {
+            first_sn_vec[first_sn_num] = cur_node->first_pack_sn_;
+            first_sn_num += 1;
+        }
 
         gtp_pack_vec[cach_pos] = cur_node->pack_;
 
@@ -728,8 +732,10 @@ void GtpArq::ProcNotLossNack(const u32 &head_sn, const u32 &tail_sn) {
 nack_noloss_del_node_pos_:
 #endif
         // cached the first for deleting boost or harq node with the same first sn.
-        first_sn_vec[first_sn_num] = cur_node->first_pack_sn_;
-        first_sn_num += 1;
+        if (first_sn_num < MAX_RSV_WIN_SIZE) {
+            first_sn_vec[first_sn_num] = cur_node->first_pack_sn_;
+            first_sn_num += 1;
+        }
 
         gtp_pack_vec[cach_pos] = cur_node->pack_;
 
@@ -874,8 +880,10 @@ nack_quick_resend_pos_:
 nack_hasloss_del_node_pos_:
 #endif
         // cached the first for deleting boost or harq node with the same first sn.
-        first_sn_vec[first_sn_num] = cur_node->first_pack_sn_;
-        first_sn_num += 1;
+        if (first_sn_num < MAX_RSV_WIN_SIZE) {
+            first_sn_vec[first_sn_num] = cur_node->first_pack_sn_;
+            first_sn_num += 1;
+        }
 
         c3buf_vec[cach_pos] = cur_node->pack_;
 

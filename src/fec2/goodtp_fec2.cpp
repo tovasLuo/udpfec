@@ -75,7 +75,7 @@ inline goodtp_pos CalcPackPosInMatrix(const goodtp_pos &cache_pos, const u32 &ma
 
     default: {
          GtpLog(write_log_cb, kGtpFecMd, kGtpLogLevelWarning, "Invalid matrix's size(%u)\r\n", matrix_size);
-         matrix_pos = cache_pos % ((goodtp_pos)(matrix_size - 1));
+         matrix_pos = cache_pos % ((goodtp_pos)matrix_size);
     }
     }
 
