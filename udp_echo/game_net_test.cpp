@@ -928,6 +928,129 @@ int main() {
     printf("  测试完成\n");
     sep('=');
 
+    /* ══════════════════════════════════════════════════
+     * PART 9: book4 vs book5 带宽效率对比（5%丢包核心场景）
+     * 目标：量化 book5(2×1 H, FEC=33%) vs book4(2×2 H+V, FEC=50%)
+     *        在低丢包（2%/5%/8%）下的带宽与延迟 trade-off
+     * 编译说明：默认 book4；以 -DFORCE_FEC_BOOK_LOW_LOSS=5 重新编译库
+     *           可切换为 book5 对照组
+     * ══════════════════════════════════════════════════ */
+    printf("\n【PART 9】低丢包 FEC book 带宽效率对比（ppf=1 均匀，150pps，10s）\n");
+    printf("  [library book for 2-10%% loss range: see [算法]book_id 输出]\n");
+    sep('-');
+    printf("  %-6s %-6s %8s %8s %7s %7s %7s %9s %9s %10s\n",
+           "pps","丢包%","p50(µs)","p99(µs)","帧完%","FEC恢","ARQ(ack)","FEC占%","总开销%","book实");
+    sep('-');
+
+    struct P9Row {
+        int pps; int loss;
+        uint32_t p50, p99;
+        double frm_pct, fec_pct, ovhd;
+        uint32_t fec_rec, arq_ack;
+        uint32_t book_actual;
+    };
+
+    int p9_pps[]  = {50, 100, 150, 200};
+    int p9_loss[] = {2, 5, 8};
+
+    for (int loss : p9_loss) {
+        for (int pps : p9_pps) {
+            SceneCfg cfg{};
+            char nm[64]; snprintf(nm, sizeof(nm), "P9 %dpps %d%%", pps, loss);
+            cfg.name         = nm;
+            cfg.loss.model   = LOSS_RANDOM;
+            cfg.loss.loss_pct = loss;
+            cfg.pps          = pps;
+            cfg.pkts_per_frm = 1;
+            cfg.duration_s   = 10;
+            cfg.book_id      = 4;
+
+            auto r = run_scene(cfg);
+
+            uint64_t tt     = r.bw_a.total_b + r.bw_b.total_b;
+            double frm      = r.frm_total > 0 ? r.frm_complete * 100.0 / r.frm_total : 0;
+            double fec_pct  = r.bw_a.total_b > 0 ? r.bw_a.fec_b * 100.0 / r.bw_a.total_b : 0;
+            double ovhd     = r.app_payload > 0 ? (tt - r.app_payload) * 100.0 / r.app_payload : 0;
+
+            printf("  %-6d %-6d %8u %8u %6.2f%% %7u %8u %8.1f%% %8.1f%% %10u\n",
+                   pps, loss, r.p50, r.p99, frm, r.fec_rec, r.arq_ack, fec_pct, ovhd, r.book_id_actual);
+        }
+        sep('-');
+    }
+
+    /* 补充：极低 pps（游戏低频场景）5% 丢包 */
+    printf("  低PPS补充（5%%丢包）\n");
+    sep('-');
+    int p9_low_pps[] = {10, 20, 30};
+    for (int pps : p9_low_pps) {
+        SceneCfg cfg{};
+        char nm[64]; snprintf(nm, sizeof(nm), "P9low %dpps 5%%", pps);
+        cfg.name         = nm;
+        cfg.loss.model   = LOSS_RANDOM;
+        cfg.loss.loss_pct = 5;
+        cfg.pps          = pps;
+        cfg.pkts_per_frm = 1;
+        cfg.duration_s   = 10;
+        cfg.book_id      = 4;
+
+        auto r = run_scene(cfg);
+
+        uint64_t tt    = r.bw_a.total_b + r.bw_b.total_b;
+        double frm     = r.frm_total > 0 ? r.frm_complete * 100.0 / r.frm_total : 0;
+        double fec_pct = r.bw_a.total_b > 0 ? r.bw_a.fec_b * 100.0 / r.bw_a.total_b : 0;
+        double ovhd    = r.app_payload > 0 ? (tt - r.app_payload) * 100.0 / r.app_payload : 0;
+
+        printf("  %-6d %-6d %8u %8u %6.2f%% %7u %8u %8.1f%% %8.1f%% %10u\n",
+               pps, 5, r.p50, r.p99, frm, r.fec_rec, r.arq_ack, fec_pct, ovhd, r.book_id_actual);
+    }
+    sep('=');
+    printf("  PART 9 完成\n");
+    printf("  提示：以 -DFORCE_FEC_BOOK_LOW_LOSS=5 重建 libfec.a 后重跑，对比 book5 数据\n");
+    sep('=');
+
+    /* ══════════════════════════════════════════════════
+     * PART 10: 50pps 边界专项测试（30s，统计稳定性验证）
+     * 目标：确认 book5 在 30-60pps 边界的 p99 安全性
+     * 关键：10s 测试仅 ~1.5 次双丢事件，30s 可获 ~4.5 次，p99 更稳定
+     * 双丢概率：loss=5%: P=0.25%/对；loss=8%: P=0.64%/对
+     * ══════════════════════════════════════════════════ */
+    printf("\n【PART 10】50pps 边界专项（ppf=1 均匀，30s）\n");
+    printf("  [测量 p50/p99/p999 帧交付延迟，帧完整率，带宽开销]\n");
+    sep('-');
+    printf("  %-6s %-6s %8s %8s %8s %7s %7s %9s %10s\n",
+           "pps","丢包%","p50(µs)","p99(µs)","帧完%","FEC恢","ARQ(ack)","总开销%","book实");
+    sep('-');
+
+    int p10_pps[]  = {30, 40, 50, 60};
+    int p10_loss[] = {5, 8};
+
+    for (int loss : p10_loss) {
+        for (int pps : p10_pps) {
+            SceneCfg cfg{};
+            char nm[64]; snprintf(nm, sizeof(nm), "P10 %dpps %d%%", pps, loss);
+            cfg.name          = nm;
+            cfg.loss.model    = LOSS_RANDOM;
+            cfg.loss.loss_pct = loss;
+            cfg.pps           = pps;
+            cfg.pkts_per_frm  = 1;
+            cfg.duration_s    = 30;
+            cfg.book_id       = 4;
+
+            auto r = run_scene(cfg);
+
+            uint64_t tt    = r.bw_a.total_b + r.bw_b.total_b;
+            double frm     = r.frm_total > 0 ? r.frm_complete * 100.0 / r.frm_total : 0;
+            double ovhd    = r.app_payload > 0 ? (tt - r.app_payload) * 100.0 / r.app_payload : 0;
+
+            printf("  %-6d %-6d %8u %8u %7.3f%% %7u %8u %9.1f%% %10u\n",
+                   pps, loss, r.p50, r.p99, frm, r.fec_rec, r.arq_ack, ovhd, r.book_id_actual);
+        }
+        sep('-');
+    }
+    sep('=');
+    printf("  PART 10 完成（book 类型见 book实 列：4=book4, 5=book5）\n");
+    sep('=');
+
     RmLoadGtpModule();
     return 0;
 }

@@ -19,6 +19,7 @@
 #include "goodtp_macrodefine.h"
 #include "goodtp.h"
 
+
 #include <stdlib.h>
 #include <stdio.h>
 #include <cerrno>
@@ -369,23 +370,28 @@ boost_alg_row_end_pos_:
         //   >25% loss: book4 FEC pkts also get lost; extra parity buys little recovery
         //              but costs more ARQ retrans; book2 wins on total bandwidth.
         //              test data: 25% loss → book2=193% vs book4=292% overhead
+        //
+        // bad 状态 FEC book 选择（effective loss < 10%）：
+        //   pps <  10: book4（2×2 H+V），低 pps 数据不足，保守选择
+        //   pps >= 10: book5（2×1 H），节省 30-51pp 带宽开销，p99 ≈ book4±4%
+        //   实测依据：PART10 30s 专项测试，30-60pps × 5%/8% 丢包全场景对比
         u32 fec2_ml_book_id1[][5] = {
             // loss<2%  2-10%  10-25%  25-50%  >=50%
-            {4,         4,     4,      2,      2},  // pps <  10  test speed
-            {4,         4,     4,      2,      2},  // pps <  100 phone game
-            {4,         4,     4,      2,      2},  // pps <  200 phone game
-            {4,         4,     4,      2,      2},  // pps <  300 phone game
-            {4,         4,     4,      2,      2},  // pps <  500 phone game
-            {4,         4,     4,      2,      2}   // pps >= 500 pc game
+            {4,         4,     4,      2,      2},  // pps <  10  保留 book4
+            {5,         5,     4,      2,      2},  // pps <  60  book5 (30-59pps 验证安全)
+            {5,         5,     4,      2,      2},  // pps <  100
+            {5,         5,     4,      2,      2},  // pps <  170
+            {5,         5,     4,      2,      2},  // pps <  250
+            {5,         5,     4,      2,      2}   // pps >= 250
         };
         u32 fec2_ml_book_id2[][5] = {
             // loss<2%  2-10%  10-25%  25-50%  >=50%
-            {4,         4,     4,      2,      2},  // pps <  10  test speed
-            {4,         4,     4,      2,      2},  // pps <  100 phone game
-            {4,         4,     4,      2,      2},  // pps <  200 phone game
-            {4,         4,     4,      2,      2},  // pps <  300 phone game
-            {4,         4,     4,      2,      2},  // pps <  500 phone game
-            {4,         4,     4,      2,      2}   // pps >= 500 pc game
+            {4,         4,     4,      2,      2},  // pps <  10  保留 book4
+            {5,         5,     4,      2,      2},  // pps <  60
+            {5,         5,     4,      2,      2},  // pps <  100
+            {5,         5,     4,      2,      2},  // pps <  170
+            {5,         5,     4,      2,      2},  // pps <  250
+            {5,         5,     4,      2,      2}   // pps >= 250
         };
         #endif
 
