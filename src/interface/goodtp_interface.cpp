@@ -541,7 +541,10 @@ u32 GtpPacketReceive(GtpHandler_p gtp_hdl, void *pack, u32 pack_sz, GtpAddr *tra
     GtpAddrToStrIpAndPort(tran_addr, self_ip, peer_ip, &self_port, &peer_port);
     #endif
 
-    u32 frame_size = 0;
+    u32 frame_size      = 0;
+    u8  saved_pack_type = 0;
+    u32 saved_pack_sn   = 0;
+    u32 saved_first_sn  = 0;
 
     #if (1 == ENABLE_INNER_VALID_CHCK)
     nret = InnerCheckPacketInvalid(gtp_pack, pack_sz);
@@ -681,8 +684,15 @@ u32 GtpPacketReceive(GtpHandler_p gtp_hdl, void *pack, u32 pack_sz, GtpAddr *tra
 
     nret = session->PackPrepHandler(gtp_pack, pack_size, &frame, &frame_size);
     if (GEN_ERR(kGtpSessionMd, kDuplicatePackErr) == nret) {
+        u8  dup_pack_type = gtp_pack->pack_type_;
+        u32 dup_pack_sn   = gtp_pack->pack_sn_;
         session->PackPostHandler(gtp_pack, pack_size, tran_addr);
-
+        // ARQ retransmits use sequential new pack_sn_ values interleaved in the DATA stream.
+        // Pass dup_pack_sn (not first_sn) so the reorder buffer advances past the retransmit
+        // slot in the pack_sn_ sequence.
+        if (((u8)(GtpPackType::kGtpDataPackType)) == dup_pack_type) {
+            session->ReorderEnqueue(dup_pack_sn, NULL, 0, tran_addr, session->last_active_ts_us_);
+        }
         nret = GTP_OK;
         goto pack_receive_exit_pos_;
     }
@@ -697,99 +707,40 @@ u32 GtpPacketReceive(GtpHandler_p gtp_hdl, void *pack, u32 pack_sz, GtpAddr *tra
         goto pack_receive_exit_pos_;
     }
 
+    // Save pack_type and pack_sn before PackPostHandler, which frees FEC packet buffers.
+    saved_pack_type = gtp_pack->pack_type_;
+    saved_pack_sn   = gtp_pack->pack_sn_;
+    // For retransmits (repeat_counter > 0), first_sn (the original logical SN) is stored
+    // immediately after the fixed header.  We pass it as a hint to ReorderEnqueue so that when
+    // the retransmit's new pack_sn_ would trigger a large-gap flush (delta >= REORDER_BUF_SIZE),
+    // the frame lands at its correct logical position instead.
+    saved_first_sn = (0 == gtp_pack->repeat_counter_)
+                     ? gtp_pack->pack_sn_
+                     : *((u32*)(((u8*)gtp_pack) + sizeof(GtpPacket)));
+
     nret = session->PackPostHandler(gtp_pack, pack_size, tran_addr);
     if (GTP_OK != nret) {
         GtpLog(gtp_obj->cb_.write_log_cb_, kGtpInterfaceMd, kGtpLogLevelDebug, "%s:%u<-->%s:%u gtp_inst=%p gtp_hdl=%p "\
                "ver=0x%02x type=0x%02x pack_sn=%u first_sn=%u Call PackPostHandler() failed(0x%08x)\r\n ",
                session->pb_dt_.self_ip_, (u32)(session->pb_dt_.self_port_), session->pb_dt_.peer_ip_,
-               (u32)(session->pb_dt_.peer_port_), gtp_obj, gtp_hdl, (u32)(gtp_pack->goodtp_ver_),
-               (u32)(gtp_pack->pack_type_), gtp_pack->pack_sn_, *((u32*)(((u8*)gtp_pack) + gtp_pack->header_offset_)),
+               (u32)(session->pb_dt_.peer_port_), gtp_obj, gtp_hdl, (u32)saved_pack_type,
+               (u32)saved_pack_type, saved_pack_sn, *((u32*)(((u8*)gtp_pack) + gtp_pack->header_offset_)),
                nret);
-        goto pack_receive_exit_pos_;
-    }
-
-    if (NULL == frame) {
-        #if (1 == ENABLE_INTERFACE_LOG)
-        GtpLog(gtp_obj->cb_.write_log_cb_, kGtpInterfaceMd, kGtpLogLevelDebug, "%s:%u<-->%s:%u gtp_inst=%p gtp_hdl=%p "\
-               "ver=0x%02x type=0x%02x pack_sn=%u first_sn=%u isn't socks5 packet\r\n ",
-               self_ip, (u32)self_port, peer_ip, (u32)peer_port, gtp_obj, gtp_hdl, (u32)version,
-               (u32)pack_type, pack_sn, first_sn);
-        #endif
         goto pack_receive_exit_pos_;
     }
 
     tran_addr->timestamp_ = session->pb_dt_.tran_addr_.timestamp_;
 
-    #if (1 == ENABLE_FRAME_COPY_OUT)
-    if ((kRealTimeStream == session->pb_dt_.tran_addr_.stream_type_) || (0x02 > gtp_pack->goodtp_ver_)) {
-        mem_spec = GtpPackSizeToMemSpec(frame_size);
-    } else {
-        mem_spec = GtpPackSizeToMemSpec(pack_size);
+    // Only DATA packets go through the reorder buffer.
+    // FEC-recovered packets arrive via Fec2RestoreFrameReceive which calls ReorderEnqueue directly.
+    // FEC, ACK, NACK, and RTT packets use non-sequential or overlapping SNs and must be excluded.
+    if (((u8)(GtpPackType::kGtpDataPackType)) == saved_pack_type) {
+        // Primary key is pack_sn_ (retransmit's new SN) for normal nearby-slot behavior.
+        // Pass saved_first_sn as a hint: if pack_sn_ would cause a large-gap flush, fall back
+        // to the logical first_sn so the retransmit doesn't discard buffered good data.
+        session->ReorderEnqueue(saved_pack_sn, frame, frame_size, tran_addr,
+                                session->last_active_ts_us_, saved_first_sn);
     }
-    out_mem = session->pack_mem_pool_.MallocTranBuf(NULL, 0, &out_size, (void**)(&out_addr), (BufSizeType)mem_spec);
-    if (NULL == out_mem) {
-        const string &err_info = session->pack_mem_pool_.Error();
-        GtpLog(gtp_obj->cb_.write_log_cb_, kGtpInterfaceMd, kGtpLogLevelError, "calling MallocTranBuf() "\
-               "failed(%s)\r\n", err_info.c_str());
-
-        const string &stat_info = session->pack_mem_pool_.TranMemPoolStatInfo();
-        GtpLog(gtp_obj->cb_.write_log_cb_, kGtpArqMd, kGtpLogLevelWarning, "%s\r\n", stat_info.c_str());
-
-        goto pack_receive_exit_pos_;
-    }
-
-    if ((kRealTimeStream == session->pb_dt_.tran_addr_.stream_type_) || (0x02 > gtp_pack->goodtp_ver_)) {
-        memcpy(out_mem, frame, frame_size);
-        frame = out_mem;
-    } else {
-        memcpy(out_mem, gtp_pack, pack_size);
-        gtp_pack = (GtpPacket*)out_mem;
-    }
-
-    memcpy(out_addr, tran_addr, sizeof(GtpAddr));
-    tran_addr  = out_addr;
-    #endif
-
-    #if (1 == ENABLE_INTERFACE_LOG)
-    GtpLog(gtp_obj->cb_.write_log_cb_, kGtpInterfaceMd, kGtpLogLevelDebug, "%s:%u<-->%s:%u gtp_inst=%p gtp_hdl=%p "\
-           "ver=0x%02x type=0x%02x pack_sn=%u first_sn=%u start frame cb out\r\n ",
-           self_ip, (u32)self_port, peer_ip, (u32)peer_port, gtp_obj, gtp_hdl, (u32)version, (u32)pack_type,
-           pack_sn, first_sn);
-    #endif
-
-    #if (1 == ENABLE_MD_PERF_CHECK)
-    {
-    u64 back_recv_tm = session->pb_dt_.recv_consume_.ts_us_;
-    u64 bkup_send_tm = session->pb_dt_.send_consume_.ts_us_;
-    
-    u64 app_consume_us = GtpSysTimestampUs();
-    nret = gtp_obj->cb_.receive_frame_cb_(gtp_hdl, frame, frame_size, tran_addr);
-    app_consume_us = GtpSysTimestampUs() - app_consume_us;
-    session->pb_dt_.app_recv_consume_.CacheConsumeTime(app_consume_us);
-
-    session->pb_dt_.send_consume_.ts_us_ = bkup_send_tm + app_consume_us;
-    session->pb_dt_.recv_consume_.ts_us_ = back_recv_tm + app_consume_us;
-    }
-    #else
-    nret = gtp_obj->cb_.receive_frame_cb_(gtp_hdl, frame, frame_size, tran_addr);
-    #endif
-
-    if (GTP_OK != nret) {
-        GtpLog(gtp_obj->cb_.write_log_cb_, kGtpInterfaceMd, kGtpLogLevelError,
-               "calling receive_frame_cb_() failed(0x%08x)\r\n", nret);
-    }
-
-    #if (1 == ENABLE_INTERFACE_LOG)
-    GtpLog(gtp_obj->cb_.write_log_cb_, kGtpInterfaceMd, kGtpLogLevelDebug, "%s:%u<-->%s:%u gtp_inst=%p gtp_hdl=%p "\
-           "ver=0x%02x type=0x%02x pack_sn=%u first_sn=%u end frame cb out\r\n ",
-           self_ip, (u32)self_port, peer_ip, (u32)peer_port, gtp_obj, gtp_hdl, (u32)version, (u32)pack_type,
-           pack_sn, first_sn);
-    #endif
-
-    #if (1 == ENABLE_FRAME_COPY_OUT)
-    session->pack_mem_pool_.FreeTranBuf(out_mem);
-    out_mem = NULL;
-    #endif
 
 pack_receive_exit_pos_:
     #if (1 == ENABLE_INTERFACE_LOG)

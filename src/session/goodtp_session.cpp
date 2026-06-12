@@ -992,6 +992,10 @@ GtpSession::GtpSession(const goodtp_sock &sfd, const u8 dst_sock_addr[], const u
     memset(self_bin_ip_, 0x00, GTP_MAX_BIN_IP_SZ);
     memset(peer_bin_ip_, 0x00, GTP_MAX_BIN_IP_SZ);
     memset(cache_loss_, 0x00, sizeof(cache_loss_));
+    memset(reorder_buf_, 0x00, sizeof(reorder_buf_));
+    reorder_inited_       = 0;
+    reorder_next_sn_      = 0;
+    reorder_gap_since_us_ = 0;
 
     send_session_stat_ = (u8)(GtpSessStat::kInitReq);
     recv_session_stat_ = (u8)(GtpSessStat::kInitRes);
@@ -1069,12 +1073,18 @@ GtpSession::GtpSession(GtpAddr *tran_addr, const GtpHandler &gtp_hdl, GtpMemPool
     memset(self_bin_ip_, 0x00, GTP_MAX_BIN_IP_SZ);
     memset(peer_bin_ip_, 0x00, GTP_MAX_BIN_IP_SZ);
     memset(cache_loss_, 0x00, sizeof(cache_loss_));
+    memset(reorder_buf_, 0x00, sizeof(reorder_buf_));
+    reorder_inited_       = 0;
+    reorder_next_sn_      = 0;
+    reorder_gap_since_us_ = 0;
 
     send_session_stat_ = (u8)(GtpSessStat::kInitReq);
     recv_session_stat_ = (u8)(GtpSessStat::kInitRes);
 }
 
 GtpSession::~GtpSession() {
+    ReorderClear();
+
     if (NULL != data_win_s_) {
         DeleteSlidWin(data_win_s_);
         data_win_s_ = NULL;
@@ -1362,63 +1372,9 @@ u32 GtpSession::Fec2RestoreFrameReceive(void *session, GtpHandler gtp_hdl, GtpPa
     frame += pack->header_offset_;
     size  -= pack->header_offset_;
 
-    #if (1 == ENABLE_FRAME_COPY_OUT)
-    u32 mem_spec = kMemSpec1Dot5k;
-
-    /* the pack's memory has been cached to fec receiving buffer,
-       so needing a new memory for handing in frame. */
-    u8 *out_mem = NULL;
-    GtpAddr *out_addr = NULL;
-    
-    mem_spec = GtpPackSizeToMemSpec(size);
-    out_mem  = s_obj->pack_mem_pool_.MallocTranBuf(NULL, 0, &ret_value, (void**)(&out_addr), (BufSizeType)mem_spec);
-    if (NULL == out_mem) {
-        const string &err_info = s_obj->pack_mem_pool_.Error();
-        GtpLog(s_obj->cb_.write_log_cb_, kGtpSessionMd, kGtpLogLevelError, "Call MallocTranBuf() failed(%s).\r\n",
-               err_info.c_str());
-
-        const string &stat_info = s_obj->pack_mem_pool_.TranMemPoolStatInfo();
-        GtpLog(s_obj->cb_.write_log_cb_, kGtpArqMd, kGtpLogLevelWarning, "%s\r\n", stat_info.c_str());
-
-        return GTP_OK;
-    }
-
-    memcpy(out_mem, frame, size);
-    memcpy(out_addr, tran_addr, sizeof(GtpAddr));
-
-    frame     = out_mem;
-    tran_addr = out_addr;
-    #endif
-
-    #if (1 == ENABLE_MD_PERF_CHECK)
-    {
-    u64 back_recv_tm = s_obj->pb_dt_.recv_consume_.ts_us_;
-    u64 bkup_send_tm = s_obj->pb_dt_.send_consume_.ts_us_;
-
-    u64 app_consume_us = GtpSysTimestampUs();
-
-    ret_value = s_obj->cb_.receive_frame_cb_(GtpHdlIntToPointer(gtp_hdl), frame, size, tran_addr);
-    app_consume_us = GtpSysTimestampUs() - app_consume_us;
-    s_obj->pb_dt_.app_recv_consume_.CacheConsumeTime(app_consume_us);
-
-    s_obj->pb_dt_.send_consume_.ts_us_ = bkup_send_tm + app_consume_us;
-    s_obj->pb_dt_.recv_consume_.ts_us_ = back_recv_tm + app_consume_us;
-    }
-    #else
-    ret_value = s_obj->cb_.receive_frame_cb_(GtpHdlIntToPointer(gtp_hdl), frame, size, tran_addr);
-    #endif
-
-    #if (1 == ENABLE_FRAME_COPY_OUT)
-    s_obj->pack_mem_pool_.FreeTranBuf(out_mem);
-    out_mem = NULL;
-    #endif
-
-    if (GTP_OK != ret_value) {
-        GtpLog(s_obj->cb_.write_log_cb_, kGtpSessionMd, kGtpLogLevelError,
-               "%s:%u<-->%s:%u hand on fec restore frame failed(0x%08x) when calling receive_frame_cb().\r\n",
-               s_obj->pb_dt_.self_ip_, (u32)(s_obj->pb_dt_.self_port_),
-               s_obj->pb_dt_.peer_ip_, (u32)(s_obj->pb_dt_.peer_port_), ret_value);
-    }
+    // Route through per-session reorder buffer so the application always receives packets in SN order.
+    // ReorderEnqueue delivers immediately if in-order, or buffers until the gap is filled or times out.
+    s_obj->ReorderEnqueue(pack->pack_sn_, frame, size, tran_addr, s_obj->last_active_ts_us_);
 
     // Register the FEC-recovered SN in data_win_r_ so the next ACK bitmap includes it.
     // Without this, data_win_r_ has no record of the recovered packet, the ACK omits the SN,
@@ -1432,7 +1388,164 @@ u32 GtpSession::Fec2RestoreFrameReceive(void *session, GtpHandler gtp_hdl, GtpPa
                win_ret, pack->pack_sn_);
     }
 
-    return ret_value;
+    return GTP_OK;
+}
+
+void GtpSession::ReorderClear() {
+    for (u32 i = 0; i < REORDER_BUF_SIZE; i++) {
+        if (NULL != reorder_buf_[i].frame) {
+            pack_mem_pool_.FreeTranBuf(reorder_buf_[i].frame);
+            reorder_buf_[i].frame = NULL;
+        }
+        reorder_buf_[i].placeholder_ = 0;
+    }
+    reorder_inited_       = 0;
+    reorder_next_sn_      = 0;
+    reorder_gap_since_us_ = 0;
+}
+
+void GtpSession::ReorderFlush(u64 ts_us) {
+    while (true) {
+        u32 idx = reorder_next_sn_ % REORDER_BUF_SIZE;
+        ReorderSlot &slot = reorder_buf_[idx];
+        if (NULL == slot.frame && 0 == slot.placeholder_) break;
+        if (NULL != slot.frame) {
+            cb_.receive_frame_cb_(app_gtp_hdl_, slot.frame, slot.frame_size, &slot.tran_addr);
+            pack_mem_pool_.FreeTranBuf(slot.frame);
+            slot.frame = NULL;
+        }
+        slot.placeholder_ = 0;
+        reorder_next_sn_++;
+    }
+
+    bool found = false;
+    for (u32 i = 0; i < REORDER_BUF_SIZE && !found; i++) {
+        if (NULL != reorder_buf_[i].frame || 0 != reorder_buf_[i].placeholder_) found = true;
+    }
+    if (!found) {
+        reorder_gap_since_us_ = 0;
+    } else if (0 == reorder_gap_since_us_) {
+        // A new gap remains after flush (e.g. second missing SN); restart timer.
+        reorder_gap_since_us_ = ts_us;
+    }
+}
+
+void GtpSession::ReorderEnqueue(u32 sn, u8 *frame, u32 frame_size,
+                                 const GtpAddr *tran_addr, u64 ts_us,
+                                 u32 first_sn_hint) {
+    if (0 == reorder_inited_) {
+        reorder_next_sn_ = sn;
+        reorder_inited_  = 1;
+    }
+
+    i32 delta = (i32)(sn - reorder_next_sn_);
+
+    if (delta < 0) {
+        return;  // duplicate or late retransmit already passed
+    }
+
+    if (NULL == frame) {
+        // Non-data SN (FEC packet, ACK, RTT probe): advance past it if in-order,
+        // or mark as placeholder so ReorderFlush can skip it.
+        if (0 == delta) {
+            reorder_next_sn_++;
+            reorder_gap_since_us_ = 0;
+            ReorderFlush(ts_us);
+        } else if ((u32)delta < REORDER_BUF_SIZE) {
+            u32 idx = sn % REORDER_BUF_SIZE;
+            // Don't overwrite a slot that already holds real recovered data (e.g. from FEC).
+            // If the slot is empty, mark it as a placeholder so ReorderFlush can advance past it.
+            if (NULL == reorder_buf_[idx].frame) {
+                reorder_buf_[idx].placeholder_ = 1;
+                if (0 == reorder_gap_since_us_) {
+                    reorder_gap_since_us_ = ts_us;
+                }
+            }
+        }
+        return;
+    }
+
+    if (0 == delta) {
+        // In-order data: deliver directly
+        cb_.receive_frame_cb_(app_gtp_hdl_, frame, frame_size, (GtpAddr*)tran_addr);
+        reorder_next_sn_++;
+        reorder_gap_since_us_ = 0;
+        ReorderFlush(ts_us);
+        return;
+    }
+
+    // Out-of-order data: gap exists (delta > 0)
+    if ((u32)delta >= REORDER_BUF_SIZE) {
+        // ARQ retransmit fallback: if the caller supplied a first_sn_hint (logical SN) that
+        // differs from sn (retransmit's new pack_sn_), land at the logical position instead
+        // of flushing the entire window and skipping all buffered packets in between.
+        if (UINT32_MAX != first_sn_hint && first_sn_hint != sn) {
+            sn    = first_sn_hint;
+            delta = (i32)(sn - reorder_next_sn_);
+            if (delta < 0) {
+                return;  // logical SN already delivered; discard
+            }
+            // Re-enter the normal buffering path with the corrected SN.
+            // Fall through to the small-delta or delta==0 handling below.
+            if (0 == delta) {
+                cb_.receive_frame_cb_(app_gtp_hdl_, frame, frame_size, (GtpAddr*)tran_addr);
+                reorder_next_sn_++;
+                reorder_gap_since_us_ = 0;
+                ReorderFlush(ts_us);
+                return;
+            }
+            if ((u32)delta < REORDER_BUF_SIZE) {
+                goto reorder_buffer_slot_;  // buffer at first_sn_hint's slot
+            }
+            // first_sn_hint is also a large gap — fall through to flush
+        }
+        // Gap too large: flush the buffered window first (preserves in-order delivery
+        // for packets already buffered), then skip the large gap.
+        for (u32 i = 0; i < REORDER_BUF_SIZE; i++) {
+            u32 flush_sn = reorder_next_sn_ + i;
+            u32 fidx     = flush_sn % REORDER_BUF_SIZE;
+            if (NULL != reorder_buf_[fidx].frame) {
+                cb_.receive_frame_cb_(app_gtp_hdl_, reorder_buf_[fidx].frame,
+                                      reorder_buf_[fidx].frame_size, &reorder_buf_[fidx].tran_addr);
+                pack_mem_pool_.FreeTranBuf(reorder_buf_[fidx].frame);
+                reorder_buf_[fidx].frame = NULL;
+            }
+            reorder_buf_[fidx].placeholder_ = 0;
+        }
+        reorder_next_sn_      = sn;
+        reorder_gap_since_us_ = 0;
+        cb_.receive_frame_cb_(app_gtp_hdl_, frame, frame_size, (GtpAddr*)tran_addr);
+        reorder_next_sn_++;
+        return;
+    }
+
+reorder_buffer_slot_:
+
+    u32 idx = sn % REORDER_BUF_SIZE;
+    if (NULL != reorder_buf_[idx].frame) {
+        pack_mem_pool_.FreeTranBuf(reorder_buf_[idx].frame);
+        reorder_buf_[idx].frame = NULL;
+    }
+
+    u32 copy_size = 0;
+    void *dummy_addr = NULL;
+    u32 mem_spec = GtpPackSizeToMemSpec(frame_size);
+    u8 *copy = pack_mem_pool_.MallocTranBuf(NULL, 0, &copy_size, &dummy_addr, (BufSizeType)mem_spec);
+    if (NULL == copy) {
+        // OOM: deliver directly to avoid stalling
+        cb_.receive_frame_cb_(app_gtp_hdl_, frame, frame_size, (GtpAddr*)tran_addr);
+        return;
+    }
+
+    memcpy(copy, frame, frame_size);
+    reorder_buf_[idx].frame        = copy;
+    reorder_buf_[idx].frame_size   = frame_size;
+    reorder_buf_[idx].arrive_ts_us = ts_us;
+    memcpy(&reorder_buf_[idx].tran_addr, tran_addr, sizeof(GtpAddr));
+
+    if (0 == reorder_gap_since_us_) {
+        reorder_gap_since_us_ = ts_us;
+    }
 }
 
 u32 GtpSession::FramePrepHandler(void *frame, const u32 &frame_size, GtpPacket **out_pack, u32 *out_pack_size,
@@ -2504,6 +2617,21 @@ timer_handler_continue_pos_:
     fec2_obj_.ClearResource(arq_.r_cur_loss_rate_, ts_us);
     #endif
 
+    // Reorder gap timeout: skip a gap that hasn't been filled within 2×inter-packet interval.
+    if (0 != reorder_gap_since_us_) {
+        u32 pps = pb_dt_.recv_stat_.data_pack_pps_;
+        if (0 == pps) pps = 1;
+        u64 timeout_us = 2000000ULL / (u64)pps;    // 2×inter-packet: fast gap recovery
+        if (timeout_us < 13000)  timeout_us = 13000;   // floor 13ms
+        if (timeout_us > 500000) timeout_us = 500000;  // ceil 500ms
+
+        if ((ts_us - reorder_gap_since_us_) >= timeout_us) {
+            reorder_next_sn_++;
+            reorder_gap_since_us_ = 0;
+            ReorderFlush(ts_us);
+        }
+    }
+
     return;
 }
 
@@ -3258,6 +3386,8 @@ void GtpSession::ResetSession(const u32 &cur_sn, const u32 &sort_sn, const u32 &
 
     ResetSlidWin(data_win_r_, l_border_sn, last_active_ts_us_);
     ResetSlidWin(filter_win_, l_border_sn, last_active_ts_us_);
+
+    ReorderClear();
 
     if (GTP_YES == chg_status_flag) {
         GtpLog(cb_.write_log_cb_, kGtpSessionMd, kGtpLogLevelWarning, "the peer sending has been recreated, "\

@@ -136,11 +136,20 @@ class GtpSession {
     void UpdateSelfIp(u8 sock_addr[], const u32 &sock_addr_len);
     void UpdatePeerIp(u8 sock_addr[], const u32 &sock_addr_len);
 
+    // first_sn_hint: for ARQ retransmits, the logical SN (original pack_sn_). When sn would
+    // trigger a large-gap flush (delta >= REORDER_BUF_SIZE), use first_sn_hint instead so the
+    // retransmit lands at its correct logical position without flushing buffered good data.
+    // Pass UINT32_MAX (default) to disable the fallback.
+    void ReorderEnqueue(u32 sn, u8 *frame, u32 frame_size, const GtpAddr *tran_addr, u64 ts_us,
+                        u32 first_sn_hint = UINT32_MAX);
+
 PRIVATE:
     void SendSetRecvRttPacket(void);
     void SendRttTestResPacket(const u64 &ts_us);
     void ResetSession(const u32 &cur_sn, const u32 &sort_sn, const u32 &chg_status_flag);
     void RttHandler(const u32 &rtt_us);
+    void ReorderFlush(u64 ts_us);
+    void ReorderClear();
     u32  CalcHeaderSize(const u32 &hash, const u32 &user_id, const u32 &resend_num);
     u32  CalcHeaderSizeVersion01(const u32 &hash, const u32 &user_id, const u32 &resend_num);
     u32  PrintHarqParam(u8 *out_str, const u32 &mem_size);
@@ -212,6 +221,23 @@ PRIVATE:
 
     u32 test_rtt_period_us_;
     u32 recv_max_data_sn_;   // max data SN seen on receive side; 0=uninitialized
+
+    // ---------- receive-side reorder buffer ----------
+    static const u32 REORDER_BUF_SIZE = 16;
+
+    struct ReorderSlot {
+        u8*     frame;          // NULL = empty; non-NULL = data copy in pack_mem_pool_
+        u8      placeholder_;   // 1 = non-data SN (FEC/ACK/RTT) placeholder; skip delivery on flush
+        u32     frame_size;
+        u64     arrive_ts_us;
+        GtpAddr tran_addr;
+    };
+
+    ReorderSlot reorder_buf_[REORDER_BUF_SIZE];
+    u32  reorder_next_sn_;      // next SN to deliver in order
+    u8   reorder_inited_;       // 0 until first data packet
+    u64  reorder_gap_since_us_; // when current gap timer started (0 = no active gap)
+    // -------------------------------------------------
 
     u32 loss_sum_;
     u32 self_session_ttl_us_;
