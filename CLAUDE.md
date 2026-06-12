@@ -151,7 +151,7 @@ TimerHandler
 | `DEFAULT_FEC2_BOOK_ID` | 4 | 默认 FEC 模式（2×2 H+V） |
 | `MAX_SESSION_NUM` (server) | 5120 | 最大并发 session 数 |
 | `MIN_SESSION_TTL_US` | 4,000,000 | session 超时（4s） |
-| `DEFAULT_RTO_TIMEOUT_US` | 500,000 | 默认 RTO（500ms） |
+| `DEFAULT_RTO_TIMEOUT_US` | 100,000 | 默认 RTO（100ms） |
 | `MIN_RTO_US` / `MAX_RTO_US` | 25,000 / 500,000 | RTO 范围 |
 | `MAX_RETRAN_PACKET_TIMES` | 3 | 最大重传次数 |
 | `ARQ_NODE_ARRAY_SIZE` | 512 | ARQ 二级索引槽数 |

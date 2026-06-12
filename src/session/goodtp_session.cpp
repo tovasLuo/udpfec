@@ -163,9 +163,9 @@ proc_sender_network_quality_pos_:
 
                     #if (2 == APPLICATION_TYPE)
                     u32 fec2_encode_book_id[] = {
-                        4,  // pps <  10  test speed
-                        4,  // pps <  50  phone game
-                        4,  // pps <  100 phone game
+                        5,  // pps <  10  V-FEC arrives after gap timer; book5 saves ~50% FEC BW
+                        5,  // pps <  50  same reasoning (covers ≤30pps; 31-49 borderline but fine)
+                        4,  // pps <  100 pc game
                         4,  // pps <  150 pc game
                         4   // pps >= 150 pc game
                     };
@@ -377,8 +377,8 @@ boost_alg_row_end_pos_:
         //   实测依据：PART10 30s 专项测试，30-60pps × 5%/8% 丢包全场景对比
         u32 fec2_ml_book_id1[][5] = {
             // loss<2%  2-10%  10-25%  25-50%  >=50%
-            {4,         4,     4,      2,      2},  // pps <  10  保留 book4
-            {5,         5,     4,      2,      2},  // pps <  60  book5 (30-59pps 验证安全)
+            {5,         5,     4,      2,      2},  // pps <  10  book5: V-FEC arrives after gap timer
+            {5,         5,     4,      2,      2},  // pps <  60  book5 (10-59pps 验证安全)
             {5,         5,     4,      2,      2},  // pps <  100
             {5,         5,     4,      2,      2},  // pps <  170
             {5,         5,     4,      2,      2},  // pps <  250
@@ -386,7 +386,7 @@ boost_alg_row_end_pos_:
         };
         u32 fec2_ml_book_id2[][5] = {
             // loss<2%  2-10%  10-25%  25-50%  >=50%
-            {4,         4,     4,      2,      2},  // pps <  10  保留 book4
+            {5,         5,     4,      2,      2},  // pps <  10  book5: V-FEC arrives after gap timer
             {5,         5,     4,      2,      2},  // pps <  60
             {5,         5,     4,      2,      2},  // pps <  100
             {5,         5,     4,      2,      2},  // pps <  170

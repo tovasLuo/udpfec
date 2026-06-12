@@ -36,6 +36,7 @@
 #include <stdarg.h>
 #include <algorithm>
 #include <atomic>
+#include <cstddef>
 #include <vector>
 
 #include "goodtp.h"
@@ -54,7 +55,7 @@ static uint64_t now_us() {
 
 /* ─────────── 帧格式 ─────────── */
 #define FRAME_MAGIC  0xC0DEBABE
-#define PAYLOAD_SZ   192
+#define PAYLOAD_SZ   188   /* 192 - 4 bytes reserved for CRC */
 
 struct GamePkt {
     uint32_t magic;
@@ -63,7 +64,16 @@ struct GamePkt {
     uint32_t pkts_per_frame;
     uint64_t send_ts_us;
     uint8_t  pad[PAYLOAD_SZ];
+    uint32_t crc;          /* XOR-checksum of all preceding bytes; detects FEC corruption */
 };
+
+/* Simple non-crypto checksum: XOR every 4-byte word preceding the crc field. */
+static uint32_t pkt_crc(const GamePkt *p) {
+    const uint32_t *w = (const uint32_t *)p;
+    uint32_t v = 0;
+    for (size_t i = 0; i < offsetof(GamePkt, crc) / sizeof(uint32_t); i++) v ^= w[i];
+    return v;
+}
 
 /* ─────────── 丢包模型 ─────────── */
 enum LossModel { LOSS_NONE, LOSS_RANDOM, LOSS_BURST, LOSS_INTERMIT };
@@ -199,7 +209,7 @@ struct SceneCfg {
     int  reorder_win  = 0;
     int  pps          = 150;
     int  pkts_per_frm = 3;
-    int  duration_s   = 6;
+    int  duration_s   = 60;
     int  book_id      = 4;
 };
 
@@ -236,6 +246,7 @@ static uint32_t     g_sent_frm = 0, g_recv_frm = 0;
 static uint64_t     g_app_payload = 0;
 static uint32_t     g_fec_anomaly = 0;
 static uint32_t     g_quintuple_cnt = 0;
+static uint32_t     g_corruption = 0;  /* CRC mismatch after FEC/ARQ recovery */
 
 /* ─────────── GoodTP 回调 ─────────── */
 static uint32_t SendCbA(GtpHandler_p, void *pack, uint32_t sz, GtpAddr *addr) {
@@ -249,6 +260,8 @@ static uint32_t RecvCbB(GtpHandler_p, void *frame, uint32_t sz, GtpAddr *) {
     if (sz < sizeof(GamePkt)) return GTP_OK;
     GamePkt *pkt = (GamePkt*)frame;
     if (pkt->magic != FRAME_MAGIC) return GTP_OK;
+
+    if (pkt->crc != pkt_crc(pkt)) g_corruption++;
 
     g_recv_pkt++;
 
@@ -363,7 +376,7 @@ SceneResult run_scene(const SceneCfg &cfg) {
     g_bw_a.reset(); g_bw_b.reset(); g_ds.reset();
     g_dropped = 0; g_sent_pkt = 0; g_recv_pkt = 0;
     g_sent_frm = 0; g_recv_frm = 0; g_app_payload = 0;
-    g_fec_anomaly = 0; g_quintuple_cnt = 0;
+    g_fec_anomaly = 0; g_quintuple_cnt = 0; g_corruption = 0;
 
     /* 预分配帧记录 */
     /* pps = 总包/秒；frame_interval = pkts_per_frm/pps；frames = pps/pkts_per_frm × duration */
@@ -436,6 +449,9 @@ SceneResult run_scene(const SceneCfg &cfg) {
                 pkt.pkt_in_frame   = (uint32_t)p;
                 pkt.pkts_per_frame = (uint32_t)cfg.pkts_per_frm;
                 pkt.send_ts_us     = now_us();
+                for (size_t bi = 0; bi < sizeof(pkt.pad); bi++)
+                    pkt.pad[bi] = (uint8_t)(rand() & 0xFF);
+                pkt.crc = pkt_crc(&pkt);
 
                 uint32_t msz = 0;
                 GtpAddr *ta  = nullptr;
@@ -568,8 +584,8 @@ static void print_result(const SceneResult &r, int book_id, int pps) {
     printf("  %-44s book=%d pps=%d\n", r.name, book_id, pps);
     printf("  丢包(模拟)%5.1f%% | 包交付率%6.2f%% | 帧完整率%6.2f%%\n",
            eff_loss, delivery, frm_succ);
-    printf("  FEC恢复%4u  ARQ(rto)%4u  ARQ(ack)%4u  ARQ(boost)%4u  FEC异常%u  SN跳跃告警%u\n",
-           r.fec_rec, r.arq_rto, r.arq_ack, r.arq_boost, g_fec_anomaly, g_quintuple_cnt);
+    printf("  FEC恢复%4u  ARQ(rto)%4u  ARQ(ack)%4u  ARQ(boost)%4u  FEC异常%u  SN跳跃告警%u  CRC错误%u\n",
+           r.fec_rec, r.arq_rto, r.arq_ack, r.arq_boost, g_fec_anomaly, g_quintuple_cnt, g_corruption);
     printf("  延迟 p50=%uµs  p99=%uµs\n", r.p50, r.p99);
     printf("  带宽 A→B%.0fKB FEC占%.1f%% 重传占%.1f%% B→A控制%.1f%% 总开销%.1f%%\n",
            tx_a/1024.0, fec_pct, retr_pct, ack_pct, overhead);
@@ -619,7 +635,7 @@ int main() {
     for (auto &sc : p1) {
         SceneCfg cfg{};
         cfg.name = sc.name; cfg.loss = sc.loss; cfg.reorder_win = sc.reorder;
-        cfg.pps = 150; cfg.pkts_per_frm = 1; cfg.duration_s = 6; cfg.book_id = 4;
+        cfg.pps = 150; cfg.pkts_per_frm = 1; cfg.duration_s = 60; cfg.book_id = 4;
         sep(); print_result(run_scene(cfg), 4, 150);
     }
 
@@ -644,7 +660,7 @@ int main() {
         SceneCfg cfg{};
         cfg.name = bk.label;
         cfg.loss.model = LOSS_RANDOM; cfg.loss.loss_pct = 15;
-        cfg.pps = 150; cfg.pkts_per_frm = 3; cfg.duration_s = 6; cfg.book_id = bk.book_id;
+        cfg.pps = 150; cfg.pkts_per_frm = 3; cfg.duration_s = 60; cfg.book_id = bk.book_id;
         auto r = run_scene(cfg);
         sep(); print_result(r, bk.book_id, 150);
         BwRow row{};
@@ -672,7 +688,7 @@ int main() {
         for (int bk : sw_books) {
             SceneCfg cfg{};
             cfg.loss.model = LOSS_RANDOM; cfg.loss.loss_pct = loss;
-            cfg.pps = 100; cfg.pkts_per_frm = 2; cfg.duration_s = 5; cfg.book_id = bk;
+            cfg.pps = 100; cfg.pkts_per_frm = 2; cfg.duration_s = 60; cfg.book_id = bk;
             char nm[64]; snprintf(nm,sizeof(nm),"loss=%d%% book=%d", loss, bk);
             cfg.name = nm;
             auto r = run_scene(cfg);
@@ -753,7 +769,7 @@ int main() {
             cfg.name = nm;
             cfg.loss.model = (loss==0) ? LOSS_NONE : LOSS_RANDOM;
             cfg.loss.loss_pct = loss;
-            cfg.pps = pps; cfg.pkts_per_frm = 2; cfg.duration_s = 8; cfg.book_id = 4;
+            cfg.pps = pps; cfg.pkts_per_frm = 2; cfg.duration_s = 60; cfg.book_id = 4;
             auto r = run_scene(cfg);
             double frm = r.frm_total > 0 ? r.frm_complete*100.0/r.frm_total : 0;
             printf("  %-10s %-6d %10u %10u %7.2f%% %8u %8u\n",
@@ -786,7 +802,7 @@ int main() {
         cfg.name = nm;
         cfg.loss.model = (loss==0) ? LOSS_NONE : LOSS_RANDOM;
         cfg.loss.loss_pct = loss;
-        cfg.pps = 150; cfg.pkts_per_frm = 1; cfg.duration_s = 6; cfg.book_id = 4;
+        cfg.pps = 150; cfg.pkts_per_frm = 1; cfg.duration_s = 60; cfg.book_id = 4;
         auto r = run_scene(cfg);
         double frm = r.frm_total > 0 ? r.frm_complete*100.0/r.frm_total : 0;
         printf("  %-8d %10u %10u %7.2f%% %8u %8u %8u\n",
@@ -828,19 +844,19 @@ int main() {
 
     struct { const char *name; LossCfg loss; int reorder; int pps; int dur; } p6[] = {
         /* 50% 随机：FEC完全饱和，ARQ接管 */
-        {"E1 随机50%%（极端）150pps",    {LOSS_RANDOM,50},  0, 150, 6},
+        {"E1 随机50%%（极端）150pps",    {LOSS_RANDOM,50},  0, 150, 60},
         /* 高PPS下突发：300pps突发5连，FEC矩阵13ms填满，覆盖能力强 */
-        {"E2 突发5连/40间隔 300pps",     {LOSS_BURST,0,5,40},0, 300, 6},
+        {"E2 突发5连/40间隔 300pps",     {LOSS_BURST,0,5,40},0, 300, 60},
         /* 低PPS下突发：30pps突发5连，矩阵133ms，延迟极大 */
-        {"E3 突发5连/40间隔 30pps",      {LOSS_BURST,0,5,40},0, 30,  8},
+        {"E3 突发5连/40间隔 30pps",      {LOSS_BURST,0,5,40},0, 30,  60},
         /* 高强度突发：20连丢/200间隔 ~9%丢包但每次跨越5个FEC矩阵 */
-        {"E4 突发20连/200间隔 150pps",   {LOSS_BURST,0,20,200},0,150, 8},
+        {"E4 突发20连/200间隔 150pps",   {LOSS_BURST,0,20,200},0,150, 60},
         /* 乱序+30%丢包 复合最坏情况 */
-        {"E5 乱序win=4 + 30%% 150pps",  {LOSS_RANDOM,30},  4, 150, 8},
+        {"E5 乱序win=4 + 30%% 150pps",  {LOSS_RANDOM,30},  4, 150, 60},
         /* 300pps 20%丢包：高速游戏场景+中等丢包 */
-        {"E6 随机20%% 300pps FPS场景",  {LOSS_RANDOM,20},  0, 300, 6},
+        {"E6 随机20%% 300pps FPS场景",  {LOSS_RANDOM,20},  0, 300, 60},
         /* 间歇断流：100包平静/20包断 模拟无线信道切换 */
-        {"E7 间歇20断/100平静 150pps",  {LOSS_INTERMIT,0,5,40,100,20},0,150,8},
+        {"E7 间歇20断/100平静 150pps",  {LOSS_INTERMIT,0,5,40,100,20},0,150,60},
     };
 
     for (auto &sc : p6) {
@@ -871,7 +887,7 @@ int main() {
             cfg.name = nm;
             cfg.loss.model = (loss==0) ? LOSS_NONE : LOSS_RANDOM;
             cfg.loss.loss_pct = loss;
-            cfg.pps = 150; cfg.pkts_per_frm = ppf; cfg.duration_s = 6; cfg.book_id = 4;
+            cfg.pps = 150; cfg.pkts_per_frm = ppf; cfg.duration_s = 60; cfg.book_id = 4;
             auto r = run_scene(cfg);
             double frm = r.frm_total > 0 ? r.frm_complete*100.0/r.frm_total : 0;
             double fec_pct = r.bw_a.total_b>0 ? r.bw_a.fec_b*100.0/r.bw_a.total_b : 0;
@@ -913,7 +929,7 @@ int main() {
             cfg.loss.loss_pct = loss;
             cfg.pps = pps;
             cfg.pkts_per_frm = 1;   // 均匀发包，ppf=1
-            cfg.duration_s = 10;
+            cfg.duration_s = 60;
             cfg.book_id = 4;
             auto r = run_scene(cfg);
             double frm  = r.frm_total > 0 ? r.frm_complete*100.0/r.frm_total : 0;
@@ -962,7 +978,7 @@ int main() {
             cfg.loss.loss_pct = loss;
             cfg.pps          = pps;
             cfg.pkts_per_frm = 1;
-            cfg.duration_s   = 10;
+            cfg.duration_s   = 60;
             cfg.book_id      = 4;
 
             auto r = run_scene(cfg);
@@ -990,7 +1006,7 @@ int main() {
         cfg.loss.loss_pct = 5;
         cfg.pps          = pps;
         cfg.pkts_per_frm = 1;
-        cfg.duration_s   = 10;
+        cfg.duration_s   = 60;
         cfg.book_id      = 4;
 
         auto r = run_scene(cfg);
@@ -1033,7 +1049,7 @@ int main() {
             cfg.loss.loss_pct = loss;
             cfg.pps           = pps;
             cfg.pkts_per_frm  = 1;
-            cfg.duration_s    = 30;
+            cfg.duration_s    = 60;
             cfg.book_id       = 4;
 
             auto r = run_scene(cfg);
