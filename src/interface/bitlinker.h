@@ -1,14 +1,14 @@
-#ifndef _BIT_LINKER_H_
-#define _BIT_LINKER_H_
+#ifndef _GOOD_TP_H_
+#define _GOOD_TP_H_
 /*********************************************************************************************************************
 
                              Copyright (C), 2021-2031, Free Albort.Feng Studio
 
  *********************************************************************************************************************
-  File name: bitlinker.h
+  File name: goodtp.h
   Version  : Initial
   Author   : Albort.Feng
-  Function : Define the bit linker platform interface.
+  Function : Define the goodtp platform interface.
   Modify record:
   1.Date   : June 04, 2024
     Author : Albort.Feng
@@ -35,6 +35,18 @@
 
 #include <stdint.h>
 
+#if (_WIN32 || _WIN64)
+#if defined(GOODTP_STATIC)
+#define GOODTP_API
+#elif defined(GOODTP_BUILDING_DLL)
+#define GOODTP_API __declspec(dllexport)
+#else
+#define GOODTP_API __declspec(dllimport)
+#endif
+#else
+#define GOODTP_API
+#endif
+
 typedef int32_t GtpHandler;
 typedef void*   GtpHandler_p;
 
@@ -52,15 +64,7 @@ typedef void*   GtpHandler_p;
 #define GTP_MAX_STR_IP_SZ   (64)
 #define GTP_MAX_BIN_IP_SZ   (16)
 
-#define GTP_ETH_NAME_SZ     (128)
-
-#define GTP_IPV4            (0)
-#define GTP_IPV6            (1)
-
 #define INVALID_GTP_HANDLER    (((GtpHandler_p)GTP_ERR))
-
-#define GtpIpFamilyToStr(ip_family) ((GTP_IPV4 == (ip_family)) ? "ipv4" : \
-                                    ((GTP_IPV6 == (ip_family)) ? "ipv6" : "unknown"))
 
 typedef enum _GtpModuleIdEn {
     kGtpBaseMd      = 0x50,
@@ -70,9 +74,7 @@ typedef enum _GtpModuleIdEn {
     kGtpInterfaceMd = 0x54,
     kGtpArqMd       = 0x55,
     kGtpFecMd       = 0x56,
-    kGtpSortMd      = 0x57,
-    kGtpForecaseMd  = 0x58,
-    kDetectBlockMd  = 0x59
+    kGtpSortMd      = 0x57
 }GtpModuleIdEn;
 typedef uint32_t GtpModuleIdEnU32;
 
@@ -122,20 +124,7 @@ typedef enum _GtpErrorCodeEn {
     kGtpTranAddrSrcLenErr       = 0x0000602a,
     kGtpTranAddrDstMemErr       = 0x0000602b,
     kGtpTranAddrSrcMemErr       = 0x0000602c,
-    kGtpPackMemOutBoundryErr    = 0x0000602d,
-    kGtpSockAddrProtocalErr     = 0x0000602e,
-    kGtpAppFrameTooLargeErr     = 0x0000602f,
-    kGtpPackDataCheckFailedErr  = 0x00006030,
-    kInvalidQosErr              = 0x00006031,
-    kSnIsTooLateErr             = 0x00006032,
-    kNoUsingAuthFailedErr       = 0x00006033,
-    kPiplineBreakFailedErr      = 0x00006034,
-    kBinaryDeadlineFailedErr    = 0x00006035,
-    kCrtGaliosObjFailedErr      = 0x00006036,
-    kCrtSockHdlFailedErr        = 0x00006037,
-    kInvalidMixedPacketErr      = 0x00006038,
-    kInvalidStreamKeyErr        = 0x00006039,
-    kCheckPackContextFailedErr  = 0x0000603a
+    kGtpPackMemOutBoundryErr    = 0x0000602d
 }GtpErrorCodeEn;
 typedef uint32_t GtpErrorCodeEnU32;
 
@@ -201,38 +190,20 @@ typedef enum _PackMemSpec {
 }PackMemSpec;
 typedef uint32_t PackMemSpecU32;
 
-// these guarantees rely on the network don't disconnet and physical delay can't be too large.
 typedef enum _GtpStreamType {
-    kSuperRealTimeStream   = 0,  // maybe disorder output, jitter <= 10ms and loss <= 0.01%.
-    kOrderlyRealTimeStream = 1,  // order output, jitter <= 10ms and loss <= 0.01%.
-    kSuperReliableStream   = 2,  // maybe disorder output, max delay <= 3.0rtt and loss <= 0.0001% or 0 loss.
-    kOrderlyReliableStream = 3,  // order output, max delay <= 4.0rtt and loss <= 0.0001% or 0 loss.
+    kSuperRealTimeStream = 0,
+    kSuperReliableStream = 1,
 
-    kGtpStreamTypeButt     = 4
+    kGtpStreamTypeButt
 }GtpStreamType;
 typedef uint8_t GtpStreamTypeU8;
 
-typedef enum _GtpStreamQos {
-     kAutoAdptFecQos = 63,  // when network changes to bad, then open fec at once.
-     kFixedOnFecQos  = 62,  // when network is good, it always keeps min fec encode, when
-                            // network changes to bad, then adjusts fec encode by loss value.
-
-     kGtpStreamQosButt = 61
-}GtpStreamQos;
-
-typedef enum _BtlnkNetType {
-    kWirelessNetType  = 0,
-    kWiredLineNetType = 1,
-
-    kBtlnkNetTypeButt
-}BtlnkNetType;
-
-#define GtpPackSizeToMemSpec(size) ((256  > ((size) + 4)) ? kMemSpec256Bytes :\
-                                   ((512  > ((size) + 4)) ? kMemSpec512Bytes :\
-                                   ((1024 > ((size) + 4)) ? kMemSpec1k :\
-                                   ((1536 > ((size) + 4)) ? kMemSpec1Dot5k :\
-                                   ((4096 > ((size) + 4)) ? kMemSpec4k :\
-                                   ((8192 > ((size) + 4)) ? kMemSpec8k : kMemSpec64k))))))
+#define GtpPackSizeToMemSpec(size) ((256  > (size)) ? kMemSpec256Bytes :\
+                                   ((512  > (size)) ? kMemSpec512Bytes :\
+                                   ((1024 > (size)) ? kMemSpec1k :\
+                                   ((1536 > (size)) ? kMemSpec1Dot5k :\
+                                   ((4096 > (size)) ? kMemSpec4k :\
+                                   ((8192 > (size)) ? kMemSpec8k : kMemSpec64k))))))
 
 #ifdef __linux__
 #ifdef __i386__
@@ -243,11 +214,7 @@ typedef enum _BtlnkNetType {
 #endif
 
 #ifdef __APPLE__
-#if (arm64 == ARCHS_STANDARD)
-#define GTP_SOCK_ADDR_SZ (((sizeof(struct sockaddr_in6) & 0xFFFFFFFC) + 8))
-#else
-#define GTP_SOCK_ADDR_SZ (((sizeof(struct sockaddr_in6) & 0xFFFFFFF8) + 4))
-#endif
+#define GTP_SOCK_ADDR_SZ (((sizeof(struct sockaddr_in6) & 0xFFFFFFF8) + 8))
 #endif
 
 #if (_WIN32 || _WIN64)
@@ -260,17 +227,15 @@ typedef enum _BtlnkNetType {
 
 #pragma pack(1)
 typedef struct _GtpLinkerKey {
-    uint32_t sfd_;                          // [must] a network handler, it's socket handler when
-                                            //        net_protocal is udp.
-    uint32_t direction_;                    // [must] 1: sender, 2: receiver.
-    uint32_t peer_addr_len_;                // [must] peer_addr_'s byte length.
-    uint32_t self_addr_len_;                // [must] self_addr_'s byte length, when don't use
-                                            //        sendmsg() and recvmsg() for sfd_, it must be setted to 0.
-    uint8_t  peer_addr_[GTP_SOCK_ADDR_SZ];  // [must] the session's peer address, when net_protocal_ is udp, this
-                                            //        is the peer's socket address.
-    uint8_t  self_addr_[GTP_SOCK_ADDR_SZ];  // [option] the session's self address, when net_protocal_ is udp, this
-                                            //         is sfd_'s self socket address for using sendmsg() and recvmsg().
-    uint64_t stream_key_;                   // [out param] the application's stream key.
+    uint32_t sfd_;                                 // [must] send socket handler.
+    uint32_t direction_;                           // [must] 1: sender, 2: receiver.
+    uint32_t peer_addr_len_;                       // [must] peer_addr_'s byte length.
+    uint32_t self_addr_len_;                       // [must] self_addr_'s byte length, when don't use
+                                                   // sendmsg() and recvmsg() for sfd_, it must be setted to 0.
+    uint64_t stream_key_;                          // [option] stream key, same as GtpAddr::stream_key_.
+    uint8_t  peer_addr_[GTP_SOCK_ADDR_SZ];         // [must] sfd_'s peer socket address.
+    uint8_t  self_addr_[GTP_SOCK_ADDR_SZ];         // [option] sfd_'s self socket address for using sendmsg() and
+                                                   // recvmsg().
 }GtpLinkerKey;
 
 typedef struct _GtpLinkQuality {
@@ -283,7 +248,7 @@ typedef struct _GtpLinkQuality {
     uint8_t  self_ip_family_;    // 0:ipv4, 1:ipv6(GtpIpFamilyEn)
     uint8_t  peer_ip_family_;    // 0:ipv4, 1:ipv6(GtpIpFamilyEn)
     uint8_t  report_pos_;        // GtpNetQualityPosEn
-    uint8_t  net_type_;          // 0:wireless, 1:fixed line.
+    uint8_t  rsv_;
 
     const uint8_t *self_ip_;
     const uint8_t *peer_ip_;
@@ -306,67 +271,51 @@ typedef struct _GtpLinkQuality {
     uint32_t total_ack_loss_num_;
     uint32_t total_rto_loss_num_;
     uint32_t total_ack_err_num_;
-
-    uint16_t net_forecast_;      // 0: network is good,
-                                 // 1: it will occur network fault,
-                                 // others: unknown, it means current quality belongs to receiver, and
-                                 // receiver dosen't care network blocking, it can be used to switch path.
-    uint16_t net_blocked_;       // 0: don't block, 1: has been blocked, it can be used to switch socket.
+    uint32_t pre_congest_rank_;  // GtpPreCongestRankU32
 
     void *context_;
 
     GtpLinkerKey linker_key_;    // when linker exist loss, it can obtain slid window's bitmap easily.
 
-    uint32_t boost_resend_num_;
     uint32_t total_ai_repair_num_;
-    uint32_t total_harq_repair_num_;
     uint32_t loss_direct_;       // GtpLossDirectEnU32
     float    loss_;
     float    bitrage_chg_k_;
+    uint32_t net_type_;
+    uint32_t net_forecast_;
+    uint32_t net_blocked_;
+    uint32_t total_harq_repair_num_;
+    uint32_t boost_resend_num_;
 }GtpLinkQuality;
 
 typedef struct _GtpAddr {
-    void *context_;                         // [option] the running application env, it can be used to call back
-                                            // functions.
+    void *context_;                         // [option]the running application env, it can be used to transmit
+                                            // application' parameters.
 
-    uint8_t  context_info_[32];             // [option] using for application, it can cache any required data.
+    uint64_t timestamp_us_;                 // [option]  don't care if no using.
+    uint64_t stream_key_;                   // [option]  it isn't same for different stream, don't care if no using.
+    uint8_t  loss_;                         // [option]  don't care if no using.
+    uint8_t  qos_;                          // [option]  don't care if no using.
+    uint16_t stream_type_:1;                // [must] 0: real time transport(udp).
+                                            //        1: reliable transport(tcp).
 
-    uint64_t timestamp_us_;                 // [option] the current system's timestamp, don't care if no using.
-    uint64_t stream_key_;                   // [option] it isn't same for different stream, no using to 0.
-    uint8_t  loss_;                         // [option] current session's loss, unit: %, don't care if no using.
-    uint8_t  qos_;                          // [option] 63: open or close FEC adaptively, and choice FEC mode adatively.
-                                            //          62: allways open FEC, and choice FEC mode adaptively.
-                                            // discribe by GtpStreamQos, and don't care if no using.
-    uint16_t stream_type_:4;                // [must] 0: real time transport, jitter < 10ms, sucess rate > 99.999%.
-                                            //        1: real time transport and no disorder, jitter < 1.5RTT,
-                                            //           sucess rate > 99.9999%.
-                                            //        2: reliable transport, jitter < 3.0RTT, sucess rate > 99.99999%.
-                                            //        3: reliable transport and no disorder, jitter < 3.0RTT,
-                                            //           sucess rate > 99.99999%.
-                                            // discribes by GtpStreamType, real time stream uses large bandwidth when
-                                            // network is bad, while reliable stream uses little bandwidth, the two
-                                            // type stream don't use any bandwidth when network is good.
+    uint16_t smooth_jitter_:1;              // [must] 0: don't remove jitter for reliable stream.
+                                            //        1: remove jitter for reliable stream.
 
     uint16_t enable_key_:1;                 // [must] 0: don't use the stream_key_.
                                             //        1: using the stream_key_ to identify a stream session.
-    uint16_t alg_in_flow_:1;                // [must] 0: using stream_type and qos in this gtpaddr.
-                                            //        1: using stream_type and qos in flow header.
-    uint16_t bit_rsv0_:2;
-    uint16_t net_protocal_:4;               // [must] 0: the network protocal is udp.
-                                            //   others: to adapt.
-    uint16_t bit_rsv1_:4;
-    uint32_t sfd_;                          // [must] a network handler, it's socket handler when net_protocal is udp.
 
-    uint32_t self_addr_len_;                // [must] the self_peer_addr_'s byte length, when don't use sendmsg()
-                                            // and recvmsg() the self_peer_addr_ must be setted to 0.
+    uint16_t bit_rsv_:13;
+    uint32_t sfd_;                          // [must] send or receive socket handler.
+
+    uint32_t self_addr_len_;                // [must] the self_sock_addr_'s byte length, when don't use sendmsg()
+                                            // and recvmsg() the self_sock_addr_ must be setted to 0.
     uint32_t peer_addr_len_;                // [must] the peer_addr_'s byte length.
-    uint8_t  peer_addr_[GTP_SOCK_ADDR_SZ];  // [must] the session's peer address, when net_protocal_ is udp, this
-                                            // is the peer's socket address.
-    uint8_t  self_addr_[GTP_SOCK_ADDR_SZ];  // [option] the session's self address, when net_protocal_ is udp, this
-                                            // is sfd_'s self socket address for using sendmsg() and recvmsg().
+    uint8_t  peer_addr_[GTP_SOCK_ADDR_SZ];  // [must] peer socket address.
+    uint8_t  self_addr_[GTP_SOCK_ADDR_SZ];  // [option] sfd_'s self socket address for using sendmsg() and recvmsg().
 }GtpAddr;
 
-/* the bit linker supports 256bytes 512bytes 1k 1.5k, 4k, 8k and 64k packet memory cluster */
+/* the goodtp supports 256bytes 512bytes 1k 1.5k, 4k, 8k and 64k packet memory cluster */
 typedef struct _MemPoolConfig {
     uint32_t m_256bytes_num_;  // 256 bytes packet memory cluster item number.
     uint32_t m_512bytes_num_;  // 512 bytes packet memory cluster item number.
@@ -375,6 +324,8 @@ typedef struct _MemPoolConfig {
     uint32_t m_4k_num_;        // 4k packet memory cluster item number.
     uint32_t m_8k_num_;        // 8k packet memory cluster item number.
     uint32_t m_64k_num_;       // 64k packet memory cluster item number.
+    uint32_t arq_node_num_;    // 0: use library default ARQ node number.
+    uint32_t session_num_;     // 0: use library default session number.
 }MemPoolConfig;
 
 #pragma pack()
@@ -389,44 +340,22 @@ typedef void (*pCloseSessionCallBack)(GtpHandler_p gtp_hdl, void *context);
 #pragma pack(1)
 
 typedef struct _GtpCallBackParam {
-    pSendPackCallBack send_pack_cb_;         // [must] mustn't be NULL, the bit linker calls this interface to complete
+    pSendPackCallBack send_pack_cb_;         // [must] mustn't be NULL, the goodtp calls this interface to complete
                                              // sending packet.
 
-    pReceivFrameCallBack receive_frame_cb_;  // [must] mustn't be NULL, the bit linker calls this interface to hand in
-                                             // the application data coming from network.
+    pReceivFrameCallBack receive_frame_cb_;  // [must] mustn't be NULL, the goodtp calls this interface to hand in the
+                                             // application data coming from network.
 
-    pReportLinkQualityCallBack report_link_quality_cb_;  // [option] if it isn't NULL, the bit linker calls this
-                                                         // interface to report current linker's network quality,
-                                                         // while it is usually quick and right.
+    pReportLinkQualityCallBack report_link_quality_cb_;  // [option] if it isn't NULL, the goodtp calls this interface
+                                                         // to report current linker's network quality, while it is
+                                                         // usually quick and right.
 
-    pLogCallBack write_log_cb_;             // [option] when it's NULL, the bit linker works quietly, while don't
-                                            // recommend.
-    pLogLevelCallBack cur_log_level_cb_;    // [option] when log level >= the current process's log level,
-                                            // the bit linker calls the write_log_cb_ to output itself logs.
+    pLogCallBack write_log_cb_;             // [option] when it's NULL, the goodtp works quietly, while don't recommend.
+    pLogLevelCallBack cur_log_level_cb_;    // [option] when log level >= the current process's log level, the goodtp
+                                            // calls the write_log_cb_ to output itself logs.
 
-    pCloseSessionCallBack close_session_cb_;  // [option] when bit linker closes a session actively, calls this
-                                              // interface to notice application.
+    pCloseSessionCallBack close_session_cb_;
 }GtpCallBackParam;
-
-typedef struct _GtpIpAddrs {
-    uint8_t ip_family_;    // 0: ipv4, 1: ipv6, other: unknown.
-    uint8_t byte_rsv_[7];
-
-    struct _GtpIpAddrs *next_;
-
-    uint8_t if_name[GTP_ETH_NAME_SZ];
-    uint8_t ip_address_[GTP_MAX_STR_IP_SZ];
-}GtpIpAddrs;
-
-#define GtpIpAddrsNext(gtp_ip_addrs) ((NULL == (gtp_ip_addrs)) ? NULL : ((GtpIpAddrs*)(gtp_ip_addrs))->next_)
-#define GtpIpAddrClear(gtp_ip_addr)  {\
-    if (NULL != (gtp_ip_addr)) {\
-        (gtp_ip_addr)->ip_family_     = 3;\
-        (gtp_ip_addr)->next_          = NULL;\
-        memset((gtp_ip_addr)->ip_address_, 0x00, GTP_MAX_STR_IP_SZ);\
-        memset((gtp_ip_addr)->if_name, 0x00, GTP_ETH_NAME_SZ);\
-    }\
-}
 
 #pragma pack()
 
@@ -448,7 +377,7 @@ Mdf history  :
   Mdf context: new function
 
 *****************************************************************************************************************/
-uint32_t InsLoadGtpModule(void);
+GOODTP_API uint32_t InsLoadGtpModule(void);
 
 /*****************************************************************************************************************
 Name     : RmLoadGtpModule
@@ -464,7 +393,7 @@ Mdf history  :
   Mdf context: new function
 
 *****************************************************************************************************************/
-uint32_t RmLoadGtpModule(void);
+GOODTP_API uint32_t RmLoadGtpModule(void);
 
 /*****************************************************************************************************************
 Name     : CreateGtpInstance
@@ -483,8 +412,8 @@ Mdf history  :
   Mdf context: new function
 
 *****************************************************************************************************************/
-GtpHandler_p CreateGtpInstance(uint32_t system_id, uint32_t session_ttl_us, GtpCallBackParam *reg_cb,
-                               MemPoolConfig *mem_pool_cfg);
+GOODTP_API GtpHandler_p CreateGtpInstance(uint32_t system_id, uint32_t session_ttl_us, GtpCallBackParam *reg_cb,
+                                          MemPoolConfig *mem_pool_cfg);
 
 /*****************************************************************************************************************
 Name     : DeleteGtpInstance
@@ -499,7 +428,7 @@ Mdf history  :
   Mdf context: new function
 
 *****************************************************************************************************************/
-uint32_t DeleteGtpInstance(GtpHandler_p gtp_hdl);
+GOODTP_API uint32_t DeleteGtpInstance(GtpHandler_p gtp_hdl);
 
 /*****************************************************************************************************************
 Name     : GtpMallocPackMem
@@ -520,8 +449,8 @@ Mdf history  :
   Mdf context: new function
 
 *****************************************************************************************************************/
-uint8_t *GtpMallocPackMem(GtpHandler_p gtp_hdl, uint8_t* old_pack_mem, uint32_t used_size,
-                          uint32_t *new_mem_usable_size, void **tran_addr_mem, uint32_t pack_len);
+GOODTP_API uint8_t *GtpMallocPackMem(GtpHandler_p gtp_hdl, uint8_t* old_pack_mem, uint32_t used_size,
+                                     uint32_t *new_mem_usable_size, void **tran_addr_mem, uint32_t pack_len);
 
 /*****************************************************************************************************************
 Name     : GtpFreePackMem
@@ -539,7 +468,7 @@ Mdf history  :
   Mdf context: new function
 
 *****************************************************************************************************************/
-void GtpFreePackMem(GtpHandler_p gtp_hdl, uint8_t *pack_mem);
+GOODTP_API void GtpFreePackMem(GtpHandler_p gtp_hdl, uint8_t *pack_mem);
 
 /*****************************************************************************************************************
 Name     : GtpFrameSend
@@ -560,8 +489,8 @@ Mdf history  :
   Mdf context: new function
 
 *****************************************************************************************************************/
-uint32_t GtpFrameSend(GtpHandler_p gtp_hdl, void *frame, uint32_t size, GtpAddr *tran_addr,
-                      uint32_t token, uint32_t token_id);
+GOODTP_API uint32_t GtpFrameSend(GtpHandler_p gtp_hdl, void *frame, uint32_t size, GtpAddr *tran_addr,
+                                 uint32_t token, uint32_t token_id);
 
 /*****************************************************************************************************************
 Name     : GtpCheckPacketInvalid
@@ -569,8 +498,6 @@ Function : check goodtp packet's validity.
 In param : GtpHandler_p gtp_hdl
            void *pack
            uint32_t pack_size
-           uint64_t *stream_key  // 0: invalid stream_key(it meases using udp five-tuple), others: valid stream_key.
-                                 // if don't care this, can be input NULL.
 Out param: void
 Return   : uint32_t    // GTP_OK: packet is valid, the others: packet is invalid.
 
@@ -580,7 +507,11 @@ Mdf history  :
     Mdf context: new function
 
 *****************************************************************************************************************/
-uint32_t GtpCheckPacketInvalid(void *pack, uint32_t pack_size, uint64_t*stream_key);
+GOODTP_API uint32_t GtpCheckPacketInvalid(void *pack, uint32_t pack_size, uint64_t *stream_key
+#ifdef __cplusplus
+                               = 0
+#endif
+);
 
 /*****************************************************************************************************************
 Name     : GtpPacketReceive
@@ -599,10 +530,10 @@ Mdf history  :
   Mdf context: new function
 
 *****************************************************************************************************************/
-uint32_t GtpPacketReceive(GtpHandler_p gtp_hdl, void *pack, uint32_t size, GtpAddr *tran_addr);
+GOODTP_API uint32_t GtpPacketReceive(GtpHandler_p gtp_hdl, void *pack, uint32_t size, GtpAddr *tran_addr);
 
 /*****************************************************************************************************************
-Name     : BitLinkerWheel
+Name     : PeriodGtpTimer
 Function : Application system shall call this interface periodically.
 In param : GtpHandler_p gtp_hdl
 Out param: void
@@ -614,7 +545,7 @@ Mdf history  :
   Mdf context: new function
 
 *****************************************************************************************************************/
-uint32_t BitLinkerWheel(GtpHandler_p gtp_hdl);
+GOODTP_API uint32_t BitLinkerWheel(GtpHandler_p gtp_hdl);
 
 /*****************************************************************************************************************
 Name     : GetLinkerQuality
@@ -630,7 +561,7 @@ Mdf history  :
   Mdf context: new function
 
 *****************************************************************************************************************/
-uint32_t GetLinkerQuality(GtpHandler_p gtp_hdl, GtpLinkerKey *linker_key, GtpLinkQuality *out_quality);
+GOODTP_API uint32_t GetLinkerQuality(GtpHandler_p gtp_hdl, GtpLinkerKey *linker_key, GtpLinkQuality *out_quality);
 
 /*****************************************************************************************************************
 Name     : LastGtpErrorInfo
@@ -647,7 +578,7 @@ Mdf history  :
   Mdf context: new function
 
 *****************************************************************************************************************/
-const char* LastGtpErrorInfo(void);
+GOODTP_API const char* LastGtpErrorInfo(void);
 
 /*****************************************************************************************************************
 Name     : GtpAddrToHostAddr
@@ -665,8 +596,8 @@ Mdf history  :
   Mdf context: new function
 
 *****************************************************************************************************************/
-uint32_t GtpAddrToHostAddr(GtpAddr *goodtp_addr, uint8_t out_self_ip[], uint8_t out_peer_ip[],
-                             uint16_t *out_self_port, uint16_t *out_peer_port);
+GOODTP_API uint32_t GtpAddrToHostAddr(GtpAddr *goodtp_addr, uint8_t out_self_ip[], uint8_t out_peer_ip[],
+                                      uint16_t *out_self_port, uint16_t *out_peer_port);
 
 /*****************************************************************************************************************
 Name     : GetGtpVersion
@@ -681,7 +612,7 @@ Mdf history  :
   Mdf context: new function
 
 *****************************************************************************************************************/
-uint8_t* GetGtpVersion(uint8_t *pout_ver);
+GOODTP_API uint8_t* GetGtpVersion(uint8_t *pout_ver);
 
 /*****************************************************************************************************************
 Name     : GetGtpPureVer
@@ -696,7 +627,7 @@ Mdf history  :
   Mdf context: new function
 
 *****************************************************************************************************************/
-uint8_t* GetGtpPureVer(uint8_t *pout_ver);
+GOODTP_API uint8_t* GetGtpPureVer(uint8_t *pout_ver);
 
 /*****************************************************************************************************************
 Name     : DelGtpLinker
@@ -712,7 +643,7 @@ Mdf history  :
   Mdf context: new function
 
 *****************************************************************************************************************/
-void DelGtpLinker(GtpHandler_p gtp_hdl, GtpAddr *tran_addr);
+GOODTP_API void DelGtpLinker(GtpHandler_p gtp_hdl, GtpAddr *tran_addr);
 
 /*****************************************************************************************************************
 Name     : PrintSessionWinBitMap
@@ -731,8 +662,8 @@ Mdf history  :
   Mdf context: new function
 
 *****************************************************************************************************************/
-uint32_t PrintSessionWinBitMap(GtpHandler_p gtp_hdl, const uint8_t *src_ip, const uint8_t *dst_ip,
-                               uint8_t *out_str, uint32_t mem_size);
+GOODTP_API uint32_t PrintSessionWinBitMap(GtpHandler_p gtp_hdl, const uint8_t *src_ip, const uint8_t *dst_ip,
+                                          uint8_t *out_str, uint32_t mem_size);
 
 /*****************************************************************************************************************
 Name     : GetAlgorithmParam
@@ -751,8 +682,8 @@ Mdf history  :
     Mdf context: new function
 
 *****************************************************************************************************************/
-uint32_t GetAlgorithmParam(GtpHandler_p gtp_hdl, const uint8_t *src_ip, const uint8_t *dst_ip,
-                           uint8_t *out_str, uint32_t mem_size);
+GOODTP_API uint32_t GetAlgorithmParam(GtpHandler_p gtp_hdl, const uint8_t *src_ip, const uint8_t *dst_ip,
+                                      uint8_t *out_str, uint32_t mem_size);
 
 /*****************************************************************************************************************
 Name     : ShowTotalLinker
@@ -770,7 +701,8 @@ Mdf history  :
   Mdf context: new function
 
 *****************************************************************************************************************/
-uint32_t ShowTotalLinker(GtpHandler_p gtp_hdl, const uint8_t *matched_str, uint8_t *out_str, uint32_t mem_size);
+GOODTP_API uint32_t ShowTotalLinker(GtpHandler_p gtp_hdl, const uint8_t *matched_str, uint8_t *out_str,
+                                    uint32_t mem_size);
 
 /*****************************************************************************************************************
 Name     : GetSlidWinBitMapInfo
@@ -788,7 +720,8 @@ Mdf history  :
     Mdf context: new function
 
 *****************************************************************************************************************/
-uint32_t GetSlidWinBitMapInfo(GtpHandler_p gtp_hdl, GtpLinkerKey *linker_key, uint8_t *out_str, uint32_t mem_size);
+GOODTP_API uint32_t GetSlidWinBitMapInfo(GtpHandler_p gtp_hdl, GtpLinkerKey *linker_key, uint8_t *out_str,
+                                         uint32_t mem_size);
 
 /*****************************************************************************************************************
 Name     : GetPackMemPoolStatus
@@ -805,7 +738,7 @@ Mdf history  :
     Mdf context: new function
 
 *****************************************************************************************************************/
-uint32_t GetPackMemPoolStatus(GtpHandler_p gtp_hdl, uint8_t out_status[], uint32_t mem_size);
+GOODTP_API uint32_t GetPackMemPoolStatus(GtpHandler_p gtp_hdl, uint8_t out_status[], uint32_t mem_size);
 
 /*****************************************************************************************************************
 Name     : GetSessionNumber
@@ -820,7 +753,7 @@ Mdf history  :
     Mdf context: new function
 
 *****************************************************************************************************************/
-uint32_t GetSessionNumber(GtpHandler_p gtp_hdl);
+GOODTP_API uint32_t GetSessionNumber(GtpHandler_p gtp_hdl);
 
 /*****************************************************************************************************************
 Name     : GtpGetStackFreeSize
@@ -835,27 +768,10 @@ Mdf history  :
     Mdf context: new function
 
 *****************************************************************************************************************/
-int64_t GtpGetStackFreeSize(uint32_t *stack_size);
-
-/*****************************************************************************************************************
-Name     : CalcOnePacketLength
-Function : get a bit linker packet's length, it's only four bytes of the header.
-In param : const uint8_t header[4]  // the four bytes of one bit linker packet.
-Out param: void
-Return   : int32_t  // -1(it isn't bit linker packet), others(bit linker packet's size, unit: byte).
-
-Mdf history  :
-1.Date       : 2025.05.13
-    Author     : Albert.Feng
-    Mdf context: new function
-
-*****************************************************************************************************************/
-int32_t CalcOnePacketLength(const uint8_t header[4]);
+GOODTP_API int64_t GtpGetStackFreeSize(uint32_t *stack_size);
 
 #ifdef __cplusplus
 }
 #endif
 
 #endif
-
-
