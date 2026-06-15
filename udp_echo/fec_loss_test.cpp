@@ -38,7 +38,7 @@
 #include <stdarg.h>
 #include <atomic>
 
-#include "goodtp.h"
+#include "bitlinker.h"
 
 /* ───────────────────── 配置 ───────────────────── */
 #define MAX_PAYLOAD     512
@@ -95,6 +95,10 @@ typedef struct InstCtx {
 
 static InstCtx g_inst_a;   /* 发送端 */
 static InstCtx g_inst_b;   /* 接收端 */
+
+/* 每个实例一把互斥锁，串行化所有库调用（GoodTP 单线程约束） */
+static pthread_mutex_t g_lock_a = PTHREAD_MUTEX_INITIALIZER;
+static pthread_mutex_t g_lock_b = PTHREAD_MUTEX_INITIALIZER;
 
 /* ───────────────────── 随机丢包 ───────────────────── */
 static int should_drop(void) {
@@ -160,14 +164,15 @@ static uint32_t LogLevelCb(void) { return 3; /* kGtpLogLevelError */ }
 
 /* ───────────────────── 接收线程 ───────────────────── */
 typedef struct RecvThreadArg {
-    InstCtx      *inst;
-    GtpHandler_p  gtp_hdl;
+    InstCtx         *inst;
+    GtpHandler_p     gtp_hdl;
+    pthread_mutex_t *lock;
 } RecvThreadArg;
 
 static void *recv_thread(void *arg) {
     RecvThreadArg *a   = (RecvThreadArg *)arg;
     InstCtx       *ctx = a->inst;
-    static uint8_t buf[65536];
+    static __thread uint8_t buf[65536];  /* per-thread to avoid static data race */
 
     while (g_running) {
         struct sockaddr_storage peer;
@@ -176,42 +181,50 @@ static void *recv_thread(void *arg) {
                              (struct sockaddr *)&peer, &peer_len);
         if (n <= 0) continue;
 
+        pthread_mutex_lock(a->lock);
         uint32_t  mem_len  = 0;
         GtpAddr  *tran_addr = NULL;
         uint8_t  *pack_mem = GtpMallocPackMem(a->gtp_hdl, NULL, 0, &mem_len,
                                                (void **)&tran_addr, (uint32_t)n);
-        if (!pack_mem) continue;
+        if (!pack_mem) { pthread_mutex_unlock(a->lock); continue; }
 
         memcpy(pack_mem, buf, n);
         tran_addr->context_       = ctx;
         tran_addr->sfd_           = (uint32_t)ctx->sfd_send;
-        tran_addr->stream_type_   = kRealTimeStream;
+        tran_addr->stream_type_   = kSuperRealTimeStream;
         tran_addr->enable_key_    = 0;
         tran_addr->self_addr_len_ = (uint32_t)sizeof(ctx->self_addr);
         memcpy(tran_addr->self_addr_, &ctx->self_addr, sizeof(ctx->self_addr));
-        tran_addr->sock_addr_len_ = (uint32_t)peer_len;
-        memcpy(tran_addr->sock_addr_, &peer, peer_len);
+        tran_addr->peer_addr_len_ = (uint32_t)peer_len;
+        memcpy(tran_addr->peer_addr_, &peer, peer_len);
 
         uint32_t ret = GtpPacketReceive(a->gtp_hdl, pack_mem, (uint32_t)n, tran_addr);
         if (GTP_OK != ret) {
             GtpFreePackMem(a->gtp_hdl, pack_mem);
         }
+        pthread_mutex_unlock(a->lock);
     }
     return NULL;
 }
 
 /* ───────────────────── 定时器线程 ───────────────────── */
 typedef struct TimerArg {
-    GtpHandler_p hdl_a;
-    GtpHandler_p hdl_b;
+    GtpHandler_p     hdl_a;
+    GtpHandler_p     hdl_b;
+    pthread_mutex_t *lock_a;
+    pthread_mutex_t *lock_b;
 } TimerArg;
 
 static void *timer_thread(void *arg) {
     TimerArg *t = (TimerArg *)arg;
     while (g_running) {
         usleep(TIMER_PERIOD_US);
-        PeriodGtpTimer(t->hdl_a);
-        PeriodGtpTimer(t->hdl_b);
+        pthread_mutex_lock(t->lock_a);
+        BitLinkerWheel(t->hdl_a);
+        pthread_mutex_unlock(t->lock_a);
+        pthread_mutex_lock(t->lock_b);
+        BitLinkerWheel(t->hdl_b);
+        pthread_mutex_unlock(t->lock_b);
     }
     return NULL;
 }
@@ -322,9 +335,9 @@ int main(int argc, char *argv[]) {
     }
 
     /* 线程启动 */
-    RecvThreadArg ra = {&g_inst_a, g_inst_a.gtp_hdl};
-    RecvThreadArg rb = {&g_inst_b, g_inst_b.gtp_hdl};
-    TimerArg      ta = {g_inst_a.gtp_hdl, g_inst_b.gtp_hdl};
+    RecvThreadArg ra = {&g_inst_a, g_inst_a.gtp_hdl, &g_lock_a};
+    RecvThreadArg rb = {&g_inst_b, g_inst_b.gtp_hdl, &g_lock_b};
+    TimerArg      ta = {g_inst_a.gtp_hdl, g_inst_b.gtp_hdl, &g_lock_a, &g_lock_b};
 
     pthread_t tid_ra, tid_rb, tid_timer;
     pthread_create(&tid_ra,    NULL, recv_thread, &ra);
@@ -345,6 +358,7 @@ int main(int argc, char *argv[]) {
             f.send_ts_us = now_us();
             snprintf(f.payload, sizeof(f.payload), "seq=%u", seq);
 
+            pthread_mutex_lock(&g_lock_a);
             uint32_t  mem_len  = 0;
             GtpAddr  *taddr    = NULL;
             uint8_t  *mem = GtpMallocPackMem(g_inst_a.gtp_hdl, NULL, 0, &mem_len,
@@ -353,12 +367,12 @@ int main(int argc, char *argv[]) {
                 memcpy(mem, &f, sizeof(f));
                 taddr->context_       = &g_inst_a;
                 taddr->sfd_           = (uint32_t)g_inst_a.sfd_send;
-                taddr->stream_type_   = kRealTimeStream;
+                taddr->stream_type_   = kSuperRealTimeStream;
                 taddr->enable_key_    = 0;
                 taddr->self_addr_len_ = (uint32_t)sizeof(g_inst_a.self_addr);
                 memcpy(taddr->self_addr_, &g_inst_a.self_addr, sizeof(g_inst_a.self_addr));
-                taddr->sock_addr_len_ = (uint32_t)sizeof(g_inst_a.peer_addr);
-                memcpy(taddr->sock_addr_, &g_inst_a.peer_addr, sizeof(g_inst_a.peer_addr));
+                taddr->peer_addr_len_ = (uint32_t)sizeof(g_inst_a.peer_addr);
+                memcpy(taddr->peer_addr_, &g_inst_a.peer_addr, sizeof(g_inst_a.peer_addr));
 
                 uint32_t ret = GtpFrameSend(g_inst_a.gtp_hdl, mem, sizeof(f), taddr, 0, 0);
                 if (GTP_OK == ret) {
@@ -367,6 +381,7 @@ int main(int argc, char *argv[]) {
                     GtpFreePackMem(g_inst_a.gtp_hdl, mem);
                 }
             }
+            pthread_mutex_unlock(&g_lock_a);
 
             next_send += interval_us;
         }

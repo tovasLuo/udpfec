@@ -18,7 +18,7 @@
     Mdf ctx: creating file, the c3mempool isn't reentrant entry for the multi thread.
 
 **********************************************************************************************************************/
-#include "goodtp.h"
+#include "bitlinker.h"
 #include "goodtp_macrodefine.h"
 #include <stdlib.h>
 #include <memory.h>
@@ -67,8 +67,10 @@
 #endif
 
 #define HEADER_RSV_SIZE             (128)
-#define TP_ADDR_RSV_SIZE            (128)
+#define TP_ADDR_RSV_SIZE            (160)   /* GtpAddr = 136B in bitlinker.h; 160B gives 24B headroom */
 #define BUF_OFFSET_SIZE             (HEADER_RSV_SIZE + TP_ADDR_RSV_SIZE)
+static_assert(sizeof(GtpAddr) <= TP_ADDR_RSV_SIZE,
+              "TP_ADDR_RSV_SIZE too small for GtpAddr — increase it to at least sizeof(GtpAddr)");
 #define BUF_ALIGAN_SIZE             (64)
 #define MIN_BUF_SIZE                (1)
 

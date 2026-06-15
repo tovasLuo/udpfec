@@ -17,7 +17,7 @@
 #include "goodtp_mgr.h"
 #include "goodtp_comstruct.h"
 #include "goodtp_macrodefine.h"
-#include "goodtp.h"
+#include "bitlinker.h"
 
 #include <stdio.h>
 #include <stdlib.h>

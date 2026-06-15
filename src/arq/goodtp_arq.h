@@ -18,7 +18,7 @@
 #include "goodtp_comstruct.h"
 #include "goodtp_macrodefine.h"
 #include "goodtp_mem_pool.h"
-#include "goodtp.h"
+#include "bitlinker.h"
 
 #include "tranmempool.h"
 

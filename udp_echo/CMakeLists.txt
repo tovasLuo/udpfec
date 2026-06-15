@@ -13,6 +13,7 @@ set(GOODTP_LIB "${CMAKE_CURRENT_SOURCE_DIR}/../build/libfec.a")
 include_directories(
     ${GOODTP_INC}
     ${CMAKE_CURRENT_SOURCE_DIR}/../src/utils
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src/interface
 )
 
 # 公共链接选项

@@ -19,7 +19,7 @@
 #include "goodtp_session.h"
 #include "goodtp_comstruct.h"
 #include "goodtp_macrodefine.h"
-#include "goodtp.h"
+#include "bitlinker.h"
 
 #include "tranmempool.h"
 

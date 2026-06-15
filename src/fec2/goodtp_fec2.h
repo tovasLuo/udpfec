@@ -19,7 +19,7 @@
 #include "goodtp_comstruct.h"
 #include "goodtp_macrodefine.h"
 #include "tranmempool.h"
-#include "goodtp.h"
+#include "bitlinker.h"
 
 #define MAX_RECV_FEC2_MATRIX_NUM ((MAX_FEC2_CACHE_CAPACITY >> 1))
 #define FEC2_RECV_MATRIX_ID_MASK ((MAX_RECV_FEC2_MATRIX_NUM - 1))

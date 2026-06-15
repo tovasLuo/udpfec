@@ -16,7 +16,7 @@
 
 *********************************************************************************************************************/
 #include "goodtp_macrodefine.h"
-#include "goodtp.h"
+#include "bitlinker.h"
 #include "tranmempool.h"
 
 #if (__linux__ || __APPLE__)
