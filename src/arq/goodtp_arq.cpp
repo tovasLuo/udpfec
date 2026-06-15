@@ -177,7 +177,7 @@ void GtpArq::CheckRtoRetran(const u64 &cur_ts_us) {
 
         if (GTP_YES == JudgeIsTranFailed(cur_head, rto_ts_us)) {
             ((GtpAddr*)(cur_head->tran_addr_))->loss_      = (u8)s_cur_loss_rate_;
-            ((GtpAddr*)(cur_head->tran_addr_))->timestamp_us_ = cur_ts_us;
+            ((GtpAddr*)(cur_head->tran_addr_))->timestamp_ = cur_ts_us;
 
             ack_err_counter_ += 1;
 
@@ -1120,7 +1120,7 @@ void GtpArq::CloneBoostNode(ArqNode *org_node, const u64 &ts_us) {
 }
 
 void GtpArq::TranFailedPostHandler(ArqNode *node, const u64 &cur_ts_us) {
-    if ((kSuperReliableStream > pb_dt_->tran_addr_.stream_type_) || (GTP_OFF == pb_dt_->alg_top_switch_)
+    if ((kReliableStream > pb_dt_->tran_addr_.stream_type_) || (GTP_OFF == pb_dt_->alg_top_switch_)
      || (GTP_YES == node->boost_node_flg_) || (GTP_YES == node->try_agin_flg_)) {
         pack_mem_pool_.FreeTranBuf((u8*)(node->pack_));
         arq_packet_pool_->FreeItem(node);

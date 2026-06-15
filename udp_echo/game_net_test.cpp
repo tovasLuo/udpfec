@@ -327,12 +327,12 @@ static void recv_and_deliver(int sfd, GtpHandler_p hdl,
             memcpy(mem, data, sz);
             ta->context_       = nullptr;
             ta->sfd_           = (uint32_t)sfd;
-            ta->stream_type_   = kSuperRealTimeStream;
+            ta->stream_type_   = kRealTimeStream;
             ta->enable_key_    = 0;
             ta->self_addr_len_ = sizeof(*self_addr);
             memcpy(ta->self_addr_, self_addr, sizeof(*self_addr));
-            ta->peer_addr_len_ = (uint32_t)pl;
-            memcpy(ta->peer_addr_, &p, pl);
+            ta->sock_addr_len_ = (uint32_t)pl;
+            memcpy(ta->sock_addr_, &p, pl);
             if (GTP_OK != GtpPacketReceive(hdl, mem, sz, ta))
                 GtpFreePackMem(hdl, mem);
         };
@@ -419,13 +419,13 @@ SceneResult run_scene(const SceneCfg &cfg) {
 
         /* ① timer A（hdl_a 专属） */
         if (t >= next_timer_a) {
-            BitLinkerWheel(g_hdl_a);
+            PeriodGtpTimer(g_hdl_a);
             next_timer_a = t + TIMER_US;
         }
 
         /* ② timer B（hdl_b 专属） */
         if (t >= next_timer_b) {
-            BitLinkerWheel(g_hdl_b);
+            PeriodGtpTimer(g_hdl_b);
             next_timer_b = t + TIMER_US;
         }
 
@@ -462,12 +462,12 @@ SceneResult run_scene(const SceneCfg &cfg) {
                 memcpy(mem_ptr, &pkt, sizeof(pkt));
                 ta->context_       = nullptr;
                 ta->sfd_           = (uint32_t)g_sfd_a;
-                ta->stream_type_   = kSuperRealTimeStream;
+                ta->stream_type_   = kRealTimeStream;
                 ta->enable_key_    = 0;
                 ta->self_addr_len_ = sizeof(g_addr_a);
                 memcpy(ta->self_addr_, &g_addr_a, sizeof(g_addr_a));
-                ta->peer_addr_len_ = sizeof(g_addr_b);
-                memcpy(ta->peer_addr_, &g_addr_b, sizeof(g_addr_b));
+                ta->sock_addr_len_ = sizeof(g_addr_b);
+                memcpy(ta->sock_addr_, &g_addr_b, sizeof(g_addr_b));
 
                 uint32_t ret = GtpFrameSend(g_hdl_a, mem_ptr, sizeof(pkt), ta, 0, 0);
                 if (GTP_OK == ret) {
@@ -493,11 +493,11 @@ SceneResult run_scene(const SceneCfg &cfg) {
         if (mem) {
             memcpy(mem, p->buf, sz);
             ta->context_ = nullptr; ta->sfd_ = (uint32_t)g_sfd_b;
-            ta->stream_type_ = kSuperRealTimeStream; ta->enable_key_ = 0;
+            ta->stream_type_ = kRealTimeStream; ta->enable_key_ = 0;
             ta->self_addr_len_ = sizeof(g_addr_b);
             memcpy(ta->self_addr_, &g_addr_b, sizeof(g_addr_b));
-            ta->peer_addr_len_ = p->peer_len;
-            memcpy(ta->peer_addr_, &p->peer, p->peer_len);
+            ta->sock_addr_len_ = p->peer_len;
+            memcpy(ta->sock_addr_, &p->peer, p->peer_len);
             if (GTP_OK != GtpPacketReceive(g_hdl_b, mem, sz, ta))
                 GtpFreePackMem(g_hdl_b, mem);
         }
@@ -507,9 +507,9 @@ SceneResult run_scene(const SceneCfg &cfg) {
     /* 再跑 500ms 让尾包到达 */
     uint64_t tail_end = now_us() + 500000ULL;
     while (now_us() < tail_end) {
-        BitLinkerWheel(g_hdl_a);
+        PeriodGtpTimer(g_hdl_a);
         recv_and_deliver(g_sfd_a, g_hdl_a, &g_addr_a, nullptr);
-        BitLinkerWheel(g_hdl_b);
+        PeriodGtpTimer(g_hdl_b);
         recv_and_deliver(g_sfd_b, g_hdl_b, &g_addr_b, nullptr);
         usleep(TIMER_US);
     }

@@ -157,9 +157,9 @@ u32 GtpFrameSend(GtpHandler_p gtp_hdl, void *frame, u32 size, GtpAddr *tran_addr
         GtpLog(gtp_obj->cb_.write_log_cb_, kGtpSessionMd, kGtpLogLevelError, "Goodtp transport address "\
                "memory is invalid(0x%08x tran_addr=%p dst_addr_len=%u src_addr_len=%u dst_mem_addr=%p "\
                "src_mem_addr=%p).\r\n", nret, tran_addr,
-               ((NULL != tran_addr) ? tran_addr->peer_addr_len_ : 0),
+               ((NULL != tran_addr) ? tran_addr->sock_addr_len_ : 0),
                ((NULL != tran_addr) ? tran_addr->self_addr_len_ : 0),
-               ((NULL != tran_addr) ? tran_addr->peer_addr_ : NULL),
+               ((NULL != tran_addr) ? tran_addr->sock_addr_ : NULL),
                ((NULL != tran_addr) ? tran_addr->self_addr_ : NULL));
          return nret;
     }
@@ -218,7 +218,7 @@ u32 GtpFrameSend(GtpHandler_p gtp_hdl, void *frame, u32 size, GtpAddr *tran_addr
 
     session->last_active_ts_us_           = gtp_obj->current_ts_us_;
     session->last_send_ts_us_             = gtp_obj->current_ts_us_;
-    session->pb_dt_.tran_addr_.timestamp_us_ = gtp_obj->current_ts_us_;
+    session->pb_dt_.tran_addr_.timestamp_ = gtp_obj->current_ts_us_;
 
     #if (_WIN32 || _WIN64)
     if (0 != tran_addr->self_addr_len_) {
@@ -230,11 +230,11 @@ u32 GtpFrameSend(GtpHandler_p gtp_hdl, void *frame, u32 size, GtpAddr *tran_addr
         }
     }
 
-    if (0 != memcmp(session->pb_dt_.tran_addr_.peer_addr_, tran_addr->peer_addr_, tran_addr->peer_addr_len_)) {
-        session->pb_dt_.tran_addr_.peer_addr_len_ = tran_addr->peer_addr_len_;
-        memcpy(session->pb_dt_.tran_addr_.peer_addr_, tran_addr->peer_addr_, tran_addr->peer_addr_len_);
+    if (0 != memcmp(session->pb_dt_.tran_addr_.sock_addr_, tran_addr->sock_addr_, tran_addr->sock_addr_len_)) {
+        session->pb_dt_.tran_addr_.sock_addr_len_ = tran_addr->sock_addr_len_;
+        memcpy(session->pb_dt_.tran_addr_.sock_addr_, tran_addr->sock_addr_, tran_addr->sock_addr_len_);
 
-        session->UpdatePeerIp(tran_addr->peer_addr_, tran_addr->peer_addr_len_);
+        session->UpdatePeerIp(tran_addr->sock_addr_, tran_addr->sock_addr_len_);
     }
 
     if (session->pb_dt_.tran_addr_.sfd_ != tran_addr->sfd_) {
@@ -441,9 +441,9 @@ u32 GtpPacketReceive(GtpHandler_p gtp_hdl, void *pack, u32 pack_sz, GtpAddr *tra
         GtpLog(gtp_obj->cb_.write_log_cb_, kGtpSessionMd, kGtpLogLevelError, "Goodtp transport address "\
                "memory is invalid(0x%08x tran_addr=%p dst_addr_len=%u src_addr_len=%u dst_mem_addr=%p "\
                "src_mem_addr=%p).\r\n", nret, tran_addr,
-               ((NULL != tran_addr) ? tran_addr->peer_addr_len_ : 0),
+               ((NULL != tran_addr) ? tran_addr->sock_addr_len_ : 0),
                ((NULL != tran_addr) ? tran_addr->self_addr_len_ : 0),
-               ((NULL != tran_addr) ? tran_addr->peer_addr_ : NULL),
+               ((NULL != tran_addr) ? tran_addr->sock_addr_ : NULL),
                ((NULL != tran_addr) ? tran_addr->self_addr_ : NULL));
          return nret;
     }
@@ -561,7 +561,7 @@ u32 GtpPacketReceive(GtpHandler_p gtp_hdl, void *pack, u32 pack_sz, GtpAddr *tra
 
     if (0x02 > gtp_pack->goodtp_ver_) {
         gtp_pack->has_chg_zone_ = GTP_NO;
-        gtp_pack->stream_type_  = kSuperRealTimeStream;
+        gtp_pack->stream_type_  = kRealTimeStream;
     }
 
     gtp_obj->current_ts_us_ = GtpSysTimestampUs();
@@ -619,7 +619,7 @@ u32 GtpPacketReceive(GtpHandler_p gtp_hdl, void *pack, u32 pack_sz, GtpAddr *tra
         session->last_active_ts_us_ = gtp_obj->current_ts_us_;
     }
 
-    session->pb_dt_.tran_addr_.timestamp_us_ = gtp_obj->current_ts_us_;
+    session->pb_dt_.tran_addr_.timestamp_ = gtp_obj->current_ts_us_;
 
     if (0 != tran_addr->self_addr_len_) {
         if (0 != memcmp(session->pb_dt_.tran_addr_.self_addr_, tran_addr->self_addr_, tran_addr->self_addr_len_)) {
@@ -630,11 +630,11 @@ u32 GtpPacketReceive(GtpHandler_p gtp_hdl, void *pack, u32 pack_sz, GtpAddr *tra
         }
     }
 
-    if (0 != memcmp(session->pb_dt_.tran_addr_.peer_addr_, tran_addr->peer_addr_, tran_addr->peer_addr_len_)) {
-        session->pb_dt_.tran_addr_.peer_addr_len_ = tran_addr->peer_addr_len_;
-        memcpy(session->pb_dt_.tran_addr_.peer_addr_, tran_addr->peer_addr_, tran_addr->peer_addr_len_);
+    if (0 != memcmp(session->pb_dt_.tran_addr_.sock_addr_, tran_addr->sock_addr_, tran_addr->sock_addr_len_)) {
+        session->pb_dt_.tran_addr_.sock_addr_len_ = tran_addr->sock_addr_len_;
+        memcpy(session->pb_dt_.tran_addr_.sock_addr_, tran_addr->sock_addr_, tran_addr->sock_addr_len_);
 
-        session->UpdatePeerIp(tran_addr->peer_addr_, tran_addr->peer_addr_len_);
+        session->UpdatePeerIp(tran_addr->sock_addr_, tran_addr->sock_addr_len_);
     }
 
     if (session->pb_dt_.tran_addr_.sfd_ != tran_addr->sfd_) {
@@ -702,7 +702,7 @@ u32 GtpPacketReceive(GtpHandler_p gtp_hdl, void *pack, u32 pack_sz, GtpAddr *tra
         goto pack_receive_exit_pos_;
     }
 
-    tran_addr->timestamp_us_ = session->pb_dt_.tran_addr_.timestamp_us_;
+    tran_addr->timestamp_ = session->pb_dt_.tran_addr_.timestamp_;
 
     // Only DATA packets go through the reorder buffer.
     // FEC-recovered packets arrive via Fec2RestoreFrameReceive which calls ReorderEnqueue directly.
@@ -733,7 +733,7 @@ pack_receive_exit_pos_:
 }
 
 /*****************************************************************************************************************
-Name     : BitLinkerWheel
+Name     : PeriodGtpTimer
 Function : Application system shall call this interface periodically.
 In param : GtpHandler_p gtp_hdl
 Out param: void
@@ -745,7 +745,7 @@ Mdf history  :
     Mdf context: new function
 
 *****************************************************************************************************************/
-u32 BitLinkerWheel(GtpHandler_p gtp_hdl) {
+u32 PeriodGtpTimer(GtpHandler_p gtp_hdl) {
     GoodTp *gtp_obj = GtpHandlerToObj(GtpHdlPointerToInt(gtp_hdl));
     if (NULL == gtp_obj) {
         RETURN_ERR(kGtpMgrMd, kInvalidGtpHandler);
@@ -802,10 +802,10 @@ u32 GetLinkerQuality(GtpHandler_p gtp_hdl, GtpLinkerKey *linker_key, GtpLinkQual
     u16 self_ip_size  = 0;
     u16 self_bin_port = 0;
 
-    GtpSockAddrToBinAddr(&(linker_key->peer_addr_[0]), &(peer_bin_ip[0]), &peer_ip_size, &peer_bin_port);
+    GtpSockAddrToBinAddr(&(linker_key->peer_socket_addr_[0]), &(peer_bin_ip[0]), &peer_ip_size, &peer_bin_port);
 
-    if (0 != linker_key->self_addr_len_) {
-        GtpSockAddrToBinAddr(&(linker_key->self_addr_[0]), &(self_bin_ip[0]), &self_ip_size, &self_bin_port);
+    if (0 != linker_key->self_socket_addr_len_) {
+        GtpSockAddrToBinAddr(&(linker_key->self_socket_addr_[0]), &(self_bin_ip[0]), &self_ip_size, &self_bin_port);
     } else {
         memset(self_bin_ip, 0x00, sizeof(self_bin_ip));
     }
@@ -1014,10 +1014,10 @@ u32 GetSlidWinBitMapInfo(GtpHandler_p gtp_hdl, GtpLinkerKey *linker_key, u8 *out
     u16 self_ip_size  = 0;
     u16 self_bin_port = 0;
 
-    GtpSockAddrToBinAddr(&(linker_key->peer_addr_[0]), &(peer_bin_ip[0]), &peer_ip_size, &peer_bin_port);
+    GtpSockAddrToBinAddr(&(linker_key->peer_socket_addr_[0]), &(peer_bin_ip[0]), &peer_ip_size, &peer_bin_port);
 
-    if (0 != linker_key->self_addr_len_) {
-        GtpSockAddrToBinAddr(&(linker_key->self_addr_[0]), &(self_bin_ip[0]), &self_ip_size, &self_bin_port);
+    if (0 != linker_key->self_socket_addr_len_) {
+        GtpSockAddrToBinAddr(&(linker_key->self_socket_addr_[0]), &(self_bin_ip[0]), &self_ip_size, &self_bin_port);
     } else {
         memset(self_bin_ip, 0x00, sizeof(self_bin_ip));
     }

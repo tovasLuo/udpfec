@@ -806,7 +806,7 @@ u32 GtpAddrToHostAddr(GtpAddr *goodtp_addr, u8 out_self_ip[], u8 out_peer_ip[],
     }
 
     if ((NULL != out_peer_ip) && (NULL != out_peer_port)) {
-        nret = GtpSockAddrToStrAddr(&(goodtp_addr->peer_addr_[0]), out_peer_ip, GTP_MAX_STR_IP_SZ, out_peer_port);
+        nret = GtpSockAddrToStrAddr(&(goodtp_addr->sock_addr_[0]), out_peer_ip, GTP_MAX_STR_IP_SZ, out_peer_port);
         if (GTP_OK != nret) {
             return nret;
         }
@@ -1090,7 +1090,7 @@ void GtpAddrToStrIpAndPort(GtpAddr *tran_addr, u8 self_ip[GTP_MAX_STR_IP_SZ], u8
         GtpSockAddrToStrAddr(&(tran_addr->self_addr_[0]), &(self_ip[0]), GTP_MAX_STR_IP_SZ, self_port);
     }
 
-    GtpSockAddrToStrAddr(&(tran_addr->peer_addr_[0]), &(peer_ip[0]), GTP_MAX_STR_IP_SZ, peer_port);
+    GtpSockAddrToStrAddr(&(tran_addr->sock_addr_[0]), &(peer_ip[0]), GTP_MAX_STR_IP_SZ, peer_port);
 
     return;
 }
@@ -1159,8 +1159,8 @@ u32 GtpTranAddrIsValid(GtpAddr *tran_addr) {
         RETURN_ERR(kGtpMgrMd, kGtpTranAddrNullErr);
     }
 
-    if ((((u32)sizeof(struct sockaddr_in)) > tran_addr->peer_addr_len_)
-     || (((u32)sizeof(struct sockaddr_in6)) < tran_addr->peer_addr_len_)) {
+    if ((((u32)sizeof(struct sockaddr_in)) > tran_addr->sock_addr_len_)
+     || (((u32)sizeof(struct sockaddr_in6)) < tran_addr->sock_addr_len_)) {
         RETURN_ERR(kGtpMgrMd, kGtpTranAddrDstLenErr);
     }
 
@@ -1168,12 +1168,12 @@ u32 GtpTranAddrIsValid(GtpAddr *tran_addr) {
         RETURN_ERR(kGtpMgrMd, kGtpTranAddrSrcLenErr);
     }
 
-    if (((u64)(((u8*)(&(tran_addr->peer_addr_len_))) + sizeof(tran_addr->peer_addr_len_)))
-     != ((u64)(tran_addr->peer_addr_))) {
+    if (((u64)(((u8*)(&(tran_addr->sock_addr_len_))) + sizeof(tran_addr->sock_addr_len_)))
+     != ((u64)(tran_addr->sock_addr_))) {
         RETURN_ERR(kGtpMgrMd, kGtpTranAddrDstMemErr);
     }
 
-    if (((u64)(((u8*)(&(tran_addr->peer_addr_len_))) + sizeof(tran_addr->peer_addr_len_) + GTP_SOCK_ADDR_SZ))
+    if (((u64)(((u8*)(&(tran_addr->sock_addr_len_))) + sizeof(tran_addr->sock_addr_len_) + GTP_SOCK_ADDR_SZ))
      != ((u64)(tran_addr->self_addr_))) {
         RETURN_ERR(kGtpMgrMd, kGtpTranAddrSrcMemErr);
     }
@@ -1359,7 +1359,7 @@ GtpSession* GoodTp::GetSession(GtpAddr *tran_addr, GtpHandler_p app_gtp_hdl, con
     u16 peer_bin_port    = 0;
     u16 self_bin_port    = 0;
 
-    GtpSockAddrToBinAddr(&(tran_addr->peer_addr_[0]), &(peer_bin_ip[0]), &peer_bin_ip_size, &peer_bin_port);
+    GtpSockAddrToBinAddr(&(tran_addr->sock_addr_[0]), &(peer_bin_ip[0]), &peer_bin_ip_size, &peer_bin_port);
 
     if (0 != tran_addr->self_addr_len_) {
         GtpSockAddrToBinAddr(&(tran_addr->self_addr_[0]), &(self_bin_ip[0]), &self_bin_ip_size, &self_bin_port);
@@ -1430,8 +1430,8 @@ GtpSession* GoodTp::BuildNewSession(const GtpSessionKey &key, GtpAddr *tran_addr
 
 create_new_session_pos_:
         #if 0
-        GtpSession *new_session = new ((void*)(&session_mem_pool_))GtpSession(sfd, tran_addr->peer_addr_,
-                            tran_addr->peer_addr_len_, tran_addr->self_addr_, tran_addr->self_addr_len_,
+        GtpSession *new_session = new ((void*)(&session_mem_pool_))GtpSession(sfd, tran_addr->sock_addr_,
+                            tran_addr->sock_addr_len_, tran_addr->self_addr_, tran_addr->self_addr_len_,
                             (u8)(tran_addr->stream_type_), 0, GetSelfHandler(),
                             &arq_node_mem_pool_, cb_, current_ts_us_, session_ttl_us_, packet_mem_pool_,
                             app_gtp_hdl, &(fec_mode_book_[0]), tran_addr->context_, mode);
@@ -1689,7 +1689,7 @@ void GoodTp::DelSpsSession(GtpHandler_p app_gtp_hdl, GtpAddr *tran_addr) {
         u16 self_ip_size  = 0;
         u16 self_bin_port = 0;
 
-        GtpSockAddrToBinAddr(&(tran_addr->peer_addr_[0]), &(peer_bin_ip[0]), &peer_ip_size, &peer_bin_port);
+        GtpSockAddrToBinAddr(&(tran_addr->sock_addr_[0]), &(peer_bin_ip[0]), &peer_ip_size, &peer_bin_port);
 
         if (0 != tran_addr->self_addr_len_) {
             GtpSockAddrToBinAddr(&(tran_addr->self_addr_[0]), &(self_bin_ip[0]), &self_ip_size, &self_bin_port);
@@ -1866,7 +1866,7 @@ u32 GtpSendPackCallBack(GtpHandler_p gtp_hdl, void *pack, u32 size, GtpAddr *tra
         RETURN_ERR(kGtpInterfaceMd, kGetSessionFailed);
     }
 
-    tran_addr->timestamp_us_ = goodtp_obj->current_ts_us_;
+    tran_addr->timestamp_ = goodtp_obj->current_ts_us_;
 
     u32 nret = GTP_OK;
 

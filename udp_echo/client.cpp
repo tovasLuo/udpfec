@@ -5,7 +5,7 @@
  *   1. InsLoadGtpModule → CreateGtpInstance
  *   2. 每隔 1s 向服务器发送一帧带序号的消息
  *   3. receive_frame_cb_ 收到 echo 后打印 RTT
- *   4. 定时器线程每 10ms 调 BitLinkerWheel()
+ *   4. 定时器线程每 10ms 调 PeriodGtpTimer()
  */
 
 #include <stdio.h>
@@ -111,8 +111,8 @@ static uint32_t SendPackCallback(GtpHandler_p gtp_hdl, void *pack, uint32_t size
     PackTypeStat_add(&ctx->snd_stat, pack);
 
     ssize_t nret = sendto(ctx->sfd, pack, size, 0,
-                          (struct sockaddr *)tran_addr->peer_addr_,
-                          tran_addr->peer_addr_len_);
+                          (struct sockaddr *)tran_addr->sock_addr_,
+                          tran_addr->sock_addr_len_);
     if ((ssize_t)size != nret) {
         fprintf(stderr, "[client] sendto failed: %s\n", strerror(errno));
     }
@@ -187,11 +187,11 @@ static void SendEchoRequest(ClientCtx *ctx) {
 
     tran_addr->context_      = ctx;
     tran_addr->sfd_          = (uint32_t)ctx->sfd;
-    tran_addr->stream_type_  = kSuperReliableStream;
+    tran_addr->stream_type_  = kReliableStream;
     tran_addr->enable_key_   = 0;
     tran_addr->self_addr_len_= 0;
-    tran_addr->peer_addr_len_= ctx->server_addr_len;
-    memcpy(tran_addr->peer_addr_, &ctx->server_addr, ctx->server_addr_len);
+    tran_addr->sock_addr_len_= ctx->server_addr_len;
+    memcpy(tran_addr->sock_addr_, &ctx->server_addr, ctx->server_addr_len);
 
     uint32_t ret = GtpFrameSend(ctx->gtp_hdl, snd_mem, (uint32_t)sizeof(ef), tran_addr, 0, 0);
     if (GTP_OK != ret) {
@@ -304,7 +304,7 @@ int main(int argc, char *argv[]) {
     }
     printf("[client] goodtp instance created.\n");
 
-    /* 4. 启动 epoll + 发包主循环（BitLinkerWheel 在主线程调用） */
+    /* 4. 启动 epoll + 发包主循环（PeriodGtpTimer 在主线程调用） */
     int epfd = epoll_create1(0);
     struct epoll_event ev;
     ev.events  = EPOLLIN;
@@ -324,7 +324,7 @@ int main(int argc, char *argv[]) {
         /* 定时器 */
         uint64_t now = now_us();
         if (now >= next_timer_ts) {
-            BitLinkerWheel(g_ctx.gtp_hdl);
+            PeriodGtpTimer(g_ctx.gtp_hdl);
             next_timer_ts = now + TIMER_PERIOD_US;
         }
 
@@ -354,11 +354,11 @@ int main(int argc, char *argv[]) {
 
             tran_addr->context_      = &g_ctx;
             tran_addr->sfd_          = (uint32_t)g_ctx.sfd;
-            tran_addr->stream_type_  = kSuperReliableStream;
+            tran_addr->stream_type_  = kReliableStream;
             tran_addr->enable_key_   = 0;
             tran_addr->self_addr_len_= 0;
-            tran_addr->peer_addr_len_= (uint32_t)peer_len;
-            memcpy(tran_addr->peer_addr_, &peer_addr, (uint32_t)peer_len);
+            tran_addr->sock_addr_len_= (uint32_t)peer_len;
+            memcpy(tran_addr->sock_addr_, &peer_addr, (uint32_t)peer_len);
 
             uint32_t ret = GtpPacketReceive(g_ctx.gtp_hdl, pack_mem, (uint32_t)recv_size, tran_addr);
             if (GTP_OK != ret) {

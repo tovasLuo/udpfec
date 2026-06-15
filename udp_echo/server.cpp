@@ -3,7 +3,7 @@
  *
  * 架构：
  *   1. 主线程：InsLoadGtpModule → CreateGtpInstance → epoll 收发循环
- *   2. 定时器：每 10ms 调用 BitLinkerWheel()
+ *   2. 定时器：每 10ms 调用 PeriodGtpTimer()
  *   3. send_pack_cb_  : goodtp 发包时回调，实际调用 sendto()
  *   4. receive_frame_cb_ : goodtp 解包后回调，把数据 echo 回客户端
  */
@@ -104,8 +104,8 @@ static uint32_t SendPackCallback(GtpHandler_p gtp_hdl, void *pack, uint32_t size
     PackTypeStat_add(&ctx->snd_stat, pack);
 
     ssize_t nret = sendto(ctx->sfd, pack, size, 0,
-                          (struct sockaddr *)tran_addr->peer_addr_,
-                          tran_addr->peer_addr_len_);
+                          (struct sockaddr *)tran_addr->sock_addr_,
+                          tran_addr->sock_addr_len_);
     if ((ssize_t)size != nret) {
         fprintf(stderr, "[server] sendto failed: %s\n", strerror(errno));
     }
@@ -122,7 +122,7 @@ static uint32_t ReceiveFrameCallback(GtpHandler_p gtp_hdl, void *frame, uint32_t
         uint64_t   delay = now_us() - ef->send_ts_us;
         char peer_ip[64] = {0};
         uint16_t peer_port = 0;
-        struct sockaddr_in *sin = (struct sockaddr_in *)tran_addr->peer_addr_;
+        struct sockaddr_in *sin = (struct sockaddr_in *)tran_addr->sock_addr_;
         inet_ntop(AF_INET, &sin->sin_addr, peer_ip, sizeof(peer_ip));
         peer_port = ntohs(sin->sin_port);
 
@@ -156,11 +156,11 @@ static uint32_t ReceiveFrameCallback(GtpHandler_p gtp_hdl, void *frame, uint32_t
     /* 使用来源地址作为目标地址 */
     snd_addr->context_      = ctx;
     snd_addr->sfd_          = (uint32_t)ctx->sfd;
-    snd_addr->stream_type_  = kSuperReliableStream;
+    snd_addr->stream_type_  = kReliableStream;
     snd_addr->enable_key_   = 0;
     snd_addr->self_addr_len_= 0;
-    snd_addr->peer_addr_len_= tran_addr->peer_addr_len_;
-    memcpy(snd_addr->peer_addr_, tran_addr->peer_addr_, tran_addr->peer_addr_len_);
+    snd_addr->sock_addr_len_= tran_addr->sock_addr_len_;
+    memcpy(snd_addr->sock_addr_, tran_addr->sock_addr_, tran_addr->sock_addr_len_);
 
     uint32_t ret = GtpFrameSend(gtp_hdl, snd_mem, size, snd_addr, 0, 0);
     if (GTP_OK != ret) {
@@ -279,7 +279,7 @@ int main(void) {
     }
     printf("[server] goodtp instance created.\n");
 
-    /* 4. 启动 epoll 收包主循环（BitLinkerWheel 在主线程调用，保证单线程） */
+    /* 4. 启动 epoll 收包主循环（PeriodGtpTimer 在主线程调用，保证单线程） */
     int epfd = epoll_create1(0);
     struct epoll_event ev;
     ev.events  = EPOLLIN;
@@ -298,7 +298,7 @@ int main(void) {
         /* 定时器：每 10ms 调用一次（主线程内，无跨线程问题）*/
         uint64_t now = now_us();
         if (now >= next_timer_ts) {
-            BitLinkerWheel(g_ctx.gtp_hdl);
+            PeriodGtpTimer(g_ctx.gtp_hdl);
             next_timer_ts = now + TIMER_PERIOD_US;
         }
 
@@ -331,11 +331,11 @@ int main(void) {
             /* 填充 GtpAddr（来源地址用于 goodtp 识别 session） */
             tran_addr->context_      = &g_ctx;
             tran_addr->sfd_          = (uint32_t)g_ctx.sfd;
-            tran_addr->stream_type_  = kSuperReliableStream;
+            tran_addr->stream_type_  = kReliableStream;
             tran_addr->enable_key_   = 0;
             tran_addr->self_addr_len_= 0;
-            tran_addr->peer_addr_len_= (uint32_t)peer_len;
-            memcpy(tran_addr->peer_addr_, &peer_addr, (uint32_t)peer_len);
+            tran_addr->sock_addr_len_= (uint32_t)peer_len;
+            memcpy(tran_addr->sock_addr_, &peer_addr, (uint32_t)peer_len);
 
             uint32_t ret = GtpPacketReceive(g_ctx.gtp_hdl, pack_mem, (uint32_t)recv_size, tran_addr);
             if (GTP_OK != ret) {

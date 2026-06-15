@@ -191,12 +191,12 @@ static void *recv_thread(void *arg) {
         memcpy(pack_mem, buf, n);
         tran_addr->context_       = ctx;
         tran_addr->sfd_           = (uint32_t)ctx->sfd_send;
-        tran_addr->stream_type_   = kSuperRealTimeStream;
+        tran_addr->stream_type_   = kRealTimeStream;
         tran_addr->enable_key_    = 0;
         tran_addr->self_addr_len_ = (uint32_t)sizeof(ctx->self_addr);
         memcpy(tran_addr->self_addr_, &ctx->self_addr, sizeof(ctx->self_addr));
-        tran_addr->peer_addr_len_ = (uint32_t)peer_len;
-        memcpy(tran_addr->peer_addr_, &peer, peer_len);
+        tran_addr->sock_addr_len_ = (uint32_t)peer_len;
+        memcpy(tran_addr->sock_addr_, &peer, peer_len);
 
         uint32_t ret = GtpPacketReceive(a->gtp_hdl, pack_mem, (uint32_t)n, tran_addr);
         if (GTP_OK != ret) {
@@ -220,10 +220,10 @@ static void *timer_thread(void *arg) {
     while (g_running) {
         usleep(TIMER_PERIOD_US);
         pthread_mutex_lock(t->lock_a);
-        BitLinkerWheel(t->hdl_a);
+        PeriodGtpTimer(t->hdl_a);
         pthread_mutex_unlock(t->lock_a);
         pthread_mutex_lock(t->lock_b);
-        BitLinkerWheel(t->hdl_b);
+        PeriodGtpTimer(t->hdl_b);
         pthread_mutex_unlock(t->lock_b);
     }
     return NULL;
@@ -367,12 +367,12 @@ int main(int argc, char *argv[]) {
                 memcpy(mem, &f, sizeof(f));
                 taddr->context_       = &g_inst_a;
                 taddr->sfd_           = (uint32_t)g_inst_a.sfd_send;
-                taddr->stream_type_   = kSuperRealTimeStream;
+                taddr->stream_type_   = kRealTimeStream;
                 taddr->enable_key_    = 0;
                 taddr->self_addr_len_ = (uint32_t)sizeof(g_inst_a.self_addr);
                 memcpy(taddr->self_addr_, &g_inst_a.self_addr, sizeof(g_inst_a.self_addr));
-                taddr->peer_addr_len_ = (uint32_t)sizeof(g_inst_a.peer_addr);
-                memcpy(taddr->peer_addr_, &g_inst_a.peer_addr, sizeof(g_inst_a.peer_addr));
+                taddr->sock_addr_len_ = (uint32_t)sizeof(g_inst_a.peer_addr);
+                memcpy(taddr->sock_addr_, &g_inst_a.peer_addr, sizeof(g_inst_a.peer_addr));
 
                 uint32_t ret = GtpFrameSend(g_inst_a.gtp_hdl, mem, sizeof(f), taddr, 0, 0);
                 if (GTP_OK == ret) {
