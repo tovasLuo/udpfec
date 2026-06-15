@@ -1,3 +1,16 @@
 build
 build_test
 .claude
+
+# udp_echo 构建产物
+udp_echo/CMakeCache.txt
+udp_echo/CMakeFiles/
+udp_echo/Makefile
+udp_echo/cmake_install.cmake
+udp_echo/echo_client
+udp_echo/echo_server
+udp_echo/fec_loss_test
+udp_echo/game_net_test
+
+# 根目录临时测试文件
+game_net_test.cpp
