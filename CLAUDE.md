@@ -23,11 +23,12 @@ cd build && cmake .. && make    # 输出 build/libfec.a
 
 ```
 src/
-  utils/           goodtp.h          公开 C API、类型/错误码/回调定义
+  utils/           goodtp.h          旧公开接口头文件（已废弃，不再被任何源码 include）
                    goodtp_macrodefine.h  编译期参数集与枚举（最常改动）
                    goodtp_comstruct.h    包头位域、Session Key、内部结构体
   tranmempool.h    分级传输内存池（头文件即实现）
-  interface/       goodtp_interface.cpp/h   对外 C API 入口（唯一对外暴露层）
+  interface/       bitlinker.h           【当前公开 C API】类型/错误码/回调/接口声明
+                   goodtp_interface.cpp/h   对外 C API 入口（唯一对外暴露层）
   mgr/             goodtp_mgr.cpp/h         GoodTp 实例管理器 + 全局单例 g_goodtp_inst_mgr
   session/         goodtp_session.cpp/h     单条链路会话，聚合 ARQ/FEC/滑窗/拥塞控制
                    goodtp_factorcalulation.cpp/h  MIMD+EWMA 拥塞因子
@@ -47,7 +48,7 @@ lib-demo-doc/      参考二进制与示例代码（只读参考，不编译入�
 
 ```
 应用层 (App)
-    │  GtpFrameSend() / GtpPacketReceive() / PeriodGtpTimer()
+    │  GtpFrameSend() / GtpPacketReceive() / BitLinkerWheel()   ← 接口定义在 bitlinker.h
     ▼
 interface 层  goodtp_interface.cpp      参数校验、线程检测、转发调用
     │
