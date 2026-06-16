@@ -35,6 +35,18 @@
 
 #include <stdint.h>
 
+#if (_WIN32 || _WIN64)
+#if defined(GOODTP_STATIC)
+#define GOODTP_API
+#elif defined(GOODTP_BUILDING_DLL)
+#define GOODTP_API __declspec(dllexport)
+#else
+#define GOODTP_API __declspec(dllimport)
+#endif
+#else
+#define GOODTP_API
+#endif
+
 typedef int32_t GtpHandler;
 typedef void*   GtpHandler_p;
 
@@ -202,11 +214,7 @@ typedef uint8_t GtpStreamTypeU8;
 #endif
 
 #ifdef __APPLE__
-#if (arm64 == ARCHS_STANDARD)
-#define GTP_SOCK_ADDR_SZ (((sizeof(struct sockaddr_in6) & 0xFFFFFFFC) + 8))
-#else
-#define GTP_SOCK_ADDR_SZ (((sizeof(struct sockaddr_in6) & 0xFFFFFFF8) + 4))
-#endif
+#define GTP_SOCK_ADDR_SZ (((sizeof(struct sockaddr_in6) & 0xFFFFFFF8) + 8))
 #endif
 
 #if (_WIN32 || _WIN64)
@@ -310,6 +318,8 @@ typedef struct _MemPoolConfig {
     uint32_t m_4k_num_;        // 4k packet memory cluster item number.
     uint32_t m_8k_num_;        // 8k packet memory cluster item number.
     uint32_t m_64k_num_;       // 64k packet memory cluster item number.
+    uint32_t arq_node_num_;    // 0: use library default ARQ node number.
+    uint32_t session_num_;     // 0: use library default session number.
 }MemPoolConfig;
 
 #pragma pack()
@@ -361,7 +371,7 @@ Mdf history  :
   Mdf context: new function
 
 *****************************************************************************************************************/
-uint32_t InsLoadGtpModule(void);
+GOODTP_API uint32_t InsLoadGtpModule(void);
 
 /*****************************************************************************************************************
 Name     : RmLoadGtpModule
@@ -377,7 +387,7 @@ Mdf history  :
   Mdf context: new function
 
 *****************************************************************************************************************/
-uint32_t RmLoadGtpModule(void);
+GOODTP_API uint32_t RmLoadGtpModule(void);
 
 /*****************************************************************************************************************
 Name     : CreateGtpInstance
@@ -396,8 +406,8 @@ Mdf history  :
   Mdf context: new function
 
 *****************************************************************************************************************/
-GtpHandler_p CreateGtpInstance(uint32_t system_id, uint32_t session_ttl_us, GtpCallBackParam *reg_cb,
-                               MemPoolConfig *mem_pool_cfg);
+GOODTP_API GtpHandler_p CreateGtpInstance(uint32_t system_id, uint32_t session_ttl_us, GtpCallBackParam *reg_cb,
+                                          MemPoolConfig *mem_pool_cfg);
 
 /*****************************************************************************************************************
 Name     : DeleteGtpInstance
@@ -412,7 +422,7 @@ Mdf history  :
   Mdf context: new function
 
 *****************************************************************************************************************/
-uint32_t DeleteGtpInstance(GtpHandler_p gtp_hdl);
+GOODTP_API uint32_t DeleteGtpInstance(GtpHandler_p gtp_hdl);
 
 /*****************************************************************************************************************
 Name     : GtpMallocPackMem
@@ -433,8 +443,8 @@ Mdf history  :
   Mdf context: new function
 
 *****************************************************************************************************************/
-uint8_t *GtpMallocPackMem(GtpHandler_p gtp_hdl, uint8_t* old_pack_mem, uint32_t used_size,
-                          uint32_t *new_mem_usable_size, void **tran_addr_mem, uint32_t pack_len);
+GOODTP_API uint8_t *GtpMallocPackMem(GtpHandler_p gtp_hdl, uint8_t* old_pack_mem, uint32_t used_size,
+                                     uint32_t *new_mem_usable_size, void **tran_addr_mem, uint32_t pack_len);
 
 /*****************************************************************************************************************
 Name     : GtpFreePackMem
@@ -452,7 +462,7 @@ Mdf history  :
   Mdf context: new function
 
 *****************************************************************************************************************/
-void GtpFreePackMem(GtpHandler_p gtp_hdl, uint8_t *pack_mem);
+GOODTP_API void GtpFreePackMem(GtpHandler_p gtp_hdl, uint8_t *pack_mem);
 
 /*****************************************************************************************************************
 Name     : GtpFrameSend
@@ -473,8 +483,8 @@ Mdf history  :
   Mdf context: new function
 
 *****************************************************************************************************************/
-uint32_t GtpFrameSend(GtpHandler_p gtp_hdl, void *frame, uint32_t size, GtpAddr *tran_addr,
-                        uint32_t token, uint32_t token_id);
+GOODTP_API uint32_t GtpFrameSend(GtpHandler_p gtp_hdl, void *frame, uint32_t size, GtpAddr *tran_addr,
+                                 uint32_t token, uint32_t token_id);
 
 /*****************************************************************************************************************
 Name     : GtpCheckPacketInvalid
@@ -491,7 +501,11 @@ Mdf history  :
     Mdf context: new function
 
 *****************************************************************************************************************/
-uint32_t GtpCheckPacketInvalid(void *pack, uint32_t pack_size);
+GOODTP_API uint32_t GtpCheckPacketInvalid(void *pack, uint32_t pack_size, uint64_t *stream_key
+#ifdef __cplusplus
+                               = 0
+#endif
+);
 
 /*****************************************************************************************************************
 Name     : GtpPacketReceive
@@ -510,7 +524,7 @@ Mdf history  :
   Mdf context: new function
 
 *****************************************************************************************************************/
-uint32_t GtpPacketReceive(GtpHandler_p gtp_hdl, void *pack, uint32_t size, GtpAddr *tran_addr);
+GOODTP_API uint32_t GtpPacketReceive(GtpHandler_p gtp_hdl, void *pack, uint32_t size, GtpAddr *tran_addr);
 
 /*****************************************************************************************************************
 Name     : PeriodGtpTimer
@@ -525,7 +539,7 @@ Mdf history  :
   Mdf context: new function
 
 *****************************************************************************************************************/
-uint32_t PeriodGtpTimer(GtpHandler_p gtp_hdl);
+GOODTP_API uint32_t PeriodGtpTimer(GtpHandler_p gtp_hdl);
 
 /*****************************************************************************************************************
 Name     : GetLinkerQuality
@@ -541,7 +555,7 @@ Mdf history  :
   Mdf context: new function
 
 *****************************************************************************************************************/
-uint32_t GetLinkerQuality(GtpHandler_p gtp_hdl, GtpLinkerKey *linker_key, GtpLinkQuality *out_quality);
+GOODTP_API uint32_t GetLinkerQuality(GtpHandler_p gtp_hdl, GtpLinkerKey *linker_key, GtpLinkQuality *out_quality);
 
 /*****************************************************************************************************************
 Name     : LastGtpErrorInfo
@@ -558,7 +572,7 @@ Mdf history  :
   Mdf context: new function
 
 *****************************************************************************************************************/
-const char* LastGtpErrorInfo(void);
+GOODTP_API const char* LastGtpErrorInfo(void);
 
 /*****************************************************************************************************************
 Name     : GtpAddrToHostAddr
@@ -576,8 +590,8 @@ Mdf history  :
   Mdf context: new function
 
 *****************************************************************************************************************/
-uint32_t GtpAddrToHostAddr(GtpAddr *goodtp_addr, uint8_t out_self_ip[], uint8_t out_peer_ip[],
-                             uint16_t *out_self_port, uint16_t *out_peer_port);
+GOODTP_API uint32_t GtpAddrToHostAddr(GtpAddr *goodtp_addr, uint8_t out_self_ip[], uint8_t out_peer_ip[],
+                                      uint16_t *out_self_port, uint16_t *out_peer_port);
 
 /*****************************************************************************************************************
 Name     : GetGtpVersion
@@ -592,7 +606,7 @@ Mdf history  :
   Mdf context: new function
 
 *****************************************************************************************************************/
-uint8_t* GetGtpVersion(uint8_t *pout_ver);
+GOODTP_API uint8_t* GetGtpVersion(uint8_t *pout_ver);
 
 /*****************************************************************************************************************
 Name     : GetGtpPureVer
@@ -607,7 +621,7 @@ Mdf history  :
   Mdf context: new function
 
 *****************************************************************************************************************/
-uint8_t* GetGtpPureVer(uint8_t *pout_ver);
+GOODTP_API uint8_t* GetGtpPureVer(uint8_t *pout_ver);
 
 /*****************************************************************************************************************
 Name     : DelGtpLinker
@@ -623,7 +637,7 @@ Mdf history  :
   Mdf context: new function
 
 *****************************************************************************************************************/
-void DelGtpLinker(GtpHandler_p gtp_hdl, GtpAddr *tran_addr);
+GOODTP_API void DelGtpLinker(GtpHandler_p gtp_hdl, GtpAddr *tran_addr);
 
 /*****************************************************************************************************************
 Name     : PrintSessionWinBitMap
@@ -642,8 +656,8 @@ Mdf history  :
   Mdf context: new function
 
 *****************************************************************************************************************/
-uint32_t PrintSessionWinBitMap(GtpHandler_p gtp_hdl, const uint8_t *src_ip, const uint8_t *dst_ip,
-                               uint8_t *out_str, uint32_t mem_size);
+GOODTP_API uint32_t PrintSessionWinBitMap(GtpHandler_p gtp_hdl, const uint8_t *src_ip, const uint8_t *dst_ip,
+                                          uint8_t *out_str, uint32_t mem_size);
 
 /*****************************************************************************************************************
 Name     : GetAlgorithmParam
@@ -662,8 +676,8 @@ Mdf history  :
     Mdf context: new function
 
 *****************************************************************************************************************/
-uint32_t GetAlgorithmParam(GtpHandler_p gtp_hdl, const uint8_t *src_ip, const uint8_t *dst_ip,
-                           uint8_t *out_str, uint32_t mem_size);
+GOODTP_API uint32_t GetAlgorithmParam(GtpHandler_p gtp_hdl, const uint8_t *src_ip, const uint8_t *dst_ip,
+                                      uint8_t *out_str, uint32_t mem_size);
 
 /*****************************************************************************************************************
 Name     : ShowTotalLinker
@@ -681,7 +695,8 @@ Mdf history  :
   Mdf context: new function
 
 *****************************************************************************************************************/
-uint32_t ShowTotalLinker(GtpHandler_p gtp_hdl, const uint8_t *matched_str, uint8_t *out_str, uint32_t mem_size);
+GOODTP_API uint32_t ShowTotalLinker(GtpHandler_p gtp_hdl, const uint8_t *matched_str, uint8_t *out_str,
+                                    uint32_t mem_size);
 
 /*****************************************************************************************************************
 Name     : GetSlidWinBitMapInfo
@@ -699,7 +714,8 @@ Mdf history  :
     Mdf context: new function
 
 *****************************************************************************************************************/
-uint32_t GetSlidWinBitMapInfo(GtpHandler_p gtp_hdl, GtpLinkerKey *linker_key, uint8_t *out_str, uint32_t mem_size);
+GOODTP_API uint32_t GetSlidWinBitMapInfo(GtpHandler_p gtp_hdl, GtpLinkerKey *linker_key, uint8_t *out_str,
+                                         uint32_t mem_size);
 
 /*****************************************************************************************************************
 Name     : GetPackMemPoolStatus
@@ -716,7 +732,7 @@ Mdf history  :
     Mdf context: new function
 
 *****************************************************************************************************************/
-uint32_t GetPackMemPoolStatus(GtpHandler_p gtp_hdl, uint8_t out_status[], uint32_t mem_size);
+GOODTP_API uint32_t GetPackMemPoolStatus(GtpHandler_p gtp_hdl, uint8_t out_status[], uint32_t mem_size);
 
 /*****************************************************************************************************************
 Name     : GetSessionNumber
@@ -731,7 +747,7 @@ Mdf history  :
     Mdf context: new function
 
 *****************************************************************************************************************/
-uint32_t GetSessionNumber(GtpHandler_p gtp_hdl);
+GOODTP_API uint32_t GetSessionNumber(GtpHandler_p gtp_hdl);
 
 /*****************************************************************************************************************
 Name     : GtpGetStackFreeSize
@@ -746,12 +762,10 @@ Mdf history  :
     Mdf context: new function
 
 *****************************************************************************************************************/
-int64_t GtpGetStackFreeSize(uint32_t *stack_size);
+GOODTP_API int64_t GtpGetStackFreeSize(uint32_t *stack_size);
 
 #ifdef __cplusplus
 }
 #endif
 
 #endif
-
-
