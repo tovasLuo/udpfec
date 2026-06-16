@@ -191,8 +191,8 @@ typedef enum _PackMemSpec {
 typedef uint32_t PackMemSpecU32;
 
 typedef enum _GtpStreamType {
-    kSuperRealTimeStream = 0,
-    kSuperReliableStream = 1,
+    kRealTimeStream = 0,
+    kReliableStream = 1,
 
     kGtpStreamTypeButt
 }GtpStreamType;
@@ -229,12 +229,11 @@ typedef uint8_t GtpStreamTypeU8;
 typedef struct _GtpLinkerKey {
     uint32_t sfd_;                                 // [must] send socket handler.
     uint32_t direction_;                           // [must] 1: sender, 2: receiver.
-    uint32_t peer_addr_len_;                       // [must] peer_addr_'s byte length.
-    uint32_t self_addr_len_;                       // [must] self_addr_'s byte length, when don't use
+    uint32_t peer_socket_addr_len_;                // [must] peer_socket_addr_'s byte length.
+    uint32_t self_socket_addr_len_;                // [must] self_socket_addr_'s byte length, when don't use
                                                    // sendmsg() and recvmsg() for sfd_, it must be setted to 0.
-    uint64_t stream_key_;                          // [option] stream key, same as GtpAddr::stream_key_.
-    uint8_t  peer_addr_[GTP_SOCK_ADDR_SZ];         // [must] sfd_'s peer socket address.
-    uint8_t  self_addr_[GTP_SOCK_ADDR_SZ];         // [option] sfd_'s self socket address for using sendmsg() and
+    uint8_t  peer_socket_addr_[GTP_SOCK_ADDR_SZ];  // [must] sfd_'s peer socket address.
+    uint8_t  self_socket_addr_[GTP_SOCK_ADDR_SZ];  // [option] sfd_'s self socket address for using sendmsg() and
                                                    // recvmsg().
 }GtpLinkerKey;
 
@@ -281,18 +280,13 @@ typedef struct _GtpLinkQuality {
     uint32_t loss_direct_;       // GtpLossDirectEnU32
     float    loss_;
     float    bitrage_chg_k_;
-    uint32_t net_type_;
-    uint32_t net_forecast_;
-    uint32_t net_blocked_;
-    uint32_t total_harq_repair_num_;
-    uint32_t boost_resend_num_;
 }GtpLinkQuality;
 
 typedef struct _GtpAddr {
     void *context_;                         // [option]the running application env, it can be used to transmit
                                             // application' parameters.
 
-    uint64_t timestamp_us_;                 // [option]  don't care if no using.
+    uint64_t timestamp_;                    // [option]  don't care if no using.
     uint64_t stream_key_;                   // [option]  it isn't same for different stream, don't care if no using.
     uint8_t  loss_;                         // [option]  don't care if no using.
     uint8_t  qos_;                          // [option]  don't care if no using.
@@ -310,8 +304,8 @@ typedef struct _GtpAddr {
 
     uint32_t self_addr_len_;                // [must] the self_sock_addr_'s byte length, when don't use sendmsg()
                                             // and recvmsg() the self_sock_addr_ must be setted to 0.
-    uint32_t peer_addr_len_;                // [must] the peer_addr_'s byte length.
-    uint8_t  peer_addr_[GTP_SOCK_ADDR_SZ];  // [must] peer socket address.
+    uint32_t sock_addr_len_;                // [must] the sock_addr_'s byte length.
+    uint8_t  sock_addr_[GTP_SOCK_ADDR_SZ];  // [must] peer socket address.
     uint8_t  self_addr_[GTP_SOCK_ADDR_SZ];  // [option] sfd_'s self socket address for using sendmsg() and recvmsg().
 }GtpAddr;
 
@@ -545,7 +539,7 @@ Mdf history  :
   Mdf context: new function
 
 *****************************************************************************************************************/
-GOODTP_API uint32_t BitLinkerWheel(GtpHandler_p gtp_hdl);
+GOODTP_API uint32_t PeriodGtpTimer(GtpHandler_p gtp_hdl);
 
 /*****************************************************************************************************************
 Name     : GetLinkerQuality
