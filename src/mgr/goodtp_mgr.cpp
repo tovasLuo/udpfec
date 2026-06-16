@@ -61,20 +61,24 @@ extern "C" {
 
 i32 g_goodtp_handler_base    = 1;
 
+/* Positional aggregate init (not designated init) so this compiles under C++11/14/17;
+ * MSVC only allows designated initializers with /std:c++20. Field order must track
+ * the _GtpInstMgr declaration in goodtp_mgr.h: spin_ [, udp_log_sfd_], error_info_,
+ * inst_num_, sys_id_, runing_flag_ — remaining trailing members are zero-initialized. */
 #ifdef __linux__
-GtpInstMgr g_goodtp_inst_mgr = {.spin_ = NULL, .inst_num_ = 1, .sys_id_ = 1, .runing_flag_ = 1};
+GtpInstMgr g_goodtp_inst_mgr = {NULL, NULL, 1, 1, 1};
 #endif
 
 #ifdef __APPLE__
-GtpInstMgr g_goodtp_inst_mgr = {.spin_ = NULL, .inst_num_ = 1, .sys_id_ = 1, .runing_flag_ = 1};
+GtpInstMgr g_goodtp_inst_mgr = {NULL, NULL, 1, 1, 1};
 #endif
 
 #if (_WIN32 || _WIN64)
 #if (1 == ENABLE_UDP_LOG)
-GtpInstMgr g_goodtp_inst_mgr = {.spin_ = NULL, .udp_log_sfd_ = -1, .inst_num_ = 1, .sys_id_ = 1, .runing_flag_ = 1};
+GtpInstMgr g_goodtp_inst_mgr = {NULL, -1, NULL, 1, 1, 1};
 
 #else
-GtpInstMgr g_goodtp_inst_mgr = {.spin_ = NULL, .inst_num_ = 1, .sys_id_ = 1, .runing_flag_ = 1};
+GtpInstMgr g_goodtp_inst_mgr = {NULL, NULL, 1, 1, 1};
 #endif
 #endif
 
