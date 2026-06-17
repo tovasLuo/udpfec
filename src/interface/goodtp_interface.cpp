@@ -392,7 +392,34 @@ u32 GtpCheckPacketInvalid(void *pack, u32 pack_size, u64 *stream_key) {
         *stream_key = 0;
     }
 
-    return InnerCheckPacketInvalid((GtpPacket*)pack, pack_size);
+    GtpPacket *gtp_pack = (GtpPacket*)pack;
+
+    u32 nret = InnerCheckPacketInvalid(gtp_pack, pack_size);
+    if (GTP_OK != nret) {
+        return nret;
+    }
+
+    // when the sender embedded stream_key_ under has_check_flag_, recover it here without needing a
+    // session lookup.
+    // DATA/ACK/NACK/RTT: layout [GtpPacket][optional first_pack_sn u32][hash u32][user_id u32]...
+    // FEC: layout [Fec2CodePack header][hash u32][user_id u32][fec_code_...]
+    if ((NULL != stream_key) && (GTP_YES == gtp_pack->has_check_flag_)) {
+        u32 key_offset = (u32)sizeof(GtpPacket);
+        if ((u8)(GtpPackType::kGtpFecPackType) == gtp_pack->pack_type_) {
+            key_offset = (u32)sizeof(Fec2CodePack);
+        } else if (0 != ((u8)(gtp_pack->repeat_counter_))) {
+            key_offset += (u32)sizeof(u32);
+        }
+
+        if ((key_offset + sizeof(u64)) <= pack_size) {
+            u32 hash    = *((u32*)(((u8*)gtp_pack) + key_offset));
+            u32 user_id = *((u32*)(((u8*)gtp_pack) + key_offset + sizeof(u32)));
+
+            *stream_key = (((u64)hash) << 32) | ((u64)user_id);
+        }
+    }
+
+    return GTP_OK;
 }
 
 /*****************************************************************************************************************

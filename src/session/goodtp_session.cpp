@@ -743,13 +743,28 @@ void WinSnBitmapCallback(slid_win_hdl win_hdl, void *cntxt_hdl, const void *bit_
     u16 tail_sn_offset = 0;
     u16 rto_sn_offset  = 0;
 
+    // when the session is identified by stream_key_, embed it right after the fixed header(under the
+    // existing has_check_flag_), before the ack/nack-specific load. decode side already locates the load
+    // via pack->header_offset_(see PackPrepHandler's kGtpAckPackType/kGtpNackPackType cases), so this is
+    // transparent to that code.
+    u16 has_check = GTP_NO;
+    u8  hdr_off   = (u8)sizeof(GtpPacket);
+
+    if (GTP_YES == session->pb_dt_.tran_addr_.enable_key_) {
+        has_check = GTP_YES;
+        u8 *key_ptr = ((u8*)pack) + sizeof(GtpPacket);
+        *((u32*)(key_ptr))              = (u32)(session->pb_dt_.tran_addr_.stream_key_ >> 32);
+        *((u32*)(key_ptr + sizeof(u32))) = (u32)(session->pb_dt_.tran_addr_.stream_key_);
+        hdr_off = (u8)(sizeof(GtpPacket) + sizeof(u64));
+    }
+
     pack->goodtp_ver_      = CalcRightGtpVer(GTP_VERSION, session->pb_dt_.peer_version_);
-    pack->header_offset_   = (u8)sizeof(GtpPacket);
+    pack->header_offset_   = hdr_off;
     pack->has_loss_flag_   = GTP_NO;
     pack->cache_us_flag_   = GTP_NO;
     pack->pack_type_       = (u8)(GtpPackType::kGtpNackPackType);
     pack->pack_sn_         = session->ack_sn_;
-    pack->has_check_flag_  = GTP_NO;
+    pack->has_check_flag_  = (u8)has_check;
     pack->has_ts_flag_     = GTP_NO;
     pack->has_rtt_flag_    = GTP_NO;
     pack->init_flag_       = (u8)(((u8)(GtpSessStat::kRunning) == session->recv_session_stat_) ? GTP_NO : GTP_YES);
@@ -772,17 +787,17 @@ void WinSnBitmapCallback(slid_win_hdl win_hdl, void *cntxt_hdl, const void *bit_
             rto_sn_offset = (u16)(nack_data->rto_sn_ + (0xFFFFFFFF - nack_data->head_sn_));
         }
 
-        pack_size = sizeof(GtpNackPacket) + (((u32)(nack_data->nack_num_)) << 1);
+        pack_size = ((u32)hdr_off) + sizeof(GtpNackPacketLoad) + (((u32)(nack_data->nack_num_)) << 1);
 
-        GtpNackPacket *nack_pack = (GtpNackPacket*)pack;
+        GtpNackPacketLoad *nack_load = (GtpNackPacketLoad*)(((u8*)pack) + hdr_off);
 
-        nack_pack->nack_num_       = nack_data->nack_num_;
-        nack_pack->tail_sn_offset_ = tail_sn_offset;
-        nack_pack->rto_sn_offset_  = rto_sn_offset;
-        nack_pack->head_sn_        = nack_data->head_sn_;
-        nack_pack->recv_loss_      = nack_data->recv_loss_;
+        nack_load->nack_num_       = nack_data->nack_num_;
+        nack_load->tail_sn_offset_ = tail_sn_offset;
+        nack_load->rto_sn_offset_  = rto_sn_offset;
+        nack_load->head_sn_        = nack_data->head_sn_;
+        nack_load->recv_loss_      = nack_data->recv_loss_;
 
-        chg_len_zone = ((u8*)nack_pack) + sizeof(GtpNackPacket);
+        chg_len_zone = ((u8*)nack_load) + sizeof(GtpNackPacketLoad);
 
         if (0 != session->com_cache_ts_us_) {
             if (now_ts_us >= session->at_com_cache_ts_us_) {
@@ -791,16 +806,16 @@ void WinSnBitmapCallback(slid_win_hdl win_hdl, void *cntxt_hdl, const void *bit_
                 now_ts_us = session->at_com_cache_ts_us_ - now_ts_us;
             }
 
-            nack_pack->cache_us_flag_ = GTP_YES;
-            *((u64*)chg_len_zone)     = session->com_cache_ts_us_ + now_ts_us;
-            chg_len_zone             += sizeof(u64);
-            pack_size                += sizeof(u64);
+            pack->cache_us_flag_  = GTP_YES;
+            *((u64*)chg_len_zone) = session->com_cache_ts_us_ + now_ts_us;
+            chg_len_zone          += sizeof(u64);
+            pack_size              += sizeof(u64);
 
             session->com_cache_ts_us_    = 0;
             session->at_com_cache_ts_us_ = 0;
         }
 
-        nack_pack->pack_size_ = (u16)pack_size;
+        pack->pack_size_ = (u16)pack_size;
 
         if (3 <= nack_data->nack_num_) {
             session->nack_burst_detected_ = 1;
@@ -813,7 +828,7 @@ void WinSnBitmapCallback(slid_win_hdl win_hdl, void *cntxt_hdl, const void *bit_
                "[win_hdl=%p]%s:%u<-->%s:%u(nack) head_sn=%u tail_sn=%u rto_sn=%u nack_num=%u.\r\n", win_hdl,
                session->pb_dt_.self_ip_, (u32)(session->pb_dt_.self_port_),
                session->pb_dt_.peer_ip_, (u32)(session->pb_dt_.peer_port_),
-               nack_pack->head_sn_, nack_data->tail_sn_, nack_data->rto_sn_, nack_pack->nack_num_);
+               nack_load->head_sn_, nack_data->tail_sn_, nack_data->rto_sn_, nack_load->nack_num_);
         #endif
 
         goto session_send_ack_nack_pos_;
@@ -834,18 +849,19 @@ void WinSnBitmapCallback(slid_win_hdl win_hdl, void *cntxt_hdl, const void *bit_
         rto_sn_offset = (u16)(ack_data->rto_sn_ + (0xFFFFFFFF - ack_data->head_sn_));
     }
 
-    pack_size = sizeof(GtpAckPacket) + ack_data->mem_size_;
+    pack_size = ((u32)hdr_off) + sizeof(GtpAckPacketLoad) + ack_data->mem_size_;
 
-    GtpAckPacket *ack = (GtpAckPacket*)pack;
+    pack->pack_type_ = (u8)(GtpPackType::kGtpAckPackType);
 
-    ack->pack_type_      = (u8)(GtpPackType::kGtpAckPackType);
-    ack->sn_size_        = (u16)(ack_data->mem_size_);
-    ack->tail_sn_offset_ = tail_sn_offset;
-    ack->rto_sn_offset_  = rto_sn_offset;
-    ack->head_sn_        = ack_data->head_sn_;
-    ack->recv_loss_      = ack_data->recv_loss_;
+    GtpAckPacketLoad *ack_load = (GtpAckPacketLoad*)(((u8*)pack) + hdr_off);
 
-    chg_len_zone = ((u8*)ack) + sizeof(GtpAckPacket);
+    ack_load->sn_size_        = (u16)(ack_data->mem_size_);
+    ack_load->tail_sn_offset_ = tail_sn_offset;
+    ack_load->rto_sn_offset_  = rto_sn_offset;
+    ack_load->head_sn_        = ack_data->head_sn_;
+    ack_load->recv_loss_      = ack_data->recv_loss_;
+
+    chg_len_zone = ((u8*)ack_load) + sizeof(GtpAckPacketLoad);
 
     if (0 != session->com_cache_ts_us_) {
         if (now_ts_us >= session->at_com_cache_ts_us_) {
@@ -854,10 +870,10 @@ void WinSnBitmapCallback(slid_win_hdl win_hdl, void *cntxt_hdl, const void *bit_
             now_ts_us = session->at_com_cache_ts_us_ - now_ts_us;
         }
 
-        ack->cache_us_flag_   = GTP_YES;
+        pack->cache_us_flag_  = GTP_YES;
         *((u64*)chg_len_zone) = session->com_cache_ts_us_ + now_ts_us;
-        chg_len_zone         += sizeof(u64);
-        pack_size            += sizeof(u64);
+        chg_len_zone          += sizeof(u64);
+        pack_size              += sizeof(u64);
 
         session->com_cache_ts_us_    = 0;
         session->at_com_cache_ts_us_ = 0;
@@ -867,11 +883,11 @@ void WinSnBitmapCallback(slid_win_hdl win_hdl, void *cntxt_hdl, const void *bit_
                "[win_hdl=%p]%s:%u<-->%s:%u(ack) head_sn=%u tail_sn=%u rto_sn=%u.\r\n", win_hdl,
                session->pb_dt_.self_ip_, (u32)(session->pb_dt_.self_port_),
                session->pb_dt_.peer_ip_, (u32)(session->pb_dt_.peer_port_),
-               ack->head_sn_, ack_data->tail_sn_, ack_data->rto_sn_);
+               ack_load->head_sn_, ack_data->tail_sn_, ack_data->rto_sn_);
         #endif
     }
 
-    ack->pack_size_ = (u16)pack_size;
+    pack->pack_size_ = (u16)pack_size;
 
     memcpy(chg_len_zone, ack_data->sn_bit_map_, ack_data->mem_size_);
     }
@@ -1134,6 +1150,11 @@ void GtpSession::operator delete(void *psp_mem) {
     mem_pool->FreeItem(save_mem_pool_ptr);
 
     return;
+}
+
+void GtpSession::operator delete(void *psp_mem, void *psp_mem_for_new) {
+    (void)psp_mem_for_new;
+    GtpSession::operator delete(psp_mem);
 }
 
 u32 GtpSession::Init(const u64 &ts_us, u8 *win_cache, const u32 &pack_sn, const u32 &next_out_sn) {
@@ -1547,12 +1568,23 @@ reorder_buffer_slot_:
 
 u32 GtpSession::FramePrepHandler(void *frame, const u32 &frame_size, GtpPacket **out_pack, u32 *out_pack_size,
                          const u32 &hash, const u32 &user_id, const u32 &first_pack_sn, const u32 &resend_num) {
+    u32 real_hash    = hash;
+    u32 real_user_id = user_id;
+
+    // when the session is identified by stream_key_, embed it into the existing hash_/user_id_ optional
+    // field(carried under has_check_flag_) instead of the caller-supplied token/token_id, so the peer can
+    // recover stream_key_ from the raw packet without a session lookup(see GtpCheckPacketInvalid()).
+    if (GTP_YES == pb_dt_.tran_addr_.enable_key_) {
+        real_hash    = (u32)(pb_dt_.tran_addr_.stream_key_ >> 32);
+        real_user_id = (u32)(pb_dt_.tran_addr_.stream_key_ & 0x00000000FFFFFFFFULL);
+    }
+
     if ((0xFF == pb_dt_.peer_version_) || (GTP_VERSION == pb_dt_.peer_version_)) {
-        return FramePrepHandlerWithSelfVer(frame, frame_size, out_pack, out_pack_size, hash, user_id,
+        return FramePrepHandlerWithSelfVer(frame, frame_size, out_pack, out_pack_size, real_hash, real_user_id,
                                            first_pack_sn, resend_num);
     }
 
-    return FramePrepHandlerWithPeerVer(frame, frame_size, out_pack, out_pack_size, hash, user_id,
+    return FramePrepHandlerWithPeerVer(frame, frame_size, out_pack, out_pack_size, real_hash, real_user_id,
                                        first_pack_sn, resend_num);
 }
 
@@ -3260,14 +3292,27 @@ void GtpSession::SendSetRecvRttPacket(void) {
     u8 tmp_buf[1024];
     GtpPacket *pack = (GtpPacket*)tmp_buf;
 
+    u16 has_check  = GTP_NO;
+    u32 rtt_offset = (u32)sizeof(GtpPacket);
+
+    if (GTP_YES == pb_dt_.tran_addr_.enable_key_) {
+        has_check = GTP_YES;
+        u8 *key_ptr = ((u8*)pack) + sizeof(GtpPacket);
+        *((u32*)(key_ptr))              = (u32)(pb_dt_.tran_addr_.stream_key_ >> 32);
+        *((u32*)(key_ptr + sizeof(u32))) = (u32)(pb_dt_.tran_addr_.stream_key_);
+        rtt_offset += (u32)sizeof(u64);
+    }
+
+    u32 pack_size = rtt_offset + (u32)sizeof(u32);
+
     pack->goodtp_ver_     = CalcRightGtpVer(GTP_VERSION, pb_dt_.peer_version_);
-    pack->header_offset_  = (u8)(sizeof(GtpPacket) + sizeof(u32));
+    pack->header_offset_  = (u8)pack_size;
     pack->cache_us_flag_  = GTP_NO;
     pack->has_loss_flag_  = GTP_NO;
     pack->pack_type_      = (u8)(GtpPackType::kGtpSetRecvRttPackType);
-    pack->pack_size_      = (u16)(sizeof(GtpPacket) + sizeof(u32));
+    pack->pack_size_      = (u16)pack_size;
     pack->pack_sn_        = 0;         // the sn is invalid in set receiving rtt packet.
-    pack->has_check_flag_ = GTP_NO;
+    pack->has_check_flag_ = (u8)has_check;
     pack->has_ts_flag_    = GTP_NO;
     pack->has_rtt_flag_   = GTP_YES;
     pack->init_flag_      = (u8)((((u8)(GtpSessStat::kRunning)) == send_session_stat_) ? GTP_NO : GTP_YES);
@@ -3275,7 +3320,7 @@ void GtpSession::SendSetRecvRttPacket(void) {
     pack->is_qos_flg_     = GTP_NO;
     pack->share_zone_     = 0;
 
-    *((u32*)(((u8*)(pack)) + sizeof(GtpPacket))) = rtt_us_;
+    *((u32*)(((u8*)(pack)) + rtt_offset)) = rtt_us_;
 
     #ifdef _SELFDEBUG
     GtpLog(cb_.write_log_cb_, kGtpSessionMd, kGtpLogLevelDebug, "%s:%u<-->%s:%u send to receive windows's rrt=%uus.\r\n",
@@ -3292,16 +3337,14 @@ void GtpSession::SendSetRecvRttPacket(void) {
     #if (1 == ENABLE_MD_PERF_CHECK)
     {
     u64 app_consume_us = GtpSysTimestampUs();
-    result = cb_.send_pack_cb_(GtpHdlIntToPointer(pb_dt_.gtp_hdl_), pack,
-                               (u32)(sizeof(GtpPacket) + sizeof(u32)), &(pb_dt_.tran_addr_));
+    result = cb_.send_pack_cb_(GtpHdlIntToPointer(pb_dt_.gtp_hdl_), pack, pack_size, &(pb_dt_.tran_addr_));
     app_consume_us = GtpSysTimestampUs() - app_consume_us;
     pb_dt_.app_send_consume_.CacheConsumeTime(app_consume_us);
     pb_dt_.send_consume_.ts_us_ += app_consume_us;
     pb_dt_.recv_consume_.ts_us_ += app_consume_us;
     }
     #else
-    result = cb_.send_pack_cb_(GtpHdlIntToPointer(pb_dt_.gtp_hdl_), pack,
-                               (u32)(sizeof(GtpPacket) + sizeof(u32)), &(pb_dt_.tran_addr_));
+    result = cb_.send_pack_cb_(GtpHdlIntToPointer(pb_dt_.gtp_hdl_), pack, pack_size, &(pb_dt_.tran_addr_));
     #endif
 
     if (GTP_OK != result) {
@@ -3310,7 +3353,7 @@ void GtpSession::SendSetRecvRttPacket(void) {
     }
 
     pb_dt_.send_stat_.net_pack_sum_    += 1;
-    pb_dt_.send_stat_.net_bitrate_sum_ += ((u32)(sizeof(GtpPacket) + sizeof(u32)));
+    pb_dt_.send_stat_.net_bitrate_sum_ += pack_size;
 
     return;
 }
@@ -3319,14 +3362,27 @@ void GtpSession::SendRttTestResPacket(const u64 &ts_us) {
     u8 tmp_buf[1024];
     GtpPacket *pack = (GtpPacket*)tmp_buf;
 
+    u16 has_check = GTP_NO;
+    u32 ts_offset = (u32)sizeof(GtpPacket);
+
+    if (GTP_YES == pb_dt_.tran_addr_.enable_key_) {
+        has_check = GTP_YES;
+        u8 *key_ptr = ((u8*)pack) + sizeof(GtpPacket);
+        *((u32*)(key_ptr))              = (u32)(pb_dt_.tran_addr_.stream_key_ >> 32);
+        *((u32*)(key_ptr + sizeof(u32))) = (u32)(pb_dt_.tran_addr_.stream_key_);
+        ts_offset += (u32)sizeof(u64);
+    }
+
+    u32 pack_size = ts_offset + (u32)sizeof(u64);
+
     pack->goodtp_ver_     = CalcRightGtpVer(GTP_VERSION, pb_dt_.peer_version_);
-    pack->header_offset_  = (u8)(sizeof(GtpPacket) + sizeof(u64));
+    pack->header_offset_  = (u8)pack_size;
     pack->cache_us_flag_  = GTP_NO;
     pack->has_loss_flag_  = GTP_NO;
     pack->pack_type_      = (u8)(GtpPackType::kGtpRttTstResPackType);
-    pack->pack_size_      = (u16)(sizeof(GtpPacket) + sizeof(u64));
+    pack->pack_size_      = (u16)pack_size;
     pack->pack_sn_        = 0;
-    pack->has_check_flag_ = GTP_NO;
+    pack->has_check_flag_ = (u8)has_check;
     pack->has_ts_flag_    = GTP_YES;
     pack->has_rtt_flag_   = GTP_NO;
     pack->init_flag_      = (u8)(((u8)(GtpSessStat::kRunning) == recv_session_stat_) ? GTP_NO : GTP_YES);
@@ -3334,7 +3390,7 @@ void GtpSession::SendRttTestResPacket(const u64 &ts_us) {
     pack->is_qos_flg_     = GTP_NO;
     pack->share_zone_     = 0;
 
-    *((u64*)(((u8*)(pack)) + sizeof(GtpPacket))) = ts_us;
+    *((u64*)(((u8*)(pack)) + ts_offset)) = ts_us;
 
     GtpHeaderNewToOld(pack, pb_dt_.peer_version_);
 
@@ -3343,8 +3399,7 @@ void GtpSession::SendRttTestResPacket(const u64 &ts_us) {
     #if (1 == ENABLE_MD_PERF_CHECK)
     {
     u64 app_consume_us = GtpSysTimestampUs();
-    result = cb_.send_pack_cb_(GtpHdlIntToPointer(pb_dt_.gtp_hdl_), pack,
-                               (u32)(sizeof(GtpPacket) + sizeof(u64)), &(pb_dt_.tran_addr_));
+    result = cb_.send_pack_cb_(GtpHdlIntToPointer(pb_dt_.gtp_hdl_), pack, pack_size, &(pb_dt_.tran_addr_));
     app_consume_us = GtpSysTimestampUs() - app_consume_us;
     pb_dt_.app_send_consume_.CacheConsumeTime(app_consume_us);
 
@@ -3352,8 +3407,7 @@ void GtpSession::SendRttTestResPacket(const u64 &ts_us) {
     pb_dt_.recv_consume_.ts_us_ += app_consume_us;
     }
     #else
-    result = cb_.send_pack_cb_(GtpHdlIntToPointer(pb_dt_.gtp_hdl_), pack,
-                               (u32)(sizeof(GtpPacket) + sizeof(u64)), &(pb_dt_.tran_addr_));
+    result = cb_.send_pack_cb_(GtpHdlIntToPointer(pb_dt_.gtp_hdl_), pack, pack_size, &(pb_dt_.tran_addr_));
     #endif
 
     if (GTP_OK != result) {
@@ -3362,7 +3416,7 @@ void GtpSession::SendRttTestResPacket(const u64 &ts_us) {
     }
 
     pb_dt_.send_stat_.net_pack_sum_    += 1;
-    pb_dt_.send_stat_.net_bitrate_sum_ += ((u32)(sizeof(GtpPacket) + sizeof(u32)));
+    pb_dt_.send_stat_.net_bitrate_sum_ += pack_size;
 
     return;
 }

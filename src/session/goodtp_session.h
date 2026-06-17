@@ -52,6 +52,10 @@ class GtpSession {
 
     static void* operator new(size_t n, void *psp_mem);
     static void operator delete(void *psp_mem);
+    /* matching placement-delete: invoked by the compiler only if the constructor
+     * throws after operator new(size_t, void*) already pulled an item from the
+     * pool, so that item gets returned instead of leaking. */
+    static void operator delete(void *psp_mem, void *psp_mem_for_new);
 
     static u32 PackRetransmit(void *session, ArqNode *arq_node, GtpAddr *tran_addr, const u64 &cur_ts_us);
 

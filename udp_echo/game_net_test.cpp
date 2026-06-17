@@ -53,6 +53,9 @@ static uint64_t now_us() {
     return (uint64_t)ts.tv_sec * 1000000ULL + ts.tv_nsec / 1000;
 }
 
+/* ─────────── stream_key_ 测试常量 ─────────── */
+#define GAME_TEST_STREAM_KEY  0x1234567890ABCDEFULL
+
 /* ─────────── 帧格式 ─────────── */
 #define FRAME_MAGIC  0xC0DEBABE
 #define PAYLOAD_SZ   188   /* 192 - 4 bytes reserved for CRC */
@@ -199,6 +202,7 @@ struct DelaySampler {
 /* ─────────── 帧完整性（无锁，同线程访问） ─────────── */
 struct FrameRecord {
     uint32_t recv=0, total=0;
+    uint32_t seen_mask=0;   /* bit i set => pkt_in_frame==i already delivered to app */
 };
 static std::vector<FrameRecord> g_frames;  /* indexed by frame_id-1 */
 
@@ -222,6 +226,7 @@ struct SceneResult {
     BwStat   bw_a, bw_b;
     uint32_t dropped=0;
     uint32_t fec_rec=0, arq_rto=0, arq_ack=0, arq_boost=0;
+    uint32_t dup_pkt=0, corruption=0;
     uint32_t p50=0, p99=0;
     /* 算法内部状态（从 GetAlgorithmParam 解析） */
     uint32_t book_id_actual = 0;
@@ -247,6 +252,7 @@ static uint64_t     g_app_payload = 0;
 static uint32_t     g_fec_anomaly = 0;
 static uint32_t     g_quintuple_cnt = 0;
 static uint32_t     g_corruption = 0;  /* CRC mismatch after FEC/ARQ recovery */
+static uint32_t     g_dup_pkt = 0;     /* same (frame_id,pkt_in_frame) delivered to app twice */
 
 /* ─────────── GoodTP 回调 ─────────── */
 static uint32_t SendCbA(GtpHandler_p, void *pack, uint32_t sz, GtpAddr *addr) {
@@ -265,12 +271,20 @@ static uint32_t RecvCbB(GtpHandler_p, void *frame, uint32_t sz, GtpAddr *) {
 
     g_recv_pkt++;
 
-    /* frame completeness */
+    /* frame completeness + duplicate-delivery detection */
     uint32_t fid = pkt->frame_id;
     if (fid > 0 && fid <= (uint32_t)g_frames.size()) {
         auto &fr = g_frames[fid-1];
         if (fr.total == 0) fr.total = pkt->pkts_per_frame;
-        if (++fr.recv == fr.total) g_recv_frm++;
+        uint32_t bit = pkt->pkt_in_frame;
+        if (bit < 32) {
+            if (fr.seen_mask & (1u << bit)) {
+                g_dup_pkt++;            /* app already received this exact packet once */
+            } else {
+                fr.seen_mask |= (1u << bit);
+                if (++fr.recv == fr.total) g_recv_frm++;
+            }
+        }
     }
 
     uint64_t now = now_us();
@@ -282,6 +296,8 @@ static uint32_t RecvCbB(GtpHandler_p, void *frame, uint32_t sz, GtpAddr *) {
 
 static uint32_t SendCbB(GtpHandler_p, void *pack, uint32_t sz, GtpAddr *) {
     g_bw_b.add(pack, sz);
+    /* B→A 方向（ACK/NACK/RTT）同样随机丢包，模拟真实双向网络丢包 */
+    if (g_loss.drop()) { g_dropped++; return GTP_OK; }
     sendto(g_sfd_b, pack, sz, 0, (struct sockaddr*)&g_addr_a, sizeof(g_addr_a));
     return GTP_OK;
 }
@@ -325,10 +341,13 @@ static void recv_and_deliver(int sfd, GtpHandler_p hdl,
             uint8_t *mem = GtpMallocPackMem(hdl, nullptr, 0, &msz, (void**)&ta, sz);
             if (!mem) return;
             memcpy(mem, data, sz);
+            uint64_t sk = 0;
+            GtpCheckPacketInvalid(mem, sz, &sk);
             ta->context_       = nullptr;
             ta->sfd_           = (uint32_t)sfd;
             ta->stream_type_   = kRealTimeStream;
-            ta->enable_key_    = 0;
+            ta->enable_key_    = 1;
+            ta->stream_key_    = sk ? sk : GAME_TEST_STREAM_KEY;
             ta->self_addr_len_ = sizeof(*self_addr);
             memcpy(ta->self_addr_, self_addr, sizeof(*self_addr));
             ta->sock_addr_len_ = (uint32_t)pl;
@@ -376,7 +395,7 @@ SceneResult run_scene(const SceneCfg &cfg) {
     g_bw_a.reset(); g_bw_b.reset(); g_ds.reset();
     g_dropped = 0; g_sent_pkt = 0; g_recv_pkt = 0;
     g_sent_frm = 0; g_recv_frm = 0; g_app_payload = 0;
-    g_fec_anomaly = 0; g_quintuple_cnt = 0; g_corruption = 0;
+    g_fec_anomaly = 0; g_quintuple_cnt = 0; g_corruption = 0; g_dup_pkt = 0;
 
     /* 预分配帧记录 */
     /* pps = 总包/秒；frame_interval = pkts_per_frm/pps；frames = pps/pkts_per_frm × duration */
@@ -463,7 +482,8 @@ SceneResult run_scene(const SceneCfg &cfg) {
                 ta->context_       = nullptr;
                 ta->sfd_           = (uint32_t)g_sfd_a;
                 ta->stream_type_   = kRealTimeStream;
-                ta->enable_key_    = 0;
+                ta->enable_key_    = 1;
+                ta->stream_key_    = GAME_TEST_STREAM_KEY;
                 ta->self_addr_len_ = sizeof(g_addr_a);
                 memcpy(ta->self_addr_, &g_addr_a, sizeof(g_addr_a));
                 ta->sock_addr_len_ = sizeof(g_addr_b);
@@ -492,8 +512,12 @@ SceneResult run_scene(const SceneCfg &cfg) {
         uint8_t *mem = GtpMallocPackMem(g_hdl_b, nullptr, 0, &msz, (void**)&ta, sz);
         if (mem) {
             memcpy(mem, p->buf, sz);
+            uint64_t fsk = 0;
+            GtpCheckPacketInvalid(mem, sz, &fsk);
             ta->context_ = nullptr; ta->sfd_ = (uint32_t)g_sfd_b;
-            ta->stream_type_ = kRealTimeStream; ta->enable_key_ = 0;
+            ta->stream_type_ = kRealTimeStream;
+            ta->enable_key_  = 1;
+            ta->stream_key_  = fsk ? fsk : GAME_TEST_STREAM_KEY;
             ta->self_addr_len_ = sizeof(g_addr_b);
             memcpy(ta->self_addr_, &g_addr_b, sizeof(g_addr_b));
             ta->sock_addr_len_ = p->peer_len;
@@ -554,6 +578,14 @@ SceneResult run_scene(const SceneCfg &cfg) {
     res.frm_total    = frame_id;
     res.frm_complete = g_recv_frm;
     res.app_payload  = g_app_payload;
+    res.dup_pkt      = g_dup_pkt;
+    res.corruption   = g_corruption;
+    /* unconditional alarm: catches duplicate/corrupted delivery to app even in
+     * PART3/4/5/7-10, whose table printers don't surface dup_pkt/corruption. */
+    if (g_dup_pkt > 0 || g_corruption > 0) {
+        fprintf(stderr, "[DUP-ALARM] scene=\"%s\" dup_pkt=%u corruption=%u\n",
+                cfg.name, g_dup_pkt, g_corruption);
+    }
     res.bw_a         = g_bw_a;
     res.bw_b         = g_bw_b;
     res.dropped      = g_dropped;
@@ -584,8 +616,10 @@ static void print_result(const SceneResult &r, int book_id, int pps) {
     printf("  %-44s book=%d pps=%d\n", r.name, book_id, pps);
     printf("  丢包(模拟)%5.1f%% | 包交付率%6.2f%% | 帧完整率%6.2f%%\n",
            eff_loss, delivery, frm_succ);
-    printf("  FEC恢复%4u  ARQ(rto)%4u  ARQ(ack)%4u  ARQ(boost)%4u  FEC异常%u  SN跳跃告警%u  CRC错误%u\n",
-           r.fec_rec, r.arq_rto, r.arq_ack, r.arq_boost, g_fec_anomaly, g_quintuple_cnt, g_corruption);
+    printf("  FEC恢复%4u  ARQ(rto)%4u  ARQ(ack)%4u  ARQ(boost)%4u  FEC异常%u  SN跳跃告警%u  CRC错误%u  重复包%u\n",
+           r.fec_rec, r.arq_rto, r.arq_ack, r.arq_boost, g_fec_anomaly, g_quintuple_cnt, r.corruption, r.dup_pkt);
+    if (r.dup_pkt > 0)
+        printf("  *** 警告：检测到 %u 个重复包被上报给应用层 ***\n", r.dup_pkt);
     printf("  延迟 p50=%uµs  p99=%uµs\n", r.p50, r.p99);
     printf("  带宽 A→B%.0fKB FEC占%.1f%% 重传占%.1f%% B→A控制%.1f%% 总开销%.1f%%\n",
            tx_a/1024.0, fec_pct, retr_pct, ack_pct, overhead);

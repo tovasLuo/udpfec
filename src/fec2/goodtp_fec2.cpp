@@ -619,6 +619,15 @@ try_again_encode_pos_:
 }
 
 u32 GtpFec2::Decode(Fec2CodePack *fec_code_pack, const u64 &ts_us) {
+    if (GTP_YES == fec_code_pack->has_check_flag_) {
+        // strip the stream_key_ (8 bytes) prepended before fec_code_ so downstream is key-unaware
+        if ((u32)(fec_code_pack->code_len_) + (u32)sizeof(u64) <= (u32)(fec_code_pack->pack_size_)) {
+            memmove(fec_code_pack->fec_code_, fec_code_pack->fec_code_ + sizeof(u64), fec_code_pack->code_len_);
+            fec_code_pack->pack_size_     -= (u16)sizeof(u64);
+        }
+        fec_code_pack->has_check_flag_  = GTP_NO;
+    }
+
     if (MAX_VALID_FEC2_BOOK_ID < fec_code_pack->code_book_id_) {
         GtpLog(write_log_cb_, kGtpFecMd, kGtpLogLevelError, "Invalid fec code book id(%u).\r\n",
                (u32)(fec_code_pack->code_book_id_));
@@ -944,7 +953,7 @@ void GtpFec2::HorizontalEncode(const encode_pos &h_pos, const encode_pos &v_pos,
 
     if (NULL == encode_.encode_matrix_.h_fec_code_[h_pos].fec_pack_) {
 h_first_fec_encode_pos_:
-        mem_spec = GtpPackSizeToMemSpec(data_size);
+        mem_spec = GtpPackSizeToMemSpec(data_size + (GTP_YES == pb_dt_->tran_addr_.enable_key_ ? (u32)sizeof(u64) : 0u));
         new_mem  = pack_mem_pool_.MallocTranBuf(NULL, 0, &com_var, (void**)(&tran_addr), (BufSizeType)mem_spec);
         if (NULL == new_mem) {
             const string err = pack_mem_pool_.Error();
@@ -1025,7 +1034,7 @@ void GtpFec2::VerticalEncode(const encode_pos &h_pos, const encode_pos &v_pos, u
 
     if (NULL == encode_.encode_matrix_.v_fec_code_[v_pos].fec_pack_) {
 v_first_fec_encode_pos_:
-        mem_spec = GtpPackSizeToMemSpec(data_size);
+        mem_spec = GtpPackSizeToMemSpec(data_size + (GTP_YES == pb_dt_->tran_addr_.enable_key_ ? (u32)sizeof(u64) : 0u));
         new_mem  = pack_mem_pool_.MallocTranBuf(NULL, 0, &com_var, (void**)(&tran_addr), (BufSizeType)mem_spec);
         if (NULL == new_mem) {
             const string err = pack_mem_pool_.Error();
@@ -1120,7 +1129,7 @@ void GtpFec2::UphillEncode(const encode_pos &h_pos, const encode_pos &v_pos, u8 
 
     if (NULL == mgr.fec_pack_) {
 uh_first_fec_encode_pos_:
-        mem_spec = GtpPackSizeToMemSpec(data_size);
+        mem_spec = GtpPackSizeToMemSpec(data_size + (GTP_YES == pb_dt_->tran_addr_.enable_key_ ? (u32)sizeof(u64) : 0u));
         new_mem  = pack_mem_pool_.MallocTranBuf(NULL, 0, &com_var, (void**)(&tran_addr), (BufSizeType)mem_spec);
         if (NULL == new_mem) {
             const string err = pack_mem_pool_.Error();
@@ -1206,7 +1215,7 @@ void GtpFec2::DownhillEncode(const encode_pos &h_pos, const encode_pos &v_pos, u
 
     if (NULL == mgr.fec_pack_) {
 dh_first_fec_encode_pos_:
-        mem_spec = GtpPackSizeToMemSpec(data_size);
+        mem_spec = GtpPackSizeToMemSpec(data_size + (GTP_YES == pb_dt_->tran_addr_.enable_key_ ? (u32)sizeof(u64) : 0u));
         new_mem  = pack_mem_pool_.MallocTranBuf(NULL, 0, &com_var, (void**)(&tran_addr), (BufSizeType)mem_spec);
         if (NULL == new_mem) {
             const string err = pack_mem_pool_.Error();
@@ -1272,13 +1281,28 @@ dh_fec_encode_exit_pos_:
 }
 
 void GtpFec2::SendFecCodePacket(Fec2CodePackMgr &fec_code_mgr) {
+    u16 has_check = GTP_NO;
+    u32 pack_size = (u32)sizeof(Fec2CodePack) + (u32)(fec_code_mgr.fec_pack_->code_len_);
+
+    if (GTP_YES == pb_dt_->tran_addr_.enable_key_) {
+        u32 alloc_cap = (u32)(fec_code_mgr.tran_addr_->stream_key_);  // com_var cached before memcpy
+        u16 code_len  = fec_code_mgr.fec_pack_->code_len_;
+        if (alloc_cap >= (u32)code_len + (u32)sizeof(u64)) {
+            memmove(fec_code_mgr.fec_pack_->fec_code_ + sizeof(u64), fec_code_mgr.fec_pack_->fec_code_, code_len);
+            *((u32*)(fec_code_mgr.fec_pack_->fec_code_))              = (u32)(pb_dt_->tran_addr_.stream_key_ >> 32);
+            *((u32*)(fec_code_mgr.fec_pack_->fec_code_ + sizeof(u32))) = (u32)(pb_dt_->tran_addr_.stream_key_);
+            pack_size += (u32)sizeof(u64);
+            has_check  = GTP_YES;
+        }
+    }
+
     fec_code_mgr.fec_pack_->goodtp_ver_     = CalcRightGtpVer(GTP_VERSION, pb_dt_->peer_version_);
-    fec_code_mgr.fec_pack_->header_offset_  = (u8)sizeof(GtpPacket);
+    fec_code_mgr.fec_pack_->header_offset_  = (u8)(GTP_YES == has_check ? sizeof(GtpPacket) + sizeof(u64) : sizeof(GtpPacket));
     fec_code_mgr.fec_pack_->cache_us_flag_  = GTP_NO;
     fec_code_mgr.fec_pack_->has_loss_flag_  = GTP_NO;
     fec_code_mgr.fec_pack_->pack_type_      = (u8)(GtpPackType::kGtpFecPackType);
-    fec_code_mgr.fec_pack_->pack_size_      = (u16)(sizeof(Fec2CodePack) + fec_code_mgr.fec_pack_->code_len_);
-    fec_code_mgr.fec_pack_->has_check_flag_ = GTP_NO;
+    fec_code_mgr.fec_pack_->pack_size_      = (u16)pack_size;
+    fec_code_mgr.fec_pack_->has_check_flag_ = (u8)has_check;
     fec_code_mgr.fec_pack_->has_ts_flag_    = GTP_NO;
     fec_code_mgr.fec_pack_->has_rtt_flag_   = GTP_NO;
     fec_code_mgr.fec_pack_->init_flag_      = GTP_NO;
@@ -1630,7 +1654,7 @@ u32 GtpFec2::ReAllocateEncodeMem(const u32 &new_size, Fec2CodePackMgr &fec_code_
     u8 *new_mem  = NULL;
     GtpAddr *tran_addr = NULL;
 
-    mem_spec = GtpPackSizeToMemSpec(new_size);
+    mem_spec = GtpPackSizeToMemSpec(new_size + (GTP_YES == pb_dt_->tran_addr_.enable_key_ ? (u32)sizeof(u64) : 0u));
     new_mem  = pack_mem_pool_.MallocTranBuf(NULL, 0, &mem_size, (void**)(&tran_addr), (BufSizeType)mem_spec);
     if (NULL == new_mem) {
         const string err = pack_mem_pool_.Error();

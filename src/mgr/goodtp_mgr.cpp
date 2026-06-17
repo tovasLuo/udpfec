@@ -1517,6 +1517,12 @@ void GoodTp::DelSpsSessionByKey(GtpHandler_p app_gtp_hdl, const GtpSessionKey &l
         return;
     }
 
+    GtpLog(cb_.write_log_cb_, kGtpInterfaceMd, kGtpLogLevelWarning, "DelGtpLinker can't find the session to delete"\
+           "(key=%llu key_3rd_flag=%u sfd=%lld peer_port=%u self_port=%u), maybe the key passed in doesn't match "\
+           "the key used when this stream was created/sent.\r\n", (unsigned long long)(link_key.key_),
+           (u32)(link_key.key_3rd_flag_), (long long)(link_key.sfd_), (u32)(link_key.peer_bin_port_),
+           (u32)(link_key.self_bin_port_));
+
     return;
 }
 

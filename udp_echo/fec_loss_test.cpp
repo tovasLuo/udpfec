@@ -40,6 +40,14 @@
 
 #include "bitlinker.h"
 
+/* pack_type_ 在 GTP_PACK_HEADER 第一个 u32 的 bits[16..18]（小端 byte[2] 低 3 位）
+ * Layout: u32 word0 [goodtp_ver_:8|header_offset_:6|cache:1|loss:1|pack_type_:3|pack_size_:13]
+ *         u32 pack_sn_ (bytes 4-7)
+ *         u16 [has_check_flag_:1|...] (bytes 8-9)
+ */
+#define GTP_RAW_PACK_TYPE(buf)  (((const uint8_t*)(buf))[2] & 0x07u)
+#define GTP_FEC_PACK_TYPE_VAL   0x03u
+
 /* ───────────────────── 配置 ───────────────────── */
 #define MAX_PAYLOAD     512
 #define LOOPBACK_IP     "127.0.0.1"
@@ -61,8 +69,11 @@ struct Stats {
     std::atomic<uint32_t> recv_frames;
     std::atomic<uint32_t> dropped_at_net;
     std::atomic<uint32_t> fec_anomaly;
+    std::atomic<uint32_t> fec_key_ok;    /* FEC包中stream_key_提取正确 */
+    std::atomic<uint32_t> fec_key_bad;   /* FEC包中stream_key_提取错误（=0或!=TEST_KEY） */
 
-    Stats() : sent_frames(0), recv_frames(0), dropped_at_net(0), fec_anomaly(0) {}
+    Stats() : sent_frames(0), recv_frames(0), dropped_at_net(0), fec_anomaly(0),
+              fec_key_ok(0), fec_key_bad(0) {}
 };
 
 static Stats g_stats;
@@ -72,7 +83,10 @@ static int g_loss_pct  = 20;    /* 丢包百分比 0-100 */
 static int g_pps       = 50;    /* 每秒发包数 */
 static int g_duration  = 10;    /* 测试秒数 */
 static int g_book_id   = 4;     /* FEC codebook */
+static int g_use_key   = 0;     /* 1=enable_key_模式，测试FEC包stream_key_嵌入 */
 static volatile int g_running = 1;
+
+#define TEST_STREAM_KEY  0x1234567890ABCDEFULL
 
 /* ───────────────────── 时间戳 ───────────────────── */
 static uint64_t now_us(void) {
@@ -131,6 +145,11 @@ static uint32_t RecvFrameCbB(GtpHandler_p hdl, void *frame, uint32_t size, GtpAd
 
 static uint32_t SendPackCbB(GtpHandler_p hdl, void *pack, uint32_t size, GtpAddr *addr) {
     (void)hdl;
+    /* B→A 方向（ACK/NACK/RTT）同样随机丢包，模拟真实双向网络丢包 */
+    if (should_drop()) {
+        g_stats.dropped_at_net.fetch_add(1);
+        return GTP_OK;
+    }
     InstCtx *ctx = (InstCtx *)addr->context_;
     sendto(ctx->sfd_send, pack, size, 0,
            (struct sockaddr *)&ctx->peer_addr, ctx->peer_addr_len);
@@ -192,11 +211,28 @@ static void *recv_thread(void *arg) {
         tran_addr->context_       = ctx;
         tran_addr->sfd_           = (uint32_t)ctx->sfd_send;
         tran_addr->stream_type_   = kRealTimeStream;
-        tran_addr->enable_key_    = 0;
         tran_addr->self_addr_len_ = (uint32_t)sizeof(ctx->self_addr);
         memcpy(tran_addr->self_addr_, &ctx->self_addr, sizeof(ctx->self_addr));
         tran_addr->sock_addr_len_ = (uint32_t)peer_len;
         memcpy(tran_addr->sock_addr_, &peer, peer_len);
+
+        if (g_use_key) {
+            uint64_t sk = 0;
+            GtpCheckPacketInvalid(pack_mem, (uint32_t)n, &sk);
+
+            /* 所有包类型统一严格校验（ACK/NACK/RTT字节序已修正，不再需要fallback） */
+            if (GTP_FEC_PACK_TYPE_VAL == GTP_RAW_PACK_TYPE(pack_mem)) {
+                if (sk == TEST_STREAM_KEY) {
+                    g_stats.fec_key_ok.fetch_add(1);
+                } else {
+                    g_stats.fec_key_bad.fetch_add(1);
+                }
+            }
+            tran_addr->enable_key_  = 1;
+            tran_addr->stream_key_  = sk;  /* 直接用提取结果，无 fallback */
+        } else {
+            tran_addr->enable_key_  = 0;
+        }
 
         uint32_t ret = GtpPacketReceive(a->gtp_hdl, pack_mem, (uint32_t)n, tran_addr);
         if (GTP_OK != ret) {
@@ -270,6 +306,7 @@ int main(int argc, char *argv[]) {
     if (argc >= 3) g_pps      = atoi(argv[2]);
     if (argc >= 4) g_duration = atoi(argv[3]);
     if (argc >= 5) g_book_id  = atoi(argv[4]);
+    if (argc >= 6) g_use_key  = atoi(argv[5]);
 
     if (g_loss_pct < 0 || g_loss_pct > 90) { fprintf(stderr, "loss_pct 0-90\n"); return 1; }
     if (g_pps < 1 || g_pps > 5000)         { fprintf(stderr, "pps 1-5000\n");    return 1; }
@@ -278,8 +315,8 @@ int main(int argc, char *argv[]) {
     srand((unsigned)time(NULL));
 
     printf("=== fec_loss_test ===\n");
-    printf("loss=%d%%  pps=%d  duration=%ds  book_id=%d(%s)\n\n",
-           g_loss_pct, g_pps, g_duration, g_book_id, book_name(g_book_id));
+    printf("loss=%d%%  pps=%d  duration=%ds  book_id=%d(%s)  use_key=%d\n\n",
+           g_loss_pct, g_pps, g_duration, g_book_id, book_name(g_book_id), g_use_key);
 
     /* goodtp 模块加载 */
     if (GTP_OK != InsLoadGtpModule()) {
@@ -368,7 +405,8 @@ int main(int argc, char *argv[]) {
                 taddr->context_       = &g_inst_a;
                 taddr->sfd_           = (uint32_t)g_inst_a.sfd_send;
                 taddr->stream_type_   = kRealTimeStream;
-                taddr->enable_key_    = 0;
+                taddr->enable_key_    = (uint32_t)g_use_key;
+                taddr->stream_key_    = g_use_key ? TEST_STREAM_KEY : 0;
                 taddr->self_addr_len_ = (uint32_t)sizeof(g_inst_a.self_addr);
                 memcpy(taddr->self_addr_, &g_inst_a.self_addr, sizeof(g_inst_a.self_addr));
                 taddr->sock_addr_len_ = (uint32_t)sizeof(g_inst_a.peer_addr);
@@ -404,10 +442,12 @@ int main(int argc, char *argv[]) {
     GetAlgorithmParam(g_inst_b.gtp_hdl, ip_b, ip_a, alg_buf_b, sizeof(alg_buf_b));
 
     /* 结果报告 */
-    uint32_t sent  = g_stats.sent_frames.load();
-    uint32_t recvd = g_stats.recv_frames.load();
-    uint32_t drops = g_stats.dropped_at_net.load();
-    uint32_t anom  = g_stats.fec_anomaly.load();
+    uint32_t sent     = g_stats.sent_frames.load();
+    uint32_t recvd    = g_stats.recv_frames.load();
+    uint32_t drops    = g_stats.dropped_at_net.load();
+    uint32_t anom     = g_stats.fec_anomaly.load();
+    uint32_t fec_ok   = g_stats.fec_key_ok.load();
+    uint32_t fec_bad  = g_stats.fec_key_bad.load();
 
     printf("\n========== 结果 ==========\n");
     printf("发送帧:      %u\n", sent);
@@ -415,6 +455,9 @@ int main(int argc, char *argv[]) {
     printf("模拟丢包:    %u  (%.1f%%)\n", drops, sent ? drops * 100.0 / (sent + drops) : 0.0);
     printf("FEC异常日志: %u  (期望: 0)\n", anom);
     printf("帧丢失率:    %.1f%%\n", sent ? (sent - recvd) * 100.0 / sent : 0.0);
+    if (g_use_key) {
+        printf("FEC包key正确: %u  key错误: %u  (use_key=1时统计)\n", fec_ok, fec_bad);
+    }
 
     printf("\n--- 发送端(A)算法参数 ---\n%s\n", alg_buf_a);
     printf("--- 接收端(B)算法参数 ---\n%s\n", alg_buf_b);
@@ -429,6 +472,18 @@ int main(int argc, char *argv[]) {
         pass = 0;
     } else {
         printf("[PASS] 无 fec restore abnormal 日志\n");
+    }
+
+    /* TEST 4：use_key=1 时 FEC 包 stream_key_ 提取正确 */
+    if (g_use_key) {
+        if (fec_bad > 0) {
+            printf("[FAIL] FEC包stream_key_提取错误 %u 次（正确 %u 次）\n", fec_bad, fec_ok);
+            pass = 0;
+        } else if (fec_ok == 0) {
+            printf("[WARN] use_key=1 但未收到任何FEC包（fec_key_ok=0），无法验证\n");
+        } else {
+            printf("[PASS] FEC包stream_key_提取全部正确（%u 次）\n", fec_ok);
+        }
     }
 
     /* TEST 1/2/3：帧丢失率不超过理论 FEC 恢复能力上限 */
