@@ -43,6 +43,7 @@
 
 #include <stdio.h>
 #include <unordered_map>
+#include <unordered_set>
 #include <string>
 
 using namespace std;
@@ -246,6 +247,10 @@ PRIVATE:
     u8 win_cache_[GTP_INST_COM_CACHE_SIZE];
 
     unordered_map<GtpSessionKey, GtpSession*, GtpSessionKeyHash> session_map_;
+
+    /* stream_keys explicitly deleted by app (via DelGtpLinker with enable_key_=1).
+       Receive-path BuildNewSession is blocked for these keys until the app re-sends. */
+    unordered_set<u64> app_deleted_stream_keys_;
 
     /* 0: 4X4(h=1 v=1 uh=1 dh=1), 1: 4X4(h=1 v=1 uh=0 dh=0), 2: 4X1(h=1 v=0 uh=0 dh=0)
        3: 2X2(h=1 v=1 uh=1 dh=1), 4: 2X2(h=1 v=1 uh=0 dh=0), 5: 2X1(h=1 v=0 uh=0 dh=0) */

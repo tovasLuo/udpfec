@@ -1393,6 +1393,17 @@ GtpSession* GoodTp::GetSession(GtpAddr *tran_addr, GtpHandler_p app_gtp_hdl, con
         return itr->second;
     }
 
+    if ((u32)(GtpSessionMode::kReceiver) == mode) {
+        if (app_deleted_stream_keys_.count(tran_addr->stream_key_)) {
+            GtpLog(cb_.write_log_cb_, kGtpMgrMd, kGtpLogLevelWarning,
+                   "refuse to rebuild session for app-deleted stream_key=%llu (recv path)\r\n",
+                   (unsigned long long)(tran_addr->stream_key_));
+            return NULL;
+        }
+    } else {
+        app_deleted_stream_keys_.erase(tran_addr->stream_key_);
+    }
+
     return BuildNewSession(out_key, tran_addr, app_gtp_hdl, mode, pack_sn, sort_sn, sfd);
 }
 
@@ -1716,6 +1727,7 @@ void GoodTp::DelSpsSession(GtpHandler_p app_gtp_hdl, GtpAddr *tran_addr) {
     }
 
     {
+    app_deleted_stream_keys_.insert(tran_addr->stream_key_);
     GtpSessionKey link_key(tran_addr->stream_key_);
     DelSpsSessionByKey(app_gtp_hdl, link_key);
     }

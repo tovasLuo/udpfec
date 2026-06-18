@@ -23,7 +23,6 @@ public:
     public:
 		virtual void send_fec_pdu_cb(StreamKey streamKey, const sockaddr_full& epNode, const u8* data, u16 size, void* context) = 0;
         virtual void recv_pdu_cb(StreamKey streamKey, const sockaddr_full& epNode, const sockaddr_full& epTranserLocal, const u8* data, u16 size, void* context) = 0;
-        virtual void on_session_closed_cb(StreamKey streamKey) {}
     };
 
     struct ref_buf
@@ -56,7 +55,6 @@ public:
 
     static void fec_log_cb(uint32_t log_level, const char* fmt, ...);
     static uint32_t fec_log_level_cb();
-    static void close_session_cb(GtpHandler_p gtp_hdl, void* context);
 
     static uint32_t report_link_quality_cb(GtpHandler_p gtp_hdl, GtpLinkQuality vec[], uint32_t size);
     void del_fec_session(StreamKey streamKey, const sockaddr_full& epLocal, const sockaddr_full& epRemote);

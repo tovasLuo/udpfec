@@ -100,14 +100,6 @@ void FecAlgorithm::recv_pdu_cb(fec::StreamKey streamKey, const sockaddr_full& ep
 	_recv_cb(pkt);
 }
 
-void FecAlgorithm::on_session_closed_cb(fec::StreamKey streamKey)
-{
-	// Called from goodtp TTL expiry on the FEC thread — safe to touch _info directly.
-	// Remove stale _info entry so send_fec_pdu_cb won't be called for a dead session.
-	_info.extract(streamKey);
-	TRACEX_PAGE0("on_session_closed_cb streamKey={} (ttl expired)", streamKey);
-}
-
 void FecAlgorithm::_start()
 {
 	co_spawn(_ctx, _coro_main(), detached);
@@ -220,7 +212,6 @@ auto FecAlgorithm::_coro_main_down(fec& fec) -> awaitable<void>
 		auto errCode = GtpCheckPacketInvalid(pkt->buffer.data.data() + pkt->buffer.pos, pkt->buffer.len, &streamKey2);
 		if (errCode == GTP_OK) {
 			_info.try_emplace(streamKey2, pkt->info);
-			_streamKeys[pkt->info->nid].try_insert(streamKey2);
 
 			fec.recv_fec_pdu(streamKey2,
 				pkt->down_transer_local, pkt->node,

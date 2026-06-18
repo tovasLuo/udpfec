@@ -96,7 +96,7 @@ fec::fec(callback* cb)
     reg_cb.report_link_quality_cb_ = fec::report_link_quality_cb;
     reg_cb.write_log_cb_ = fec::fec_log_cb;
     reg_cb.cur_log_level_cb_ = fec::fec_log_level_cb;
-    reg_cb.close_session_cb_ = fec::close_session_cb;
+    reg_cb.close_session_cb_ = NULL;
 
     MemPoolConfig mem_pool_cfg;
     memset(&mem_pool_cfg, 0, sizeof(mem_pool_cfg));
@@ -388,16 +388,6 @@ uint32_t fec::send_fec_pdu_cb(GtpHandler_p gtp_hdl, void* data, uint32_t size, G
     }
 
     return GTP_OK;
-}
-
-void fec::close_session_cb(GtpHandler_p gtp_hdl, void* context)
-{
-    std::shared_lock lock(map_cb_mtx_);
-    auto it = map_cb_.find(GetCurrentThreadId());
-    if (it != map_cb_.end()) {
-        fec::StreamKey streamKey = (fec::StreamKey)(uintptr_t)context;
-        it->second->on_session_closed_cb(streamKey);
-    }
 }
 
 void fec::fec_log_cb(uint32_t log_level, const char* fmt, ...)
