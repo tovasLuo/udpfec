@@ -1,0 +1,123 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" ToolsVersion="15.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Debug|x64">
+      <Configuration>Debug</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Release|x64">
+      <Configuration>Release</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+  </ItemGroup>
+  <PropertyGroup Label="Globals">
+    <ProjectGuid>{a9990ea2-6c0d-4991-883a-6a7872b7536e}</ProjectGuid>
+    <Keyword>Linux</Keyword>
+    <RootNamespace>socks5udps</RootNamespace>
+    <MinimumVisualStudioVersion>15.0</MinimumVisualStudioVersion>
+    <ApplicationType>Linux</ApplicationType>
+    <ApplicationTypeRevision>1.0</ApplicationTypeRevision>
+    <TargetLinuxPlatform>Generic</TargetLinuxPlatform>
+    <LinuxProjectType>{D51BCBC9-82E9-4017-911E-C93873C4EA2B}</LinuxProjectType>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'" Label="Configuration">
+    <UseDebugLibraries>true</UseDebugLibraries>
+    <PlatformToolset>Remote_Clang_1_0</PlatformToolset>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'" Label="Configuration">
+    <UseDebugLibraries>false</UseDebugLibraries>
+    <PlatformToolset>Remote_GCC_1_0</PlatformToolset>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <ImportGroup Label="ExtensionSettings" />
+  <ImportGroup Label="Shared" />
+  <ImportGroup Label="PropertySheets" />
+  <PropertyGroup Label="UserMacros" />
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
+    <OutDir>$(ProjectDir)..\..\bin\$(Platform)\$(Configuration)\</OutDir>
+    <IntDir>$(ProjectDir)..\..\obj\$(Platform)\$(Configuration)\</IntDir>
+    <TargetExt />
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+    <OutDir>$(ProjectDir)..\..\bin\$(Platform)\$(Configuration)\</OutDir>
+    <IntDir>$(ProjectDir)..\..\obj\$(Platform)\$(Configuration)\</IntDir>
+    <TargetExt />
+  </PropertyGroup>
+  <ItemGroup>
+    <ClCompile Include="..\..\src\fec.cpp" />
+    <ClCompile Include="..\..\src\main.cpp" />
+    <ClCompile Include="..\..\src\pair_session_mgr.cpp" />
+    <ClCompile Include="..\..\src\sync_auth_info.cpp" />
+    <ClCompile Include="..\..\src\slide_win.cpp" />
+    <ClCompile Include="..\..\utils\cli_business.cpp" />
+    <ClCompile Include="..\..\utils\epoll_wrap.cpp" />
+    <ClCompile Include="..\..\utils\file_rwlock.cpp" />
+    <ClCompile Include="..\..\utils\libcli.c" />
+    <ClCompile Include="..\..\utils\socket_helper.cpp" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="..\..\inc\bitlinker.h" />
+    <ClInclude Include="..\..\src\fec.h" />
+    <ClInclude Include="..\..\src\pair_session_info.h" />
+    <ClInclude Include="..\..\src\auth_info.h" />
+    <ClInclude Include="..\..\src\buf_operation.h" />
+    <ClInclude Include="..\..\src\comm_def.h" />
+    <ClInclude Include="..\..\src\pair_session_mgr.h" />
+    <ClInclude Include="..\..\src\sync_auth_info.h" />
+    <ClInclude Include="..\..\src\slide_win.h" />
+    <ClInclude Include="..\..\src\m_udp_proto.h" />
+    <ClInclude Include="..\..\utils\cli_business.h" />
+    <ClInclude Include="..\..\utils\ctype_helper.h" />
+    <ClInclude Include="..\..\utils\epoll_wrap.h" />
+    <ClInclude Include="..\..\utils\file_rwlock.h" />
+    <ClInclude Include="..\..\utils\hash_combiner.h" />
+    <ClInclude Include="..\..\utils\libcli.h" />
+    <ClInclude Include="..\..\utils\packet_checksum.h" />
+    <ClInclude Include="..\..\utils\program_exists.h" />
+    <ClInclude Include="..\..\utils\root_authority.h" />
+    <ClInclude Include="..\..\utils\sockaddr_storage_index.h" />
+    <ClInclude Include="..\..\utils\socket_helper.h" />
+    <ClInclude Include="..\..\utils\string_helper.h" />
+    <ClInclude Include="..\..\utils\sys_log.h" />
+    <ClInclude Include="..\..\utils\timespec_helper.h" />
+  </ItemGroup>
+  <ItemGroup>
+    <Library Include="..\..\lib\libbitlinker64d.a">
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release|x64'">true</ExcludedFromBuild>
+    </Library>
+    <Library Include="..\..\lib\libbitlinker64r.a">
+      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">true</ExcludedFromBuild>
+    </Library>
+  </ItemGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
+    <ClCompile>
+      <PreprocessorDefinitions>_GNU_SOURCE;LIBCLI_USE_POLL;UDP_NONBLOCK;UDP_RECV_SEND_MSG;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalOptions>-pthread -fpermissive %(AdditionalOptions)</AdditionalOptions>
+      <AdditionalIncludeDirectories>../../utils;../../inc;../../src;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <CppLanguageStandard>c++17</CppLanguageStandard>
+      <CAdditionalWarning>no-sign-conversion;%(CAdditionalWarning);no-conversion</CAdditionalWarning>
+    </ClCompile>
+    <Link>
+      <AdditionalOptions>-pthread %(AdditionalOptions)</AdditionalOptions>
+      <LibraryDependencies>crypt;bitlinker64d;%(LibraryDependencies)</LibraryDependencies>
+      <AdditionalLibraryDirectories>$(ProjectDir)..\..\lib\;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+    </Link>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+    <ClCompile>
+      <PreprocessorDefinitions>_GNU_SOURCE;LIBCLI_USE_POLL;UDP_NONBLOCK;UDP_RECV_SEND_MSG;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalOptions>-pthread -fpermissive %(AdditionalOptions)</AdditionalOptions>
+      <AdditionalIncludeDirectories>../../utils;../../inc;../../src;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <CppLanguageStandard>c++17</CppLanguageStandard>
+      <CAdditionalWarning>no-sign-conversion;%(CAdditionalWarning);no-conversion</CAdditionalWarning>
+    </ClCompile>
+    <Link>
+      <AdditionalOptions>-pthread %(AdditionalOptions)</AdditionalOptions>
+      <LibraryDependencies>crypt;bitlinker64r;%(LibraryDependencies)</LibraryDependencies>
+      <AdditionalLibraryDirectories>$(ProjectDir)..\..\lib\;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+    </Link>
+  </ItemDefinitionGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+  <ImportGroup Label="ExtensionTargets" />
+</Project>

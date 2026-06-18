@@ -212,6 +212,7 @@ auto FecAlgorithm::_coro_main_down(fec& fec) -> awaitable<void>
 		auto errCode = GtpCheckPacketInvalid(pkt->buffer.data.data() + pkt->buffer.pos, pkt->buffer.len, &streamKey2);
 		if (errCode == GTP_OK) {
 			_info.try_emplace(streamKey2, pkt->info);
+			_streamKeys[pkt->info->nid].try_insert(streamKey2);
 
 			fec.recv_fec_pdu(streamKey2,
 				pkt->down_transer_local, pkt->node,
