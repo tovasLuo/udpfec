@@ -16,7 +16,7 @@
 
 *********************************************************************************************************************/
 #include "goodtp_macrodefine.h"
-#include "bitlinker.h"
+#include "goodtp.h"
 #include "tranmempool.h"
 
 #if (__linux__ || __APPLE__)
@@ -365,6 +365,7 @@ typedef struct _GtpSessionKey {
 
         key_         |= ip_value;
         key_3rd_flag_ = GTP_NO;
+        bit_rsv_       = 0;
 
         return;
     }
@@ -382,6 +383,7 @@ typedef struct _GtpSessionKey {
         }
 
         key_3rd_flag_ = GTP_YES;
+        bit_rsv_       = 0;
 
         return;
     }
@@ -392,6 +394,7 @@ typedef struct _GtpSessionKey {
         memset(self_bin_ip_, 0x00, IPV6_BIN_IP_SIZE);
 
         key_3rd_flag_ = GTP_YES;
+        bit_rsv_       = 0;
 
         return;
     }
@@ -402,6 +405,7 @@ typedef struct _GtpSessionKey {
         self_ip_size_(old_obj.self_ip_size_), self_bin_port_(old_obj.self_bin_port_) {
         memcpy(peer_bin_ip_, old_obj.peer_bin_ip_, IPV6_BIN_IP_SIZE);
         memcpy(self_bin_ip_, old_obj.self_bin_ip_, IPV6_BIN_IP_SIZE);
+        bit_rsv_ = old_obj.bit_rsv_;
     }
 
     const _GtpSessionKey& operator =(const _GtpSessionKey &r_obj) {
@@ -412,6 +416,7 @@ typedef struct _GtpSessionKey {
         self_bin_port_ = r_obj.self_bin_port_;
         self_ip_size_  = r_obj.self_ip_size_;
         key_3rd_flag_  = r_obj.key_3rd_flag_;
+        bit_rsv_       = r_obj.bit_rsv_;
 
         memcpy(peer_bin_ip_, r_obj.peer_bin_ip_, IPV6_BIN_IP_SIZE);
         memcpy(self_bin_ip_, r_obj.self_bin_ip_, IPV6_BIN_IP_SIZE);
@@ -579,6 +584,7 @@ typedef struct _Fec2EnDeCodeMatrix {
         matrix_size_   = 0;
         start_pos_     = 0;
         start_pack_sn_ = 0;
+        memset(rsv_byte_, 0x00, sizeof(rsv_byte_));
 
         u64 *clear_pos = (u64*)(&start_pos_);
         *clear_pos = 0;
@@ -615,6 +621,7 @@ typedef struct _Fec2EnDeCodeMatrix {
         matrix_size_   = code_book[code_book_id].block_size_;
         start_pos_     = 0;
         start_pack_sn_ = 0;
+        memset(rsv_byte_, 0x00, sizeof(rsv_byte_));
 
         u64 *clear_pos = (u64*)(&start_pos_);
         *clear_pos = 0;
@@ -845,7 +852,7 @@ typedef struct _LinkerStat {
         data_bitrate_sum_(0), data_bitrate_bkup_(0), net_bitrate_sum_(0), net_bitrate_bkup_(0),
         data_pack_sum_(0), data_pack_bkup_(0), net_pack_sum_(0), net_pack_bkup_(0),
         data_bitrate_bps_(0), net_bitrate_bps_(0), data_pack_pps_(0), net_pack_pps_(0),
-        first_frame_sum_(0), ack_sum_(0), retran_frame_sum_(0), last_calc_ts_us_((u32)create_ts_us) {
+        first_frame_sum_(0), ack_sum_(0), nack_sum_(0), retran_frame_sum_(0), last_calc_ts_us_((u32)create_ts_us) {
     }
 
     _LinkerStat(const _LinkerStat &a) :
@@ -864,6 +871,7 @@ typedef struct _LinkerStat {
         first_frame_sum_(a.first_frame_sum_),
         retran_frame_sum_(a.retran_frame_sum_),
         ack_sum_(a.ack_sum_),
+        nack_sum_(a.nack_sum_),
         last_calc_ts_us_(a.last_calc_ts_us_) {
     }
 
@@ -883,6 +891,7 @@ typedef struct _LinkerStat {
         first_frame_sum_   = a.first_frame_sum_;
         retran_frame_sum_  = a.retran_frame_sum_;
         ack_sum_           = a.ack_sum_;
+        nack_sum_          = a.nack_sum_;
         last_calc_ts_us_   = a.last_calc_ts_us_;
 
         return *this;
@@ -960,6 +969,7 @@ typedef struct _LinkerStat {
     u32 retran_frame_sum_;
 
     u32 ack_sum_;
+    u32 nack_sum_;
     u32 last_calc_ts_us_;
 }LinkerStat;
 
@@ -1039,6 +1049,8 @@ typedef struct _SessionPublicData {
         memset(self_ip_, 0x00, GTP_MAX_STR_IP_SZ);
         memset(peer_ip_, 0x00, GTP_MAX_STR_IP_SZ);
         memset(&tran_addr_, 0x00, sizeof(tran_addr_));
+        bit_rsv_ = 0;
+        memset(byte_rsv_, 0x00, sizeof(byte_rsv_));
         return;
     }
 
@@ -1066,6 +1078,8 @@ typedef struct _SessionPublicData {
         memcpy(peer_ip_, a.peer_ip_, GTP_MAX_STR_IP_SZ);
 
         memcpy(&tran_addr_, &(a.tran_addr_), sizeof(tran_addr_));
+        bit_rsv_ = a.bit_rsv_;
+        memcpy(byte_rsv_, a.byte_rsv_, sizeof(byte_rsv_));
 
         return;
     }
@@ -1085,10 +1099,16 @@ typedef struct _SessionPublicData {
         this->peer_version_        = a.peer_version_;
         this->session_             = a.session_;
         this->max_send_loss_per_s_ = a.max_send_loss_per_s_;
-        this->bakeup_send_loss_  = a.bakeup_send_loss_;
+        this->bakeup_send_loss_    = a.bakeup_send_loss_;
+        this->bit_rsv_             = a.bit_rsv_;
+        this->send_consume_        = a.send_consume_;
+        this->recv_consume_        = a.recv_consume_;
+        this->app_send_consume_    = a.app_send_consume_;
+        this->app_recv_consume_    = a.app_recv_consume_;
 
         memcpy(self_ip_, a.self_ip_, GTP_MAX_STR_IP_SZ);
         memcpy(peer_ip_, a.peer_ip_, GTP_MAX_STR_IP_SZ);
+        memcpy(byte_rsv_, a.byte_rsv_, sizeof(byte_rsv_));
 
         memcpy(&tran_addr_, &(a.tran_addr_), sizeof(tran_addr_));
 
@@ -1210,6 +1230,108 @@ typedef struct _SessionPublicData {
 
 #pragma pack()
 
+inline u64 GtpMakeStreamKey(const u32 &hash, const u32 &user_id) {
+    return ((((u64)user_id) << 32) | ((u64)hash));
+}
+
+inline void GtpSplitStreamKey(const u64 &stream_key, u32 *hash, u32 *user_id) {
+    if (NULL != hash) {
+        *hash = (u32)(stream_key & 0x00000000FFFFFFFFULL);
+    }
+
+    if (NULL != user_id) {
+        *user_id = (u32)((stream_key >> 32) & 0x00000000FFFFFFFFULL);
+    }
+}
+
+inline u64 GtpReadPacketStreamKey(const GtpPacket *pack) {
+    if ((NULL == pack) || (GTP_YES != pack->has_check_flag_)) {
+        return 0;
+    }
+
+    u8 *move = ((u8*)pack) + sizeof(GtpPacket);
+    if (0 != ((u8)(pack->repeat_counter_))) {
+        move += sizeof(u32);
+    }
+
+    const u32 hash = *((u32*)move);
+    move += sizeof(u32);
+
+    const u32 user_id = *((u32*)move);
+    return GtpMakeStreamKey(hash, user_id);
+}
+
+inline u32 GtpInsertStreamKeyHeader(GtpPacket *pack, const u64 &stream_key) {
+    if ((NULL == pack) || (0 == stream_key)) {
+        return 0;
+    }
+
+    const u32 key_size = sizeof(u64);
+    const u32 old_header_offset = pack->header_offset_;
+    const u32 old_pack_size = pack->pack_size_;
+
+    memmove(((u8*)pack) + old_header_offset + key_size, ((u8*)pack) + old_header_offset,
+            old_pack_size - old_header_offset);
+
+    u32 hash = 0;
+    u32 user_id = 0;
+    GtpSplitStreamKey(stream_key, &hash, &user_id);
+
+    u8 *move = ((u8*)pack) + sizeof(GtpPacket);
+    *((u32*)move) = hash;
+    move += sizeof(u32);
+    *((u32*)move) = user_id;
+
+    pack->has_check_flag_ = GTP_YES;
+    pack->header_offset_  = (u8)(old_header_offset + key_size);
+    pack->pack_size_      = (u16)(old_pack_size + key_size);
+
+    return key_size;
+}
+
+inline u32 GtpWriteStreamKeyHeader(GtpPacket *pack, const u64 &stream_key) {
+    if ((NULL == pack) || (0 == stream_key)) {
+        return 0;
+    }
+
+    u32 hash = 0;
+    u32 user_id = 0;
+    GtpSplitStreamKey(stream_key, &hash, &user_id);
+
+    u8 *move = ((u8*)pack) + sizeof(GtpPacket);
+    *((u32*)move) = hash;
+    move += sizeof(u32);
+    *((u32*)move) = user_id;
+
+    pack->has_check_flag_ = GTP_YES;
+    pack->header_offset_  = (u8)(sizeof(GtpPacket) + sizeof(u64));
+
+    return sizeof(u64);
+}
+
+inline u32 GtpRemoveStreamKeyHeader(GtpPacket *pack) {
+    if ((NULL == pack) || (GTP_YES != pack->has_check_flag_) || (sizeof(GtpPacket) > pack->header_offset_)) {
+        return 0;
+    }
+
+    const u32 key_size = sizeof(u64);
+    const u32 old_header_offset = pack->header_offset_;
+    const u32 old_pack_size = pack->pack_size_;
+
+    if ((sizeof(GtpPacket) + key_size) > old_header_offset) {
+        return 0;
+    }
+
+    memmove(((u8*)pack) + old_header_offset - key_size, ((u8*)pack) + old_header_offset,
+            old_pack_size - old_header_offset);
+
+    pack->has_check_flag_ = GTP_NO;
+    pack->header_offset_  = (u8)(old_header_offset - key_size);
+    pack->pack_size_      = (u16)(old_pack_size - key_size);
+
+    return key_size;
+}
+
 #define GtpHeaderOldToNew(pack) {\
     if (0x00 == (*((u8*)(pack)))) {\
         u32 tmp_org_value = *((u32*)(pack));\
@@ -1265,4 +1387,3 @@ extern "C" {
 #endif
 
 #endif
-

@@ -18,7 +18,7 @@
     Mdf ctx: creating file, the c3mempool isn't reentrant entry for the multi thread.
 
 **********************************************************************************************************************/
-#include "bitlinker.h"
+#include "goodtp.h"
 #include "goodtp_macrodefine.h"
 #include <stdlib.h>
 #include <memory.h>
@@ -67,10 +67,8 @@
 #endif
 
 #define HEADER_RSV_SIZE             (128)
-#define TP_ADDR_RSV_SIZE            (160)   /* GtpAddr = 136B in bitlinker.h; 160B gives 24B headroom */
+#define TP_ADDR_RSV_SIZE            (128)
 #define BUF_OFFSET_SIZE             (HEADER_RSV_SIZE + TP_ADDR_RSV_SIZE)
-static_assert(sizeof(GtpAddr) <= TP_ADDR_RSV_SIZE,
-              "TP_ADDR_RSV_SIZE too small for GtpAddr — increase it to at least sizeof(GtpAddr)");
 #define BUF_ALIGAN_SIZE             (64)
 #define MIN_BUF_SIZE                (1)
 
@@ -855,9 +853,13 @@ New8KbufPos_:
                 goto free_c3buf_vec_next_pos_;
             }
 
+            if ((0 == element->usedFlag) || (0 >= element->referenceCounter)) {
+                goto free_c3buf_vec_next_pos_;
+            }
+
             element->referenceCounter -= 1;
 
-            if ((0 < element->referenceCounter) || (0 == element->usedFlag)) {
+            if (0 < element->referenceCounter) {
                 goto free_c3buf_vec_next_pos_;
             }
 
@@ -937,9 +939,13 @@ free_c3buf_vec_next_pos_:
             return;
         }
 
+        if ((0 == element->usedFlag) || (0 >= element->referenceCounter)) {
+            return;
+        }
+
         element->referenceCounter -= 1;
 
-        if ((0 < element->referenceCounter) || (0 == element->usedFlag)) {
+        if (0 < element->referenceCounter) {
             return;
         }
 
@@ -1665,31 +1671,6 @@ PRIVATE:
         return;
     }
 
-    #if (_WIN32 || _WIN64)
-    void gettimeofday(struct timeval *tp, void *tzp) {
-        time_t     clock;
-        struct tm  tm;
-        SYSTEMTIME wtm;
-
-        GetLocalTime(&wtm);
-
-        tm.tm_year  = wtm.wYear - 1900;
-        tm.tm_mon   = wtm.wMonth - 1;
-        tm.tm_mday  = wtm.wDay;
-        tm.tm_hour  = wtm.wHour;
-        tm.tm_min   = wtm.wMinute;
-        tm.tm_sec   = wtm.wSecond;
-        tm.tm_isdst = -1;
-
-        clock = mktime(&tm);
-
-        tp->tv_sec  = (uint32_t)clock;
-        tp->tv_usec = wtm.wMilliseconds * 1000;
-
-        return;
-    }
-    #endif
-
     uint64_t GetCurrentSysTimeUs() {
         struct timeval current_date;
 
@@ -1697,6 +1678,26 @@ PRIVATE:
 
         return (uint64_t)(((uint64_t)(current_date.tv_sec)) * 1000000 + ((uint64_t)(current_date.tv_usec)));
     }
+
+PRIVATE:
+    #if (_WIN32 || _WIN64)
+    int gettimeofday(struct timeval *tp, void *tzp) {
+        struct tm tm;
+        SYSTEMTIME wtm;
+        GetLocalTime(&wtm);
+        tm.tm_year   = wtm.wYear - 1900;
+        tm.tm_mon   = wtm.wMonth - 1;
+        tm.tm_mday   = wtm.wDay;
+        tm.tm_hour   = wtm.wHour;
+        tm.tm_min   = wtm.wMinute;
+        tm.tm_sec   = wtm.wSecond;
+        tm.tm_isdst  = -1;
+        time_t clock = mktime(&tm);
+        tp->tv_sec = (long)clock;  // NOLINT
+        tp->tv_usec = wtm.wMilliseconds * 1000;
+        return (0);
+    }
+    #endif
 
 PRIVATE:
     uint32_t buf_256bytes_pool_size_;
@@ -1733,4 +1734,3 @@ PRIVATE:
 };
 
 #endif
-

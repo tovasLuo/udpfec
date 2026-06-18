@@ -21,10 +21,13 @@
 #include "goodtp_mem_pool.h"
 #include "goodtp_comstruct.h"
 #include "goodtp_macrodefine.h"
-#include "bitlinker.h"
+#include "goodtp.h"
 #include "slidwin.h"
 
 #include "tranmempool.h"
+
+#include <map>
+#include <vector>
 
 #ifdef __cplusplus
 extern "C" {
@@ -51,11 +54,8 @@ class GtpSession {
     u32 Init(const u64 &ts_us, u8 *win_cache, const u32 &pack_sn = 0, const u32 &sort_sn = 0);
 
     static void* operator new(size_t n, void *psp_mem);
+    static void operator delete(void *psp_mem, void *placement_mem);
     static void operator delete(void *psp_mem);
-    /* matching placement-delete: invoked by the compiler only if the constructor
-     * throws after operator new(size_t, void*) already pulled an item from the
-     * pool, so that item gets returned instead of leaking. */
-    static void operator delete(void *psp_mem, void *psp_mem_for_new);
 
     static u32 PackRetransmit(void *session, ArqNode *arq_node, GtpAddr *tran_addr, const u64 &cur_ts_us);
 
@@ -82,6 +82,9 @@ class GtpSession {
     u32 PackPrepHandler(GtpPacket *pack, const u32 &size, u8 **out_frame, u32 *out_frame_size);
     u32 PackPostHandler(GtpPacket *pack, const u32 &size, GtpAddr *tran_addr,
                         const u32 &edge_pack_flag = GTP_YES);
+    u32 DeliverFrameInOrder(GtpHandler_p gtp_hdl, const u32 &first_sn, const u8 *frame, const u32 &frame_size,
+                            GtpAddr *tran_addr);
+    u32 FlushRealtimeReorder(const u64 &ts_us, GtpHandler_p gtp_hdl);
 
     void TimerHandler(const u64 &ts_us, ConsumeTime *wheel_consume = NULL);
     void SetSessionStableTimeSize(const u64 &session_ttl_us);
@@ -102,6 +105,11 @@ class GtpSession {
     }
 
     inline u8 GetStreamQos(const GtpNetQualityPosEnU32 &pos = kReceiverQuality) {
+        const char *force_fec_off = getenv("GOODTP_FORCE_FEC_OFF");
+        if ((NULL != force_fec_off) && ('\0' != force_fec_off[0]) && ('0' != force_fec_off[0])) {
+            return TURN_OFF_FEC;
+        }
+
         #if (1 == AUTO_FEC_MACRO)
         if (kReceiverQuality == pos) {
             return STREAM_QOS_WITH_FEC;
@@ -111,6 +119,13 @@ class GtpSession {
             return STREAM_QOS_WITH_FEC;
         }
 
+        #if (2 == APPLICATION_TYPE)
+        if (TURN_OFF_FEC == CalcGameFecQos()) {
+            return TURN_OFF_FEC;
+        }
+        return STREAM_QOS_WITH_FEC;
+        #endif
+
         #if ((0 == APPLICATION_TYPE) || (1 == APPLICATION_TYPE))
         if (500 > pb_dt_.send_stat_.data_pack_pps_) {
             return STREAM_QOS_WITH_FEC;  // SD vedio.
@@ -119,6 +134,9 @@ class GtpSession {
 
         #if (2 == APPLICATION_TYPE)
         if (50 > pb_dt_.send_stat_.data_pack_pps_) {
+            if (((u8)(NetQuality::kNetQualityGood)) == net_quality_) {
+                return TURN_OFF_FEC;
+            }
             return STREAM_QOS_WITH_FEC;  // phone game.
         }
         #endif
@@ -126,6 +144,7 @@ class GtpSession {
         if (((u8)(NetQuality::kNetQualityGood)) == net_quality_) {
             return TURN_OFF_FEC;
         }
+
         #endif
 
         return STREAM_QOS_WITH_FEC;
@@ -135,28 +154,35 @@ class GtpSession {
 
     void CalcMaxFramePeriod(const u64 &now_ts);
     u32 CalcLossStd(const u32 &loss, u32 *out_avg_loss);
+    u8  CalcGameFecPolicy(void) const;
+    u8  CalcGameFecBookId(void) const;
+    u8  CalcGameFecUpshiftBookId(const u8 &book_id) const;
+    u8  CalcGameFecQos(void) const;
 
     void UpdateSelfIp(const goodtp_sock &sfd);
     void UpdateSelfIp(u8 sock_addr[], const u32 &sock_addr_len);
     void UpdatePeerIp(u8 sock_addr[], const u32 &sock_addr_len);
-
-    // first_sn_hint: for ARQ retransmits, the logical SN (original pack_sn_). When sn would
-    // trigger a large-gap flush (delta >= REORDER_BUF_SIZE), use first_sn_hint instead so the
-    // retransmit lands at its correct logical position without flushing buffered good data.
-    // Pass UINT32_MAX (default) to disable the fallback.
-    void ReorderEnqueue(u32 sn, u8 *frame, u32 frame_size, const GtpAddr *tran_addr, u64 ts_us,
-                        u32 first_sn_hint = UINT32_MAX);
 
 PRIVATE:
     void SendSetRecvRttPacket(void);
     void SendRttTestResPacket(const u64 &ts_us);
     void ResetSession(const u32 &cur_sn, const u32 &sort_sn, const u32 &chg_status_flag);
     void RttHandler(const u32 &rtt_us);
-    void ReorderFlush(u64 ts_us);
-    void ReorderClear();
     u32  CalcHeaderSize(const u32 &hash, const u32 &user_id, const u32 &resend_num);
     u32  CalcHeaderSizeVersion01(const u32 &hash, const u32 &user_id, const u32 &resend_num);
     u32  PrintHarqParam(u8 *out_str, const u32 &mem_size);
+    u32  DeliverFrameNow(GtpHandler_p gtp_hdl, const u8 *frame, const u32 &frame_size, GtpAddr *tran_addr);
+    u32  CalcRealtimeReorderWaitUs() const;
+    u32  CalcRealtimeReorderMaxCacheNum() const;
+    void UpdateRealtimeReorderInterval(const u32 &first_sn, const u64 &ts_us);
+    bool RealtimeSnBefore(const u32 &left, const u32 &right) const;
+    u32  RealtimeSnDistance(const u32 &from, const u32 &to) const;
+
+    struct RealtimeReorderFrame {
+        std::vector<u8> frame_;
+        GtpAddr tran_addr_;
+        u64 arrival_ts_us_;
+    };
 
  public:
     const GtpCallBackParam &cb_;
@@ -217,31 +243,11 @@ PRIVATE:
     u32 max_frm_prd_updt_flg_:1;
     u32 net_quality_:2;
     u32 rpt_snd_qualit_:1;     // GTP_NO: hasn't reported sending quality, GTP_YES: has reported sending quality.
-    u32 session_health_:2;       // SessionHealthState max=2, 2 bits sufficient
-    u32 net_bad_pending_cnt_:2;  // reorder hysteresis: consecutive loss callbacks before flipping to bad
-    u32 nack_burst_detected_:1;  // set when nack_num>=3; bypasses NACK rate-limit for 1 extra tick
-    u32 new_gap_detected_:2;    // countdown 2→1→0: fire NACK each tick while >0 (2-shot for loss protection)
+    u32 session_health_:3;
+    u32 bit_rsv_:4;
     u32 cur_cache_loss_idx_:8;
 
     u32 test_rtt_period_us_;
-    u32 recv_max_data_sn_;   // max data SN seen on receive side; 0=uninitialized
-
-    // ---------- receive-side reorder buffer ----------
-    static const u32 REORDER_BUF_SIZE = 16;
-
-    struct ReorderSlot {
-        u8*     frame;          // NULL = empty; non-NULL = data copy in pack_mem_pool_
-        u8      placeholder_;   // 1 = non-data SN (FEC/ACK/RTT) placeholder; skip delivery on flush
-        u32     frame_size;
-        u64     arrive_ts_us;
-        GtpAddr tran_addr;
-    };
-
-    ReorderSlot reorder_buf_[REORDER_BUF_SIZE];
-    u32  reorder_next_sn_;      // next SN to deliver in order
-    u8   reorder_inited_;       // 0 until first data packet
-    u64  reorder_gap_since_us_; // when current gap timer started (0 = no active gap)
-    // -------------------------------------------------
 
     u32 loss_sum_;
     u32 self_session_ttl_us_;
@@ -251,6 +257,17 @@ PRIVATE:
     TranMemPool &pack_mem_pool_;
 
     u32 pack_sn_;
+
+    std::map<u32, RealtimeReorderFrame> realtime_reorder_cache_;
+    u64 realtime_reorder_last_arrival_ts_us_;
+    u32 realtime_reorder_next_sn_;
+    u32 realtime_reorder_last_arrival_sn_;
+    u32 realtime_reorder_avg_interval_us_;
+    u32 realtime_reorder_buffered_num_;
+    u32 realtime_reorder_late_drop_num_;
+    u32 realtime_reorder_timeout_skip_num_;
+    u32 realtime_reorder_direct_num_;
+    u8  realtime_reorder_inited_;
 
 PRIVATE:
     u32 rtt_us_;

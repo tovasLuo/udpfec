@@ -70,7 +70,7 @@ float EWMA::Formula(uint16_t temp_tail) {
 
 float EWMA::NewFactor(const SendingFrequence &sf) {
     // 1. clear the timeout sf
-    ClearTimeoutSendingFreq();
+    // ClearTimeoutSendingFreq();
     // 2. write the new sf to the array.
     NewSendingFreq(sf);
     // 3. calculate the factor
@@ -127,15 +127,17 @@ float FactorCalculation::Factor1(const float &loss_rate, const u64 &ts_us) {
             break;
     }
 
-    // Smooth factorA_ via EWMA to avoid jarring jumps in Factor1
-    // when individual loss samples fluctuate (beta=0.82, window≈6 samples).
-    SendingFrequence new_sf = {};
-    new_sf.timestamp_us = ts_us;
-    new_sf.factorA      = factorA_;
-    float new_factor_ewma = ewma_.NewFactor(new_sf);
+    // float            new_factor_ewma = 0;
+    // SendingFrequence new_sf          = {};
+
+    // // last step : smooth the factor.
+    // new_sf.timestamp_us = ts_us;
+    // new_sf.factorA      = factorA_;
+    // new_factor_ewma     = ewma_.NewFactor(new_sf);
 
     feedback_link_loss_ = loss_rate;
-    return 1.0f / new_factor_ewma;
+    // return 1 / new_factor_ewma;
+    return 1 / factorA_;
 }
 
 void FactorCalculation::SetCfg1(const FactorCfg1 &cfg) {
@@ -147,20 +149,28 @@ void FactorCalculation::SetCfg1(const FactorCfg1 &cfg) {
 void FactorCalculation::SetCfg2(const FactorCfg2 &cfg) {}
 
 SendingFrequenceAdjustType FactorCalculation::AdjustType(const float &loss_rate) {
-    // MIMD: Multiplicative Increase when no loss, Additive Decrease when loss present/rising.
-    // factorA_ ∈ [MIN=1, MAX=10]; Factor1 = 1/factorA_ ∈ [0.1, 1.0].
-    // Larger factorA_ → smaller Factor1 → less intervention (good network).
-    // Smaller factorA_ → larger Factor1 → more aggressive loss response.
+    // compare loss rate
+    if (loss_rate == 0) return SendingFrequenceAdjustType::kAdditiveDecrease;
+    // loss_rate > 0 || loss_rate <= 100
 
-    if (loss_rate == 0) {
-        return SendingFrequenceAdjustType::kMultiplicativeIncrease;  // no loss: grow factorA_ fast
+    if (feedback_link_loss_ == 0) {
+        // full speed for sending packets while packet-loss occurs at the moment.
+        return SendingFrequenceAdjustType::kFullSpeed;
     }
+
+    // feedback_link_loss_ > 0
 
     float difference = loss_rate - feedback_link_loss_;
+    // the situation of packet-loss can be divided into two scenarios: a continued rise or a beginning decline
 
-    if (difference >= 0) {
-        return SendingFrequenceAdjustType::kAdditiveDecrease;  // loss stable or rising: shrink factorA_
+    if (difference >= 0) {  // stable or rising.
+        // if (difference >= DEFAULT_THRESHOLD_VALUE) {
+        //     return SendingFrequenceAdjustType::kAdditiveDecrease;
+        // }
+        // return SendingFrequenceAdjustType::kMultiplicativeIncrease;
+        return SendingFrequenceAdjustType::kFullSpeed;
     }
 
-    return SendingFrequenceAdjustType::kKeep;  // loss falling: hold current rate
+    // start to decline.
+    return SendingFrequenceAdjustType::kKeep;
 }

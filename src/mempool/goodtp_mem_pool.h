@@ -17,7 +17,7 @@
 *********************************************************************************************************************/
 #include "goodtp_comstruct.h"
 #include "goodtp_macrodefine.h"
-#include "bitlinker.h"
+#include "goodtp.h"
 
 #include <cstddef>
 

@@ -19,7 +19,7 @@
 #include "goodtp_session.h"
 #include "goodtp_comstruct.h"
 #include "goodtp_macrodefine.h"
-#include "bitlinker.h"
+#include "goodtp.h"
 #include "slidwin.h"
 
 #include <stdlib.h>
@@ -61,24 +61,35 @@ extern "C" {
 
 i32 g_goodtp_handler_base    = 1;
 
-/* Positional aggregate init (not designated init) so this compiles under C++11/14/17;
- * MSVC only allows designated initializers with /std:c++20. Field order must track
- * the _GtpInstMgr declaration in goodtp_mgr.h: spin_ [, udp_log_sfd_], error_info_,
- * inst_num_, sys_id_, runing_flag_ — remaining trailing members are zero-initialized. */
+static GtpInstMgr InitGtpInstMgr() {
+    GtpInstMgr mgr;
+    memset(&mgr, 0x00, sizeof(mgr));
+
+    mgr.inst_num_ = 1;
+    mgr.sys_id_ = 1;
+    mgr.runing_flag_ = 1;
+
+#if ((_WIN32 || _WIN64) && (1 == ENABLE_UDP_LOG))
+    mgr.udp_log_sfd_ = -1;
+#endif
+
+    return mgr;
+}
+
 #ifdef __linux__
-GtpInstMgr g_goodtp_inst_mgr = {NULL, NULL, 1, 1, 1};
+GtpInstMgr g_goodtp_inst_mgr = InitGtpInstMgr();
 #endif
 
 #ifdef __APPLE__
-GtpInstMgr g_goodtp_inst_mgr = {NULL, NULL, 1, 1, 1};
+GtpInstMgr g_goodtp_inst_mgr = InitGtpInstMgr();
 #endif
 
 #if (_WIN32 || _WIN64)
 #if (1 == ENABLE_UDP_LOG)
-GtpInstMgr g_goodtp_inst_mgr = {NULL, -1, NULL, 1, 1, 1};
+GtpInstMgr g_goodtp_inst_mgr = InitGtpInstMgr();
 
 #else
-GtpInstMgr g_goodtp_inst_mgr = {NULL, NULL, 1, 1, 1};
+GtpInstMgr g_goodtp_inst_mgr = InitGtpInstMgr();
 #endif
 #endif
 
@@ -377,6 +388,8 @@ GtpHandler_p CreateGtpInstance(u32 system_id, uint32_t session_ttl_us, GtpCallBa
     i32 pos  = 0;
 
     GoodTp *goodtp_obj = NULL;
+    MemPoolConfig default_mem_pool_cfg = {0};
+    MemPoolConfig local_mem_pool_cfg = (NULL == mem_pool_cfg) ? default_mem_pool_cfg : *mem_pool_cfg;
 
     GtpMemGuard guard(g_goodtp_inst_mgr.spin_);
 
@@ -430,7 +443,7 @@ GtpHandler_p CreateGtpInstance(u32 system_id, uint32_t session_ttl_us, GtpCallBa
 
         if (NULL != err_info_mem) {
             snprintf((char*)(err_info_mem->error_info_), sizeof(err_info_mem->error_info_),
-                     "the goodtp instance has been upper limit(%u)", MAX_GTP_INST_NUM);
+                     "the goodtp instance has been upper limit(%u)", (u32)MAX_GTP_INST_NUM);
         }
 
         goto create_gtp_instance_exit_pos_;
@@ -456,13 +469,13 @@ GtpHandler_p CreateGtpInstance(u32 system_id, uint32_t session_ttl_us, GtpCallBa
 
     #if (1 == ENABLE_FEC)
     #if (_WIN32 || _WIN64 || _SELFANDROID || __APPLE__)
-    mem_pool_cfg->m_1_5k_num_ += 2048;
+    local_mem_pool_cfg.m_1_5k_num_ += 2048;
     #else
-    mem_pool_cfg->m_1_5k_num_ += (1024 << 6);
+    local_mem_pool_cfg.m_1_5k_num_ += (1024 << 6);
     #endif
     #endif
 
-    goodtp_obj = new GoodTp(pos, session_ttl_us, *reg_cb, *mem_pool_cfg);
+    goodtp_obj = new GoodTp(pos, session_ttl_us, *reg_cb, local_mem_pool_cfg);
     if (NULL == goodtp_obj) {
         goodtp_tid tid = GtpGetThreadId();
         ErrorInfoMgr *err_info_mem = GtpGetSelfErrorCache(g_goodtp_inst_mgr.error_info_, 0, MAX_GTP_INST_NUM - 1,
@@ -509,14 +522,6 @@ create_gtp_instance_exit_pos_:
     #if (1 == ENABLE_TRACE_CODE_FLAG)
     GtpLog(goodtp_obj->cb_.write_log_cb_, kGtpSessionMd, kGtpLogLevelWarning, "Created No.%u goodtp instance.\r\n",
            pos);
-    #endif
-
-    #if (1 == ENABLE_FEC)
-    #if (_WIN32 || _WIN64 || _SELFANDROID || __APPLE__)
-    mem_pool_cfg->m_1_5k_num_ -= 2048;
-    #else
-    mem_pool_cfg->m_1_5k_num_ -= (1024 << 6);
-    #endif
     #endif
 
     #if (_WIN32 || _WIN64)
@@ -928,6 +933,7 @@ void GtpSysDateTime(GtpDateTime *date_time) {
     {
     time_t tms;
     struct tm stdate;
+    memset(&stdate, 0x00, sizeof(stdate));
 
     time(&tms);
 
@@ -967,6 +973,67 @@ void GtpSysDateTime(GtpDateTime *date_time) {
 
 u32 GtpGetSysId(void) {
     return g_goodtp_inst_mgr.sys_id_;
+}
+
+u32 GtpSockAddrInputIsValid(const u8 *sock_addr, const u32 &sock_addr_len, const u32 &allow_zero_len,
+                            const u32 &len_err_code) {
+    if ((GTP_YES == allow_zero_len) && (0 == sock_addr_len)) {
+        return GTP_OK;
+    }
+
+    if ((NULL == sock_addr) || (sizeof(struct sockaddr) > sock_addr_len)
+     || (GTP_SOCK_ADDR_SZ < sock_addr_len)) {
+        RETURN_ERR(kGtpMgrMd, len_err_code);
+    }
+
+    const struct sockaddr *saddr = (const struct sockaddr*)sock_addr;
+    if (AF_INET == saddr->sa_family) {
+        if (sizeof(struct sockaddr_in) > sock_addr_len) {
+            RETURN_ERR(kGtpMgrMd, len_err_code);
+        }
+
+        return GTP_OK;
+    }
+
+    if (AF_INET6 == saddr->sa_family) {
+        if (sizeof(struct sockaddr_in6) > sock_addr_len) {
+            RETURN_ERR(kGtpMgrMd, len_err_code);
+        }
+
+        return GTP_OK;
+    }
+
+    RETURN_ERR(kGtpMgrMd, len_err_code);
+}
+
+u32 GtpTranAddrSockInputIsValid(const GtpAddr *tran_addr) {
+    if (NULL == tran_addr) {
+        RETURN_ERR(kGtpMgrMd, kGtpTranAddrNullErr);
+    }
+
+    u32 nret = GtpSockAddrInputIsValid(&(tran_addr->sock_addr_[0]), tran_addr->sock_addr_len_, GTP_NO,
+                                       kGtpTranAddrDstLenErr);
+    if (GTP_OK != nret) {
+        return nret;
+    }
+
+    return GtpSockAddrInputIsValid(&(tran_addr->self_addr_[0]), tran_addr->self_addr_len_, GTP_YES,
+                                   kGtpTranAddrSrcLenErr);
+}
+
+u32 GtpLinkerKeySockInputIsValid(const GtpLinkerKey *linker_key) {
+    if (NULL == linker_key) {
+        RETURN_ERR(kGtpMgrMd, kInvalidInPutParam);
+    }
+
+    u32 nret = GtpSockAddrInputIsValid(&(linker_key->peer_socket_addr_[0]), linker_key->peer_socket_addr_len_,
+                                       GTP_NO, kGtpTranAddrDstLenErr);
+    if (GTP_OK != nret) {
+        return nret;
+    }
+
+    return GtpSockAddrInputIsValid(&(linker_key->self_socket_addr_[0]), linker_key->self_socket_addr_len_,
+                                   GTP_YES, kGtpTranAddrSrcLenErr);
 }
 
 u32 GtpSockAddrToStrAddr(void *sock_addr, u8 *out_ip, const u32 &mem_size, u16 *out_port) {
@@ -1235,9 +1302,11 @@ GoodTp::GoodTp(const i32 &pos, const u32 &session_ttl_us, const GtpCallBackParam
     m_3rd_malloc_num_(0),
     m_3rd_free_num_(0),
     session_ttl_us_((u64)((MIN_SESSION_TTL_US > session_ttl_us) ? MIN_SESSION_TTL_US : session_ttl_us)),
-    arq_node_mem_pool_(sizeof(ArqNode), MAX_ARQ_NODE_NUM),
+    arq_node_mem_pool_(sizeof(ArqNode), (0 == mem_pool_cfg.arq_node_num_) ? MAX_ARQ_NODE_NUM
+                                                                          : mem_pool_cfg.arq_node_num_),
     session_mem_pool_((sizeof(GtpSession) + sizeof(void*) + ((SlidwinInstanceSize() << 1) + SlidwinInstanceSize())),
-                      MAX_SESSION_NUM),
+                      (0 == mem_pool_cfg.session_num_) ? MAX_SESSION_NUM : mem_pool_cfg.session_num_),
+    session_pool_num_((0 == mem_pool_cfg.session_num_) ? MAX_SESSION_NUM : mem_pool_cfg.session_num_),
     wheel_consume_("gtp_wheel"),
     packet_mem_pool_(mem_pool_cfg.m_256bytes_num_, mem_pool_cfg.m_512bytes_num_, mem_pool_cfg.m_1k_num_,
                      mem_pool_cfg.m_1_5k_num_, mem_pool_cfg.m_4k_num_, mem_pool_cfg.m_8k_num_,
@@ -1253,7 +1322,7 @@ GoodTp::GoodTp(const i32 &pos, const u32 &session_ttl_us, const GtpCallBackParam
     last_wheel_running_ts_us_ = GtpSysTimestampUs();
     second_ts_us_             = last_wheel_running_ts_us_;
 
-    session_map_.reserve(MAX_SESSION_NUM);
+    session_map_.reserve(session_pool_num_);
 
     fec_mode_book_[0].mode_       = (u8)(Fec2Mode::kBlock);
     fec_mode_book_[0].h_flag_     = 1;
@@ -1319,6 +1388,14 @@ GoodTp::GoodTp(const i32 &pos, const u32 &session_ttl_us, const GtpCallBackParam
 GoodTp::~GoodTp() {
     unordered_map<GtpSessionKey, GtpSession*, GtpSessionKeyHash>::iterator itr = session_map_.begin();
     while (session_map_.end() != itr) {
+        #if (1 == ENABLE_ARQ)
+        itr->second->arq_.PopAllPack(current_ts_us_);
+        #endif
+
+        #if (1 == ENABLE_FEC)
+        itr->second->fec2_obj_.PopAllPack(current_ts_us_);
+        #endif
+
         delete (itr->second);
         itr = session_map_.erase(itr);
     }
@@ -1393,17 +1470,6 @@ GtpSession* GoodTp::GetSession(GtpAddr *tran_addr, GtpHandler_p app_gtp_hdl, con
         return itr->second;
     }
 
-    if ((u32)(GtpSessionMode::kReceiver) == mode) {
-        if (app_deleted_stream_keys_.count(tran_addr->stream_key_)) {
-            GtpLog(cb_.write_log_cb_, kGtpMgrMd, kGtpLogLevelWarning,
-                   "refuse to rebuild session for app-deleted stream_key=%llu (recv path)\r\n",
-                   (unsigned long long)(tran_addr->stream_key_));
-            return NULL;
-        }
-    } else {
-        app_deleted_stream_keys_.erase(tran_addr->stream_key_);
-    }
-
     return BuildNewSession(out_key, tran_addr, app_gtp_hdl, mode, pack_sn, sort_sn, sfd);
 }
 
@@ -1447,7 +1513,7 @@ create_new_session_pos_:
         #if 0
         GtpSession *new_session = new ((void*)(&session_mem_pool_))GtpSession(sfd, tran_addr->sock_addr_,
                             tran_addr->sock_addr_len_, tran_addr->self_addr_, tran_addr->self_addr_len_,
-                            (u8)(tran_addr->stream_type_), 0, GetSelfHandler(),
+                            (u8)(tran_addr->stream_type_), (u8)(tran_addr->smooth_jitter_), GetSelfHandler(),
                             &arq_node_mem_pool_, cb_, current_ts_us_, session_ttl_us_, packet_mem_pool_,
                             app_gtp_hdl, &(fec_mode_book_[0]), tran_addr->context_, mode);
         #else
@@ -1527,12 +1593,6 @@ void GoodTp::DelSpsSessionByKey(GtpHandler_p app_gtp_hdl, const GtpSessionKey &l
         session_map_.erase(itr);
         return;
     }
-
-    GtpLog(cb_.write_log_cb_, kGtpInterfaceMd, kGtpLogLevelWarning, "DelGtpLinker can't find the session to delete"\
-           "(key=%llu key_3rd_flag=%u sfd=%lld peer_port=%u self_port=%u), maybe the key passed in doesn't match "\
-           "the key used when this stream was created/sent.\r\n", (unsigned long long)(link_key.key_),
-           (u32)(link_key.key_3rd_flag_), (long long)(link_key.sfd_), (u32)(link_key.peer_bin_port_),
-           (u32)(link_key.self_bin_port_));
 
     return;
 }
@@ -1640,7 +1700,7 @@ wheel_check_resource_next_pos_:
     if (0 == session_map_.size()) {
         unordered_map<GtpSessionKey, GtpSession*, GtpSessionKeyHash> tmp;
         session_map_.swap(tmp);
-        session_map_.reserve(MAX_SESSION_NUM);
+        session_map_.reserve(session_pool_num_);
     }
 
     #if (1 == ENABLE_MD_PERF_CHECK)
@@ -1727,7 +1787,6 @@ void GoodTp::DelSpsSession(GtpHandler_p app_gtp_hdl, GtpAddr *tran_addr) {
     }
 
     {
-    app_deleted_stream_keys_.insert(tran_addr->stream_key_);
     GtpSessionKey link_key(tran_addr->stream_key_);
     DelSpsSessionByKey(app_gtp_hdl, link_key);
     }
@@ -1941,4 +2000,3 @@ void UtLog(const u32 &log_level, const char *fmt, ...) {
 #ifdef __cplusplus
 }
 #endif
-

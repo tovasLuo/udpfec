@@ -19,7 +19,7 @@
 #include "goodtp_session.h"
 #include "goodtp_comstruct.h"
 #include "goodtp_macrodefine.h"
-#include "bitlinker.h"
+#include "goodtp.h"
 
 #include "tranmempool.h"
 
@@ -43,7 +43,6 @@
 
 #include <stdio.h>
 #include <unordered_map>
-#include <unordered_set>
 #include <string>
 
 using namespace std;
@@ -241,16 +240,13 @@ PRIVATE:
     u64 second_ts_us_;
 
     GtpMemPool session_mem_pool_;
+    u32 session_pool_num_;
 
     ConsumeTime wheel_consume_;
 
     u8 win_cache_[GTP_INST_COM_CACHE_SIZE];
 
     unordered_map<GtpSessionKey, GtpSession*, GtpSessionKeyHash> session_map_;
-
-    /* stream_keys explicitly deleted by app (via DelGtpLinker with enable_key_=1).
-       Receive-path BuildNewSession is blocked for these keys until the app re-sends. */
-    unordered_set<u64> app_deleted_stream_keys_;
 
     /* 0: 4X4(h=1 v=1 uh=1 dh=1), 1: 4X4(h=1 v=1 uh=0 dh=0), 2: 4X1(h=1 v=0 uh=0 dh=0)
        3: 2X2(h=1 v=1 uh=1 dh=1), 4: 2X2(h=1 v=1 uh=0 dh=0), 5: 2X1(h=1 v=0 uh=0 dh=0) */
@@ -327,6 +323,10 @@ GtpHandler GtpObjToHandler(GoodTp *goodtp_obj);
 u32 GtpGetSysId(void);
 u64 GtpSysTimestampUs(void);
 void GtpSysDateTime(GtpDateTime *date_time);
+u32 GtpSockAddrInputIsValid(const u8 *sock_addr, const u32 &sock_addr_len, const u32 &allow_zero_len,
+                            const u32 &len_err_code);
+u32 GtpTranAddrSockInputIsValid(const GtpAddr *tran_addr);
+u32 GtpLinkerKeySockInputIsValid(const GtpLinkerKey *linker_key);
 u32 GtpSockAddrToStrAddr(void *sock_addr, u8 *out_ip, const u32 &mem_size, u16 *out_port);
 u32 GtpSockAddrToBinAddr(void *sock_addr, u8 *out_ip, u16 *out_ip_size, u16 *out_port);
 u32 GtpGetSelfSockAddr(const goodtp_sock &sfd, void *sock_addr, u32 addr_size);
@@ -348,4 +348,3 @@ extern "C" GtpInstMgr g_goodtp_inst_mgr;
 #endif
 
 #endif
-

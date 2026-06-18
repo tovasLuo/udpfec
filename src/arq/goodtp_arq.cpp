@@ -17,7 +17,7 @@
 #include "goodtp_mgr.h"
 #include "goodtp_comstruct.h"
 #include "goodtp_macrodefine.h"
-#include "bitlinker.h"
+#include "goodtp.h"
 #include "goodtp_session.h"
 
 #include <string>
@@ -29,7 +29,7 @@ using namespace std;
         /*pop head node*/ \
         (list).head_ = (list).head_->nxt_node_;\
         if (NULL != (list).head_) {\
-            (list).head_->pre_node_ = NULL;\
+            (list).head_->pre_node_ = (list).head_;\
         } else {\
             (list).tail_ = NULL;\
         }\
@@ -63,21 +63,6 @@ using namespace std;
 #ifdef __cplusplus
 extern "C" {
 #endif
-
-// @return: GTP_NO(don't exist), GTP_YES(exist)
-inline u32 JudgeIsExist(const u32 &first_sn, const u32 sn_vec[], const u32 &vec_size) {
-    i32 i,j;
-    u32 exist_flag = GTP_NO;
-
-    for (i = 0, j = vec_size - 1; i <= j; ++i, --j) {
-        if ((first_sn == sn_vec[i]) || (first_sn == sn_vec[j])) {
-            exist_flag = GTP_YES;
-            break;
-        }
-    }
-
-    return exist_flag;
-}
 
 GtpArq::GtpArq(const u32 &rto_timeout_us, const u32 &max_retran_times, const GtpCallBackParam &cb,
                TranMemPool &pack_mem_pool) :
@@ -116,8 +101,27 @@ u32 GtpArq::Init(GtpMemPool *arq_packet_pool, pSendPackCallBack send_pack_cb, pP
 }
 
 u32 GtpArq::PacketEntryList(GtpPacket *pack, GtpAddr *tran_addr, const u32 &first_pack_sn, const u64 &ts_us) {
+    u8 *pack_mem = NULL;
+    u32 mem_size = 0;
+    u32 mem_spec = GtpPackSizeToMemSpec(pack->pack_size_);
+    GtpAddr *cached_tran_addr = NULL;
+
+    pack_mem = pack_mem_pool_.MallocTranBuf(NULL, 0, &mem_size, (void**)(&cached_tran_addr), (BufSizeType)mem_spec);
+    if (NULL == pack_mem) {
+        const string &err_info = pack_mem_pool_.Error();
+        GtpLog(cb_.write_log_cb_, kGtpArqMd, kGtpLogLevelError, "%s:%u<-->%s:%u call MallocTranBuf() failed(%s).\r\n",
+               pb_dt_->self_ip_, (u32)(pb_dt_->self_port_), pb_dt_->peer_ip_,
+               (u32)(pb_dt_->peer_port_), err_info.c_str());
+
+        const string &stat_info = pack_mem_pool_.TranMemPoolStatInfo();
+        GtpLog(cb_.write_log_cb_, kGtpArqMd, kGtpLogLevelWarning, "%s\r\n", stat_info.c_str());
+        RETURN_ERR(kGtpArqMd, kMallocPackMemFailed);
+    }
+
     ArqNode *node = (ArqNode*)arq_packet_pool_->MallocItem();
     if (NULL == node) {
+        pack_mem_pool_.FreeTranBuf(pack_mem);
+
         const u8* arq_mem_status = arq_packet_pool_->GetMemPoolStatus();
 
         GtpLog(cb_.write_log_cb_, kGtpArqMd, kGtpLogLevelError, "%s:%u<-->%s:%u calling MallocItem() "\
@@ -127,9 +131,12 @@ u32 GtpArq::PacketEntryList(GtpPacket *pack, GtpAddr *tran_addr, const u32 &firs
         RETURN_ERR(kGtpArqMd, kCrtArqNodeFailed);
     }
 
+    memcpy(pack_mem, pack, (u32)(pack->pack_size_));
+    memcpy(cached_tran_addr, tran_addr, sizeof(GtpAddr));
+
     node->last_send_ts_us_ = ts_us;
-    node->pack_            = (u8*)pack;
-    node->tran_addr_       = (u8*)tran_addr;
+    node->pack_            = pack_mem;
+    node->tran_addr_       = (u8*)cached_tran_addr;
     node->pack_len_        = (u16)(pack->pack_size_);
     node->try_agin_flg_    = GTP_NO;
     node->payload_offset_  = (u8)(pack->header_offset_);
@@ -143,17 +150,15 @@ u32 GtpArq::PacketEntryList(GtpPacket *pack, GtpAddr *tran_addr, const u32 &firs
 
     PushPack(arq_list_, node);
 
-    pack_mem_pool_.TranBufUseRefAddOne((u8*)pack);
-
     if ((GTP_OFF == boost_switch_) || (0 == max_boost_times_)) {
-        // good network: boost is controlled by LinkQualityCallback, no need to clone.
+        // good network.
         return GTP_OK;
     }
 
-    // When the network is bad (boost_switch_=ON), clone regardless of PPS.
-    // The old MIN_ENHANCE_BOOST_PPS(200) gate was redundant: it disabled boost for any
-    // session with pps > 200 (typical for 60fps games), even while the network was lossy.
-    // Boost node lifetime is one RTT; in-flight node count stays well within the pool limit.
+    if (MIN_ENHANCE_BOOST_PPS < pb_dt_->send_stat_.data_pack_pps_) {
+        return GTP_OK;
+    }
+
     CloneBoostNode(node, ts_us);
 
     return GTP_OK;
@@ -209,6 +214,8 @@ void GtpArq::CheckRtoRetran(const u64 &cur_ts_us) {
             if (GTP_OK != ret) {
                 GtpLog(cb_.write_log_cb_, kGtpArqMd, kGtpLogLevelError,
                        "calling PackRetransmit() failed(0x%08x)\r\n", ret);
+                PushPack(arq_list_, cur_head);
+                goto harq_check_resend_next_pos_;
             }
 
             if (HarqReTranType::kBoostRetranType == retran_type) {
@@ -267,7 +274,7 @@ void GtpArq::AdjustRtoTimeout(const u32 &rto_timeout_us, const u32 &rtt_us) {
 }
 
 void GtpArq::ProcAck(const u8 ack_sn_bitmap[], const u32 &bitmap_sz, const u32 &head_sn,
-                     const u32 &tail_sn, const u32 &rto_sn) {
+                     const u32 &tail_sn, const u32 &rto_sn, const u32 &recv_loss) {
     #ifdef _SELFDEBUG
     GtpLog(cb_.write_log_cb_, kGtpArqMd, kGtpLogLevelInfo, "%s:%u<->%s:%u proc ack head_sn=%u tail_sn=%u "\
            "rto_sn=%u.\r\n", pb_dt_->self_ip_, (u32)(pb_dt_->self_port_),
@@ -286,16 +293,16 @@ void GtpArq::ProcAck(const u8 ack_sn_bitmap[], const u32 &bitmap_sz, const u32 &
     #endif
 
     if (8 == sizeof(void*)) {
-        ProcArqIn64BitSys(ack_sn_bitmap, bitmap_sz, head_sn, tail_sn, rto_sn);
+        ProcArqIn64BitSys(ack_sn_bitmap, bitmap_sz, head_sn, tail_sn, rto_sn, recv_loss);
     } else {
-        ProcArqIn32BitSys(ack_sn_bitmap, bitmap_sz, head_sn, tail_sn, rto_sn);
+        ProcArqIn32BitSys(ack_sn_bitmap, bitmap_sz, head_sn, tail_sn, rto_sn, recv_loss);
     }
 
     return;
 }
 
 void GtpArq::ProcArqIn32BitSys(const u8 ack_sn_bitmap[], const u32 &bitmap_sz, const u32 &head_sn, const u32 &tail_sn,
-                               const u32 &rto_sn) {
+                               const u32 &rto_sn, const u32 &recv_loss) {
     if (NULL == arq_list_.head_) {
         return;
     }
@@ -312,20 +319,18 @@ void GtpArq::ProcArqIn32BitSys(const u8 ack_sn_bitmap[], const u32 &bitmap_sz, c
     u32 head_tail_sn_span = 0;
     u32 head_curr_sn_span = 0;
     u32 head_rto_sn_span  = 0;
-
-    u32 first_sn_num      = 0;
-    u32 first_sn_vec[MAX_RSV_WIN_SIZE];
+    u32 first_sn          = 0;
 
     if (head_sn <= tail_sn) {
         head_tail_sn_span = tail_sn - head_sn;
     } else {
-        head_tail_sn_span = tail_sn + (0xFFFFFFFF - head_sn);
+        head_tail_sn_span = tail_sn + (0xFFFFFFFF - head_sn) + 1;
     }
 
     if (head_sn <= rto_sn) {
         head_rto_sn_span = rto_sn - head_sn;
     } else {
-        head_rto_sn_span = rto_sn + (0xFFFFFFFF - head_sn);
+        head_rto_sn_span = rto_sn + (0xFFFFFFFF - head_sn) + 1;
     }
 
     #ifdef _SELFDEBUG
@@ -341,7 +346,7 @@ void GtpArq::ProcArqIn32BitSys(const u8 ack_sn_bitmap[], const u32 &bitmap_sz, c
         if (head_sn <= cur_node->pack_sn_) {
             head_curr_sn_span = cur_node->pack_sn_ - head_sn;
         } else {
-            head_curr_sn_span = cur_node->pack_sn_ + (0xFFFFFFFF - head_sn);
+            head_curr_sn_span = cur_node->pack_sn_ + (0xFFFFFFFF - head_sn) + 1;
         }
 
         #ifdef _SELFDEBUG
@@ -357,6 +362,11 @@ void GtpArq::ProcArqIn32BitSys(const u8 ack_sn_bitmap[], const u32 &bitmap_sz, c
         }
 
         if (0 == (ack_bitmap[head_curr_sn_span >> 5] & (0x01 << (head_curr_sn_span & 0x0000001F)))) {
+            if (0 == recv_loss) {
+                cur_node = cur_node->nxt_node_;
+                goto arq_32bit_next_normal_pos_;
+            }
+
             if (head_rto_sn_span >= head_curr_sn_span) {
 arq_32bit_quick_resend_pos_:
                 // current list is harq list.
@@ -372,8 +382,6 @@ arq_32bit_quick_resend_pos_:
                     goto arq_32bit_next_normal_pos_;
                 }
 
-                ack_resend_counter_ += 1;
-
                 cur_node = cur_node->nxt_node_;
 
                 PopArqNode(arq_list_, del_node);
@@ -383,7 +391,11 @@ arq_32bit_quick_resend_pos_:
                 if (GTP_OK != run_result) {
                     GtpLog(cb_.write_log_cb_, kGtpArqMd, kGtpLogLevelError,
                            "calling PackRetransmit() failed(0x%08x)\r\n", run_result);
+                    PushPack(arq_list_, del_node);
+                    goto arq_32bit_next_normal_pos_;
                 }
+
+                ack_resend_counter_ += 1;
 
                 #ifdef _SELFDEBUG
                 GtpLog(cb_.write_log_cb_, kGtpArqMd, kGtpLogLevelInfo, "quick retraned packet(pack_sn=%u "\
@@ -412,11 +424,7 @@ arq_32bit_quick_resend_pos_:
 #if (0 == SUPPORT_RELIABLE_TRAN)
 ack_32bit_del_node_pos_:
 #endif
-        // cached the first for deleting boost or harq node with the same first sn.
-        if (first_sn_num < MAX_RSV_WIN_SIZE) {
-            first_sn_vec[first_sn_num] = cur_node->first_pack_sn_;
-            first_sn_num += 1;
-        }
+        first_sn = cur_node->first_pack_sn_;
 
         gtp_pack_vec[cach_pos] = cur_node->pack_;
 
@@ -431,6 +439,7 @@ ack_32bit_del_node_pos_:
 
         PopArqNode(arq_list_, del_node);
         arq_packet_pool_->FreeItem(del_node);
+        DelNodeByFirstSn(first_sn, &cur_node);
 
 arq_32bit_next_normal_pos_:
         del_node = cur_node;
@@ -441,15 +450,11 @@ arq_32bit_next_normal_pos_:
         cach_pos = 0;
     }
 
-    if (0 < first_sn_num) {
-        DelNodeByFirstSn(first_sn_vec, first_sn_num);
-    }
-
     return;
 }
 
 void GtpArq::ProcArqIn64BitSys(const u8 ack_sn_bitmap[], const u32 &bitmap_sz, const u32 &head_sn, const u32 &tail_sn,
-                               const u32 &rto_sn) {
+                               const u32 &rto_sn, const u32 &recv_loss) {
     if (NULL == arq_list_.head_) {
         return;
     }
@@ -469,20 +474,18 @@ void GtpArq::ProcArqIn64BitSys(const u8 ack_sn_bitmap[], const u32 &bitmap_sz, c
     u32 head_tail_sn_span = 0;
     u32 head_curr_sn_span = 0;
     u32 head_rto_sn_span  = 0;
-
-    u32 first_sn_num      = 0;
-    u32 first_sn_vec[MAX_RSV_WIN_SIZE];
+    u32 first_sn          = 0;
 
     if (head_sn <= tail_sn) {
         head_tail_sn_span = tail_sn - head_sn;
     } else {
-        head_tail_sn_span = tail_sn + (0xFFFFFFFF - head_sn);
+        head_tail_sn_span = tail_sn + (0xFFFFFFFF - head_sn) + 1;
     }
 
     if (head_sn <= rto_sn) {
         head_rto_sn_span = rto_sn - head_sn;
     } else {
-        head_rto_sn_span = rto_sn + (0xFFFFFFFF - head_sn);
+        head_rto_sn_span = rto_sn + (0xFFFFFFFF - head_sn) + 1;
     }
 
     #ifdef _SELFDEBUG
@@ -498,7 +501,7 @@ void GtpArq::ProcArqIn64BitSys(const u8 ack_sn_bitmap[], const u32 &bitmap_sz, c
         if (head_sn <= cur_node->pack_sn_) {
             head_curr_sn_span = cur_node->pack_sn_ - head_sn;
         } else {
-            head_curr_sn_span = cur_node->pack_sn_ + (0xFFFFFFFF - head_sn);
+            head_curr_sn_span = cur_node->pack_sn_ + (0xFFFFFFFF - head_sn) + 1;
         }
 
         #ifdef _SELFDEBUG
@@ -516,6 +519,11 @@ void GtpArq::ProcArqIn64BitSys(const u8 ack_sn_bitmap[], const u32 &bitmap_sz, c
         bit_value = 1;
 
         if (0 == (ack_bitmap[head_curr_sn_span >> 6] & (bit_value << (head_curr_sn_span & 0x0000003F)))) {
+            if (0 == recv_loss) {
+                cur_node = cur_node->nxt_node_;
+                goto arq_64bit_next_normal_pos_;
+            }
+
             if (head_rto_sn_span >= head_curr_sn_span) {
 arq_64bit_quick_resend_pos_:
                 // current list is harq list.
@@ -531,8 +539,6 @@ arq_64bit_quick_resend_pos_:
                     goto arq_64bit_next_normal_pos_;
                 }
 
-                ack_resend_counter_ += 1;
-
                 cur_node = cur_node->nxt_node_;
 
                 PopArqNode(arq_list_, del_node);
@@ -542,7 +548,11 @@ arq_64bit_quick_resend_pos_:
                 if (GTP_OK != run_result) {
                     GtpLog(cb_.write_log_cb_, kGtpArqMd, kGtpLogLevelError,
                            "calling PackRetransmit() failed(0x%08x)\r\n", run_result);
+                    PushPack(arq_list_, del_node);
+                    goto arq_64bit_next_normal_pos_;
                 }
+
+                ack_resend_counter_ += 1;
 
                 #ifdef _SELFDEBUG
                 GtpLog(cb_.write_log_cb_, kGtpArqMd, kGtpLogLevelInfo, "quick retraned packet(pack_sn=%u "\
@@ -571,11 +581,7 @@ arq_64bit_quick_resend_pos_:
 #if (0 == SUPPORT_RELIABLE_TRAN)
 ack_64bit_del_node_pos_:
 #endif
-        // cached the first for deleting boost or harq node with the same first sn.
-        if (first_sn_num < MAX_RSV_WIN_SIZE) {
-            first_sn_vec[first_sn_num] = cur_node->first_pack_sn_;
-            first_sn_num += 1;
-        }
+        first_sn = cur_node->first_pack_sn_;
 
         gtp_pack_vec[cach_pos] = cur_node->pack_;
 
@@ -590,6 +596,7 @@ ack_64bit_del_node_pos_:
 
         PopArqNode(arq_list_, del_node);
         arq_packet_pool_->FreeItem(del_node);
+        DelNodeByFirstSn(first_sn, &cur_node);
 
 arq_64bit_next_normal_pos_:
         del_node = cur_node;
@@ -598,10 +605,6 @@ arq_64bit_next_normal_pos_:
     if (0 < cach_pos) {
         pack_mem_pool_.FreeTranBuf(gtp_pack_vec, cach_pos);
         cach_pos = 0;
-    }
-
-    if (0 < first_sn_num) {
-        DelNodeByFirstSn(first_sn_vec, first_sn_num);
     }
 
     return;
@@ -650,14 +653,12 @@ void GtpArq::ProcNotLossNack(const u32 &head_sn, const u32 &tail_sn) {
 
     u32 head_tail_sn_span = 0;
     u32 head_curr_sn_span = 0;
-
-    u32 first_sn_num      = 0;
-    u32 first_sn_vec[MAX_RSV_WIN_SIZE];
+    u32 first_sn          = 0;
 
     if (head_sn <= tail_sn) {
         head_tail_sn_span = tail_sn - head_sn;
     } else {
-        head_tail_sn_span = tail_sn + (0xFFFFFFFF - head_sn);
+        head_tail_sn_span = tail_sn + (0xFFFFFFFF - head_sn) + 1;
     }
 
     #ifdef _SELFDEBUG
@@ -669,7 +670,7 @@ void GtpArq::ProcNotLossNack(const u32 &head_sn, const u32 &tail_sn) {
         if (head_sn <= cur_node->pack_sn_) {
             head_curr_sn_span = cur_node->pack_sn_ - head_sn;
         } else {
-            head_curr_sn_span = cur_node->pack_sn_ + (0xFFFFFFFF - head_sn);
+            head_curr_sn_span = cur_node->pack_sn_ + (0xFFFFFFFF - head_sn) + 1;
         }
 
         #ifdef _SELFDEBUG
@@ -703,8 +704,6 @@ void GtpArq::ProcNotLossNack(const u32 &head_sn, const u32 &tail_sn) {
                 goto no_nack_next_normal_pos_;
             }
 
-            ack_resend_counter_ += 1;
-
             cur_node = cur_node->nxt_node_;
 
             PopArqNode(arq_list_, del_node);
@@ -714,7 +713,11 @@ void GtpArq::ProcNotLossNack(const u32 &head_sn, const u32 &tail_sn) {
             if (GTP_OK != run_result) {
                 GtpLog(cb_.write_log_cb_, kGtpArqMd, kGtpLogLevelError,
                        "calling PackRetransmit() failed(0x%08x)\r\n", run_result);
+                PushPack(arq_list_, del_node);
+                goto no_nack_next_normal_pos_;
             }
+
+            ack_resend_counter_ += 1;
 
             #ifdef _SELFDEBUG
             GtpLog(cb_.write_log_cb_, kGtpArqMd, kGtpLogLevelInfo, "%s:%u<-->%s:%u retraned packet(sn=%u "\
@@ -731,11 +734,7 @@ void GtpArq::ProcNotLossNack(const u32 &head_sn, const u32 &tail_sn) {
 #if (0 == SUPPORT_RELIABLE_TRAN)
 nack_noloss_del_node_pos_:
 #endif
-        // cached the first for deleting boost or harq node with the same first sn.
-        if (first_sn_num < MAX_RSV_WIN_SIZE) {
-            first_sn_vec[first_sn_num] = cur_node->first_pack_sn_;
-            first_sn_num += 1;
-        }
+        first_sn = cur_node->first_pack_sn_;
 
         gtp_pack_vec[cach_pos] = cur_node->pack_;
 
@@ -750,6 +749,7 @@ nack_noloss_del_node_pos_:
 
         PopArqNode(arq_list_, del_node);
         arq_packet_pool_->FreeItem(del_node);
+        DelNodeByFirstSn(first_sn, &cur_node);
 
 no_nack_next_normal_pos_:
         del_node = cur_node;
@@ -758,10 +758,6 @@ no_nack_next_normal_pos_:
     if (0 < cach_pos) {
         pack_mem_pool_.FreeTranBuf(gtp_pack_vec, cach_pos);
         cach_pos = 0;
-    }
-
-    if (0 < first_sn_num) {
-        DelNodeByFirstSn(first_sn_vec, first_sn_num);
     }
 
     return;
@@ -783,14 +779,12 @@ void GtpArq::ProcHasLossNack(const u16_p &nack_sn_offset, const u32 &nack_num, c
 
     u32 head_curr_sn_span = 0;
     u32 head_rto_sn_span  = 0;
-
-    u32 first_sn_num      = 0;
-    u32 first_sn_vec[MAX_RSV_WIN_SIZE];
+    u32 first_sn          = 0;
 
     if (head_sn <= rto_sn) {
         head_rto_sn_span = rto_sn - head_sn;
     } else {
-        head_rto_sn_span = rto_sn + (0xFFFFFFFF - head_sn);
+        head_rto_sn_span = rto_sn + (0xFFFFFFFF - head_sn) + 1;
     }
 
     #ifdef _SELFDEBUG
@@ -809,7 +803,7 @@ void GtpArq::ProcHasLossNack(const u16_p &nack_sn_offset, const u32 &nack_num, c
         if (head_sn <= cur_node->pack_sn_) {
             head_curr_sn_span = cur_node->pack_sn_ - head_sn;
         } else {
-            head_curr_sn_span = cur_node->pack_sn_ + (0xFFFFFFFF - head_sn);
+            head_curr_sn_span = cur_node->pack_sn_ + (0xFFFFFFFF - head_sn) + 1;
         }
 
         #ifdef _SELFDEBUG
@@ -840,8 +834,6 @@ nack_quick_resend_pos_:
                     goto has_nack_next_normal_pos_;
                 }
 
-                ack_resend_counter_ += 1;
-
                 cur_node = cur_node->nxt_node_;
 
                 PopArqNode(arq_list_, del_node);
@@ -851,7 +843,11 @@ nack_quick_resend_pos_:
                 if (GTP_OK != run_result) {
                     GtpLog(cb_.write_log_cb_, kGtpArqMd, kGtpLogLevelError,
                            "calling PackRetransmit() failed(0x%08x)\r\n", run_result);
+                    PushPack(arq_list_, del_node);
+                    goto has_nack_next_normal_pos_;
                 }
+
+                ack_resend_counter_ += 1;
 
                 #ifdef _SELFDEBUG
                 GtpLog(cb_.write_log_cb_, kGtpArqMd, kGtpLogLevelInfo, "quick retraned packet(pack_sn=%u "\
@@ -879,11 +875,7 @@ nack_quick_resend_pos_:
 #if (0 == SUPPORT_RELIABLE_TRAN)
 nack_hasloss_del_node_pos_:
 #endif
-        // cached the first for deleting boost or harq node with the same first sn.
-        if (first_sn_num < MAX_RSV_WIN_SIZE) {
-            first_sn_vec[first_sn_num] = cur_node->first_pack_sn_;
-            first_sn_num += 1;
-        }
+        first_sn = cur_node->first_pack_sn_;
 
         c3buf_vec[cach_pos] = cur_node->pack_;
 
@@ -898,6 +890,7 @@ nack_hasloss_del_node_pos_:
 
         PopArqNode(arq_list_, del_node);
         arq_packet_pool_->FreeItem(del_node);
+        DelNodeByFirstSn(first_sn, &cur_node);
 
 has_nack_next_normal_pos_:
         del_node = cur_node;
@@ -906,10 +899,6 @@ has_nack_next_normal_pos_:
     if (0 < cach_pos) {
         pack_mem_pool_.FreeTranBuf(c3buf_vec, cach_pos);
         cach_pos = 0;
-    }
-
-    if (0 < first_sn_num) {
-        DelNodeByFirstSn(first_sn_vec, first_sn_num);
     }
 
     return;
@@ -1051,6 +1040,10 @@ HarqReTranType GtpArq::JudgeCanRtoReSend(const ArqNode *node, const u64 &rto_ts_
         return HarqReTranType::kNotRetranType;
     }
 
+    if ((kRealTimeStream == pb_dt_->tran_addr_.stream_type_) && (FLOAT_ZERO >= s_cur_loss_rate_)) {
+        return HarqReTranType::kNotRetranType;
+    }
+
     if ((max_retran_times_ > node->retran_counter_)
      && (rto_ts_us >= node->last_send_ts_us_)) {
         return HarqReTranType::kRtoRetranType;;
@@ -1120,7 +1113,7 @@ void GtpArq::CloneBoostNode(ArqNode *org_node, const u64 &ts_us) {
 }
 
 void GtpArq::TranFailedPostHandler(ArqNode *node, const u64 &cur_ts_us) {
-    if ((kReliableStream > pb_dt_->tran_addr_.stream_type_) || (GTP_OFF == pb_dt_->alg_top_switch_)
+    if ((kRealTimeStream == pb_dt_->tran_addr_.stream_type_) || (GTP_OFF == pb_dt_->alg_top_switch_)
      || (GTP_YES == node->boost_node_flg_) || (GTP_YES == node->try_agin_flg_)) {
         pack_mem_pool_.FreeTranBuf((u8*)(node->pack_));
         arq_packet_pool_->FreeItem(node);
@@ -1158,20 +1151,24 @@ void GtpArq::TranFailedPostHandler(ArqNode *node, const u64 &cur_ts_us) {
     PushPack(arq_list_, node);
 }
 
-void GtpArq::DelNodeByFirstSn(const u32 first_sn_vec[], const u32 &vec_size) {
-    ArqNode *cur_head  = arq_list_.head_;
-    ArqNode *next_node = NULL;
+void GtpArq::DelNodeByFirstSn(const u32 &first_sn, ArqNode **next_node) {
+    ArqNode *cur_head = arq_list_.head_;
+    ArqNode *nxt_node = NULL;
 
     while (NULL != cur_head) {
-        next_node = cur_head->nxt_node_;
+        nxt_node = cur_head->nxt_node_;
 
-        if (GTP_YES == JudgeIsExist(cur_head->first_pack_sn_, first_sn_vec, vec_size)) {
+        if (first_sn == cur_head->first_pack_sn_) {
+            if ((NULL != next_node) && ((*next_node) == cur_head)) {
+                *next_node = nxt_node;
+            }
+
             PopArqNode(arq_list_, cur_head);
             pack_mem_pool_.FreeTranBuf((u8*)(cur_head->pack_));
             arq_packet_pool_->FreeItem(cur_head);
         }
 
-        cur_head = next_node;
+        cur_head = nxt_node;
     }
 
     return;
@@ -1180,4 +1177,3 @@ void GtpArq::DelNodeByFirstSn(const u32 first_sn_vec[], const u32 &vec_size) {
 #ifdef __cplusplus
 }
 #endif
-

@@ -17,8 +17,7 @@
 #include "goodtp_mgr.h"
 #include "goodtp_comstruct.h"
 #include "goodtp_macrodefine.h"
-#include "bitlinker.h"
-
+#include "goodtp.h"
 
 #include <stdlib.h>
 #include <stdio.h>
@@ -61,6 +60,37 @@ typedef struct _FecMlParam {
     u8 rsv_;
 }FecMlParam;
 
+#if (2 == APPLICATION_TYPE)
+C3PTP_STATIC u32 CalcGameFecTableLossIndex(const f32 &loss) {
+    static const f32 loss_std[] = {
+        1.000001f, 3.000001f, 5.000001f, 7.000001f,
+        9.000001f, 11.000001f, 13.000001f, 15.000001f,
+        17.000001f, 19.000001f, 21.000001f, 23.000001f,
+        25.000001f, 27.000001f, 29.000001f
+    };
+
+    for (u32 i = 0; (sizeof(loss_std) / sizeof(loss_std[0])) > i; ++i) {
+        if (loss_std[i] > loss) {
+            return i;
+        }
+    }
+    return (u32)(sizeof(loss_std) / sizeof(loss_std[0]));
+}
+
+C3PTP_STATIC u32 CalcGameFecTablePpsIndex(const u32 &pps) {
+    static const u32 pps_std[] = {
+        35, 65, 100, 135, 165, 195, 225, 255, 285
+    };
+
+    for (u32 i = 0; (sizeof(pps_std) / sizeof(pps_std[0])) > i; ++i) {
+        if (pps_std[i] > pps) {
+            return i;
+        }
+    }
+    return (u32)(sizeof(pps_std) / sizeof(pps_std[0]));
+}
+#endif
+
 void LinkQualityCallback(slid_win_hdl win_hdl, void *cntxt_hdl, const u32 &rtt_us, const u32 &jitter_us,
     const f32 &loss, const DiscardDirectU32 &loss_dir, const u32 &pre_congest_rank, const u32 &rto_us,
     const u32 &pps, const u32 &loss_num) {
@@ -74,7 +104,7 @@ void LinkQualityCallback(slid_win_hdl win_hdl, void *cntxt_hdl, const u32 &rtt_u
 
     GtpLinkQuality &link_quality = (*((GtpLinkQuality*)tmp_buf));
 
-    memset(&link_quality, 0, sizeof(link_quality));
+    link_quality.rsv_ = 0;
 
     if (win_hdl == session->data_win_s_) {
         session->rpt_snd_qualit_ = GTP_YES;
@@ -90,7 +120,7 @@ void LinkQualityCallback(slid_win_hdl win_hdl, void *cntxt_hdl, const u32 &rtt_u
             goto proc_sender_network_quality_pos_;
         }
 
-        if (kReliableStream <= session->pb_dt_.tran_addr_.stream_type_) {
+        if (kReliableStream == session->pb_dt_.tran_addr_.stream_type_) {
             max_loss_thresheld = (f32)MAX_RELIABLE_LOSS_THRESHLD;
             rmv_loss_thresheld = (f32)RMV_RELIABLE_LOSS_THRESHLD;
         }
@@ -103,7 +133,7 @@ void LinkQualityCallback(slid_win_hdl win_hdl, void *cntxt_hdl, const u32 &rtt_u
                        "algorithm(stream_type=%s std_loss=%5.2f%% cur_loss=%5.2f%% dir=%s)\r\n",
                        session->pb_dt_.self_ip_, (u32)(session->pb_dt_.self_port_),
                        session->pb_dt_.peer_ip_, (u32)(session->pb_dt_.peer_port_),
-                       ((kReliableStream > session->pb_dt_.tran_addr_.stream_type_) ? "real_time" : "reliable"),
+                       ((kRealTimeStream == session->pb_dt_.tran_addr_.stream_type_) ? "real_time" : "reliable"),
                        max_loss_thresheld, loss, ((kUpLinkerLoss == loss_dir) ? "up" : "down"));
             }
 
@@ -134,14 +164,13 @@ void LinkQualityCallback(slid_win_hdl win_hdl, void *cntxt_hdl, const u32 &rtt_u
                "algorithm(stream_type=%s std_loss=%5.2f%% cur_loss=%5.2f%% dir=%s)\r\n",
                session->pb_dt_.self_ip_, (u32)(session->pb_dt_.self_port_),
                session->pb_dt_.peer_ip_, (u32)(session->pb_dt_.peer_port_),
-               ((kReliableStream > session->pb_dt_.tran_addr_.stream_type_) ? "real_time" : "reliable"),
+               ((kRealTimeStream == session->pb_dt_.tran_addr_.stream_type_) ? "real_time" : "reliable"),
                rmv_loss_thresheld, loss, ((kUpLinkerLoss == loss_dir) ? "up" : "down"));
 
 proc_sender_network_quality_pos_:
         session->pb_dt_.UpdatedMaxLoss(loss);
 
         if (FLOAT_ZERO >= session->pb_dt_.max_send_loss_per_s_) {
-            session->net_bad_pending_cnt_ = 0;
             if (((u8)(NetQuality::kNetQualityBad)) == session->net_quality_) {
                 if ((session->last_gen_loss_ts_us_ + MIN_ZERO_LOSS_EXIST_US) <= session->last_active_ts_us_) {
                     session->net_quality_          = ((u8)(NetQuality::kNetQualityGood));
@@ -163,11 +192,11 @@ proc_sender_network_quality_pos_:
 
                     #if (2 == APPLICATION_TYPE)
                     u32 fec2_encode_book_id[] = {
-                        5,  // pps <  10  V-FEC arrives after gap timer; book5 saves ~50% FEC BW
-                        5,  // pps <  50  same reasoning (covers ≤30pps; 31-49 borderline but fine)
-                        4,  // pps <  100 pc game
-                        4,  // pps <  150 pc game
-                        4   // pps >= 150 pc game
+                        4,  // pps <  10  test speed
+                        2,  // pps <  50  phone game
+                        2,  // pps <  100 phone game
+                        2,  // pps <  150 pc game
+                        2   // pps >= 150 pc game
                     };
 
                     u32 std_pps[] = {10, 50, 100, 150};
@@ -209,12 +238,6 @@ fec_mode_to_default_pos_:
         }
 
         if (((u8)(NetQuality::kNetQualityGood)) == session->net_quality_) {
-            session->net_bad_pending_cnt_++;
-            if (session->net_bad_pending_cnt_ < 2) {
-                session->last_gen_loss_ts_us_ = session->last_active_ts_us_;
-                goto sender_qualiti_proc_start_pos_;
-            }
-            session->net_bad_pending_cnt_ = 0;
             first_bad             = GTP_YES;
             session->net_quality_ = ((u8)(NetQuality::kNetQualityBad));
         }
@@ -248,26 +271,44 @@ fec_mode_to_default_pos_:
         // boost number, continue discard packet.
         u32 boost_alg_param[][6] = {
             // loss < 1% loss < 10% loss < 20% loss < 35% loss < 50% loss >= 50%
-            {1,          1,         2,         3,         2,         2},  // pps < 10 test speed
-            {0,          0,         1,         2,         1,         0},  // pps < 50 phone game
-            {0,          0,         1,         2,         1,         0},  // pps < 100 phone&pc game
-            {0,          0,         1,         2,         1,         0},  // pps < 170 pc game
-            {0,          0,         1,         1,         1,         0},  // pps < 250 pc game
-            {0,          0,         0,         1,         1,         0},  // pps >= 250 for pc game
+            {1,          1,         2,         3,         2,         2},  // pps < 12  test speed
+            {0,          0,         1,         1,         1,         0},  // pps < 30  phone game
+            {0,          0,         1,         1,         1,         0},  // pps < 50  phone game
+            {0,          0,         1,         1,         1,         0},  // pps < 90  low-rate pc game
+            {0,          0,         1,         1,         1,         0},  // pps < 130 low-rate pc game
+            {0,          0,         1,         1,         1,         0},  // pps < 170 medium-rate pc game
+            {0,          0,         1,         1,         1,         0},  // pps < 210 medium-rate pc game
+            {0,          0,         1,         1,         1,         0},  // pps < 250 high-tail-latency pc game
+            {0,          0,         1,         1,         1,         0},  // pps < 330 high-rate pc game
+            {0,          0,         1,         1,         1,         0},  // pps >= 330 high-rate pc game
+        };
+
+        u32 boost_std_pps[][9] = {
+            {12, 30, 50, 90, 130, 170, 210, 250, 330},  // realtime stream.
+            {12, 30, 50, 90, 130, 170, 210, 250, 330}   // reliable stream.
         };
 
         u32 std_pps[][5] = {
-            {10, 60, 100, 170, 250},  // realtime stream.
-            {10, 50, 100, 170, 250}   // reliable stream.
+            {12, 30, 50, 170, 250},  // realtime stream.
+            {12, 30, 50, 170, 250}   // reliable stream.
         };
         #endif
 
         u32 std_pps_line = 0;
 
-        if ((kReliableStream <= session->pb_dt_.tran_addr_.stream_type_) && (0x01 < session->pb_dt_.peer_version_)) {
+        if ((kReliableStream == session->pb_dt_.tran_addr_.stream_type_) && (0x01 < session->pb_dt_.peer_version_)) {
             std_pps_line = 1;
         }
 
+        #if (2 == APPLICATION_TYPE)
+        for (line_pos = 0;
+             (sizeof(boost_std_pps[std_pps_line]) / sizeof(boost_std_pps[std_pps_line][0])) > line_pos;
+             ++line_pos) {
+            if (boost_std_pps[std_pps_line][line_pos] > session->pb_dt_.send_stat_.data_pack_pps_) {
+                goto boost_alg_row_start_pos_;
+            }
+        }
+        #else
         if (std_pps[std_pps_line][0] > session->pb_dt_.send_stat_.data_pack_pps_) {
             line_pos = 0;
             goto boost_alg_row_start_pos_;
@@ -292,8 +333,8 @@ fec_mode_to_default_pos_:
             line_pos = 4;
             goto boost_alg_row_start_pos_;
         }
-
         line_pos = 5;
+        #endif
 
 boost_alg_row_start_pos_:
         // delta_loss=0.5%
@@ -340,61 +381,32 @@ boost_alg_row_end_pos_:
 
         #if (1 == ENABLE_FEC)
         #if ((0 == APPLICATION_TYPE) || (1 == APPLICATION_TYPE))
-        // 5 columns: loss<2%  2-10%  10-25%  25-50%  >=50%
-        // 25% crossover added: consistent with game mode data.
-        u32 fec2_ml_book_id1[][5] = {
-            // loss<2%  2-10%  10-25%  25-50%  >=50%
-            {4,         4,     4,      4,      4},  // pps <  10   test speed
-            {5,         4,     4,      2,      2},  // pps <  500  SD video
-            {1,         1,     4,      2,      2},  // pps <  1200 HD video
-            {1,         1,     4,      2,      2},  // pps <  2000 2K
-            {1,         1,     4,      2,      2},  // pps <  5000 4K
-            {1,         1,     4,      2,      2}   // pps >= 5000 8K
+        // mode,h_flag,v_flag, uphill_flag, downhill_flag, h_power, v_power
+        u32 fec2_ml_book_id1[][4] = {
+            // loss < 2.0%  loss < 10.0%  loss < 50.0%  loss >= 50.0%
+            {4,             4,            4,            4},  // pps <  10   test speed
+            {5,             4,            4,            4},  // pps <  500  SD vedio
+            {1,             1,            4,            4},  // pps <  1200 HD vedio
+            {1,             1,            4,            4},  // pps <  2000 2K
+            {1,             1,            4,            4},  // pps <  5000 4K
+            {1,             1,            4,            4}   // pps >= 5000 8K
         };
-        u32 fec2_ml_book_id2[][5] = {
-            // loss<2%  2-10%  10-25%  25-50%  >=50%
-            {4,         4,     4,      4,      4},  // pps <  10   test speed
-            {4,         4,     4,      2,      2},  // pps <  500  SD video
-            {4,         4,     4,      2,      2},  // pps <  1200 HD video
-            {4,         4,     4,      2,      2},  // pps <  2000 2K
-            {4,         4,     4,      2,      2},  // pps <  5000 4K
-            {4,         4,     4,      2,      2}   // pps >= 5000 8K
+        u32 fec2_ml_book_id2[][4] = {
+            // loss < 2.0%  loss < 10.0%  loss < 50.0%  loss >= 50.0%
+            {4,             4,            4,            4},  // pps <  10   test speed
+            {4,             4,            4,            4},  // pps <  500  SD vedio
+            {4,             4,            4,            4},  // pps <  1200 HD vedio
+            {4,             4,            4,            4},  // pps <  2000 2K
+            {4,             4,            4,            4},  // pps <  5000 4K
+            {4,             4,            4,            4}   // pps >= 5000 8K
         };
         #endif
 
         #if (2 == APPLICATION_TYPE)
-        // 5 columns: loss<2%  2-10%  10-25%  25-50%  >=50%
-        // Data source: game_net_test PART3 bandwidth sweep (book2 vs book4).
-        //   <25% loss: book4(2×2 H+V) has lower total overhead than book2(4×1 H)
-        //              test data: 15% loss → book4=177% vs book2=245% overhead
-        //   >25% loss: book4 FEC pkts also get lost; extra parity buys little recovery
-        //              but costs more ARQ retrans; book2 wins on total bandwidth.
-        //              test data: 25% loss → book2=193% vs book4=292% overhead
-        //
-        // bad 状态 FEC book 选择（effective loss < 10%）：
-        //   pps <  10: book4（2×2 H+V），低 pps 数据不足，保守选择
-        //   pps >= 10: book5（2×1 H），节省 30-51pp 带宽开销，p99 ≈ book4±4%
-        //   实测依据：PART10 30s 专项测试，30-60pps × 5%/8% 丢包全场景对比
-        u32 fec2_ml_book_id1[][5] = {
-            // loss<2%  2-10%  10-25%  25-50%  >=50%
-            {5,         5,     4,      2,      2},  // pps <  10  book5: V-FEC arrives after gap timer
-            {5,         5,     4,      2,      2},  // pps <  60  book5 (10-59pps 验证安全)
-            {5,         5,     4,      2,      2},  // pps <  100
-            {5,         5,     4,      2,      2},  // pps <  170
-            {5,         5,     4,      2,      2},  // pps <  250
-            {5,         5,     4,      2,      2}   // pps >= 250
-        };
-        u32 fec2_ml_book_id2[][5] = {
-            // loss<2%  2-10%  10-25%  25-50%  >=50%
-            {5,         5,     4,      2,      2},  // pps <  10  book5: V-FEC arrives after gap timer
-            {5,         5,     4,      2,      2},  // pps <  60
-            {5,         5,     4,      2,      2},  // pps <  100
-            {5,         5,     4,      2,      2},  // pps <  170
-            {5,         5,     4,      2,      2},  // pps <  250
-            {5,         5,     4,      2,      2}   // pps >= 250
-        };
+        session->fec2_obj_.ChangeFecMode(session->CalcGameFecBookId());
         #endif
 
+        #if ((0 == APPLICATION_TYPE) || (1 == APPLICATION_TYPE))
         if (std_pps[std_pps_line][0] > session->pb_dt_.send_stat_.data_pack_pps_) {
             line_pos = 0;
             goto fec_ml_row_start_pos_;
@@ -423,38 +435,29 @@ boost_alg_row_end_pos_:
 
 fec_ml_row_start_pos_:
         if (2.000001 > session->pb_dt_.max_send_loss_per_s_) {
-            row_pos = 0;   /* <2%:  book4, auto-FEC typically off */
+            row_pos = 0;
             goto fec_ml_end_pos_;
         }
 
         if (10.000001 > session->pb_dt_.max_send_loss_per_s_) {
-            row_pos = 1;   /* 2-10%: book4, H+V coverage, lower overhead */
-            goto fec_ml_end_pos_;
-        }
-
-        if (25.000001 > session->pb_dt_.max_send_loss_per_s_) {
-            /* hysteresis: if currently on book2, require loss < 23% to switch back to book4 */
-            if ((2 == session->fec2_obj_.GetUsingBookId()) && (23.000001 <= session->pb_dt_.max_send_loss_per_s_)) {
-                row_pos = 3;
-            } else {
-                row_pos = 2;   /* 10-25%: book4 still optimal (test: 177% vs 245%) */
-            }
+            row_pos = 1;
             goto fec_ml_end_pos_;
         }
 
         if (50.000001 > session->pb_dt_.max_send_loss_per_s_) {
-            row_pos = 3;   /* 25-50%: book2 saves ~100ppts overhead (test: 193% vs 292%) */
+            row_pos = 2;
             goto fec_ml_end_pos_;
         }
-        row_pos = 4;       /* >=50%: book2, ARQ-dominant, minimal FEC overhead */
+        row_pos = 3;
 
 fec_ml_end_pos_:
-        if ((kReliableStream <= session->pb_dt_.tran_addr_.stream_type_)
+        if ((kReliableStream == session->pb_dt_.tran_addr_.stream_type_)
          && (0x01 < session->pb_dt_.peer_version_)) {
             session->fec2_obj_.ChangeFecMode(fec2_ml_book_id2[line_pos][row_pos]);
         } else {
             session->fec2_obj_.ChangeFecMode(fec2_ml_book_id1[line_pos][row_pos]);
         }
+        #endif
 
         #endif
         }
@@ -667,11 +670,12 @@ goodtp_continue_rpt_quality_pos_:
     link_quality.rtt_ms_           = (u16)(rtt_us / 1000);
     link_quality.rtt_jitter_ms_    = (u16)(jitter_us / 1000);
     link_quality.loss_             = loss;
+    link_quality.pre_congest_rank_ = pre_congest_rank;
     link_quality.bitrage_chg_k_    = 0;
     link_quality.loss_direct_      = loss_dir;
     link_quality.context_          = session->pb_dt_.tran_addr_.context_;
 
-    link_quality.linker_key_.sfd_        = session->pb_dt_.tran_addr_.sfd_;
+    link_quality.linker_key_.sfd_ = session->pb_dt_.tran_addr_.sfd_;
     link_quality.linker_key_.self_socket_addr_len_ = session->pb_dt_.tran_addr_.self_addr_len_;
     link_quality.linker_key_.peer_socket_addr_len_ = session->pb_dt_.tran_addr_.sock_addr_len_;
 
@@ -730,8 +734,7 @@ void WinSnBitmapCallback(slid_win_hdl win_hdl, void *cntxt_hdl, const void *bit_
         return;
     }
 
-    u64 now_ts_us  = GtpSysTimestampUs();
-    u64 real_ts_us = now_ts_us;  // preserve before possible RTT-delta modification
+    u64 now_ts_us = GtpSysTimestampUs();
 
     u8 *chg_len_zone = NULL;
 
@@ -743,34 +746,22 @@ void WinSnBitmapCallback(slid_win_hdl win_hdl, void *cntxt_hdl, const void *bit_
     u16 tail_sn_offset = 0;
     u16 rto_sn_offset  = 0;
 
-    // when the session is identified by stream_key_, embed it right after the fixed header(under the
-    // existing has_check_flag_), before the ack/nack-specific load. decode side already locates the load
-    // via pack->header_offset_(see PackPrepHandler's kGtpAckPackType/kGtpNackPackType cases), so this is
-    // transparent to that code.
-    u16 has_check = GTP_NO;
-    u8  hdr_off   = (u8)sizeof(GtpPacket);
-
-    if (GTP_YES == session->pb_dt_.tran_addr_.enable_key_) {
-        has_check = GTP_YES;
-        u8 *key_ptr = ((u8*)pack) + sizeof(GtpPacket);
-        *((u32*)(key_ptr))              = (u32)(session->pb_dt_.tran_addr_.stream_key_ >> 32);
-        *((u32*)(key_ptr + sizeof(u32))) = (u32)(session->pb_dt_.tran_addr_.stream_key_);
-        hdr_off = (u8)(sizeof(GtpPacket) + sizeof(u64));
-    }
-
     pack->goodtp_ver_      = CalcRightGtpVer(GTP_VERSION, session->pb_dt_.peer_version_);
-    pack->header_offset_   = hdr_off;
+    pack->header_offset_   = (u8)sizeof(GtpPacket);
     pack->has_loss_flag_   = GTP_NO;
     pack->cache_us_flag_   = GTP_NO;
     pack->pack_type_       = (u8)(GtpPackType::kGtpNackPackType);
     pack->pack_sn_         = session->ack_sn_;
-    pack->has_check_flag_  = (u8)has_check;
+    pack->has_check_flag_  = GTP_NO;
     pack->has_ts_flag_     = GTP_NO;
     pack->has_rtt_flag_    = GTP_NO;
     pack->init_flag_       = (u8)(((u8)(GtpSessStat::kRunning) == session->recv_session_stat_) ? GTP_NO : GTP_YES);
     pack->repeat_counter_  = 0;
     pack->is_qos_flg_      = GTP_NO;
     pack->share_zone_      = 0;
+    pack->has_chg_zone_    = GTP_NO;
+    pack->stream_type_     = kRealTimeStream;
+    GtpWriteStreamKeyHeader(pack, session->pb_dt_.tran_addr_.stream_key_);
 
     if (kNackType == ack_nack) {
         const NackData *nack_data = (NackData*)bit_map;
@@ -778,26 +769,26 @@ void WinSnBitmapCallback(slid_win_hdl win_hdl, void *cntxt_hdl, const void *bit_
         if (nack_data->head_sn_ <= nack_data->tail_sn_) {
             tail_sn_offset = (u16)(nack_data->tail_sn_ - nack_data->head_sn_);
         } else {
-            tail_sn_offset = (u16)(nack_data->tail_sn_ + (0xFFFFFFFF - nack_data->head_sn_));
+            tail_sn_offset = (u16)(nack_data->tail_sn_ + (0xFFFFFFFF - nack_data->head_sn_) + 1);
         }
 
         if (nack_data->head_sn_ <= nack_data->rto_sn_) {
             rto_sn_offset = (u16)(nack_data->rto_sn_ - nack_data->head_sn_);
         } else {
-            rto_sn_offset = (u16)(nack_data->rto_sn_ + (0xFFFFFFFF - nack_data->head_sn_));
+            rto_sn_offset = (u16)(nack_data->rto_sn_ + (0xFFFFFFFF - nack_data->head_sn_) + 1);
         }
 
-        pack_size = ((u32)hdr_off) + sizeof(GtpNackPacketLoad) + (((u32)(nack_data->nack_num_)) << 1);
+        pack_size = pack->header_offset_ + sizeof(GtpNackPacketLoad) + (((u32)(nack_data->nack_num_)) << 1);
 
-        GtpNackPacketLoad *nack_load = (GtpNackPacketLoad*)(((u8*)pack) + hdr_off);
+        GtpNackPacketLoad *nack_pack = (GtpNackPacketLoad*)(((u8*)pack) + pack->header_offset_);
 
-        nack_load->nack_num_       = nack_data->nack_num_;
-        nack_load->tail_sn_offset_ = tail_sn_offset;
-        nack_load->rto_sn_offset_  = rto_sn_offset;
-        nack_load->head_sn_        = nack_data->head_sn_;
-        nack_load->recv_loss_      = nack_data->recv_loss_;
+        nack_pack->nack_num_       = nack_data->nack_num_;
+        nack_pack->tail_sn_offset_ = tail_sn_offset;
+        nack_pack->rto_sn_offset_  = rto_sn_offset;
+        nack_pack->head_sn_        = nack_data->head_sn_;
+        nack_pack->recv_loss_      = nack_data->recv_loss_;
 
-        chg_len_zone = ((u8*)nack_load) + sizeof(GtpNackPacketLoad);
+        chg_len_zone = ((u8*)nack_pack) + sizeof(GtpNackPacketLoad);
 
         if (0 != session->com_cache_ts_us_) {
             if (now_ts_us >= session->at_com_cache_ts_us_) {
@@ -806,20 +797,16 @@ void WinSnBitmapCallback(slid_win_hdl win_hdl, void *cntxt_hdl, const void *bit_
                 now_ts_us = session->at_com_cache_ts_us_ - now_ts_us;
             }
 
-            pack->cache_us_flag_  = GTP_YES;
-            *((u64*)chg_len_zone) = session->com_cache_ts_us_ + now_ts_us;
-            chg_len_zone          += sizeof(u64);
-            pack_size              += sizeof(u64);
+            pack->cache_us_flag_      = GTP_YES;
+            *((u64*)chg_len_zone)     = session->com_cache_ts_us_ + now_ts_us;
+            chg_len_zone             += sizeof(u64);
+            pack_size                += sizeof(u64);
 
             session->com_cache_ts_us_    = 0;
             session->at_com_cache_ts_us_ = 0;
         }
 
         pack->pack_size_ = (u16)pack_size;
-
-        if (3 <= nack_data->nack_num_) {
-            session->nack_burst_detected_ = 1;
-        }
 
         memcpy(chg_len_zone, nack_data->nack_, ((u32)(nack_data->nack_num_)) << 1);
 
@@ -828,7 +815,7 @@ void WinSnBitmapCallback(slid_win_hdl win_hdl, void *cntxt_hdl, const void *bit_
                "[win_hdl=%p]%s:%u<-->%s:%u(nack) head_sn=%u tail_sn=%u rto_sn=%u nack_num=%u.\r\n", win_hdl,
                session->pb_dt_.self_ip_, (u32)(session->pb_dt_.self_port_),
                session->pb_dt_.peer_ip_, (u32)(session->pb_dt_.peer_port_),
-               nack_load->head_sn_, nack_data->tail_sn_, nack_data->rto_sn_, nack_load->nack_num_);
+               nack_pack->head_sn_, nack_data->tail_sn_, nack_data->rto_sn_, nack_pack->nack_num_);
         #endif
 
         goto session_send_ack_nack_pos_;
@@ -840,28 +827,27 @@ void WinSnBitmapCallback(slid_win_hdl win_hdl, void *cntxt_hdl, const void *bit_
     if (ack_data->head_sn_ <= ack_data->tail_sn_) {
         tail_sn_offset = (u16)(ack_data->tail_sn_ - ack_data->head_sn_);
     } else {
-        tail_sn_offset = (u16)(ack_data->tail_sn_ + (0xFFFFFFFF - ack_data->head_sn_));
+        tail_sn_offset = (u16)(ack_data->tail_sn_ + (0xFFFFFFFF - ack_data->head_sn_) + 1);
     }
 
     if (ack_data->head_sn_ <= ack_data->rto_sn_) {
         rto_sn_offset = (u16)(ack_data->rto_sn_ - ack_data->head_sn_);
     } else {
-        rto_sn_offset = (u16)(ack_data->rto_sn_ + (0xFFFFFFFF - ack_data->head_sn_));
+        rto_sn_offset = (u16)(ack_data->rto_sn_ + (0xFFFFFFFF - ack_data->head_sn_) + 1);
     }
 
-    pack_size = ((u32)hdr_off) + sizeof(GtpAckPacketLoad) + ack_data->mem_size_;
+    pack_size = pack->header_offset_ + sizeof(GtpAckPacketLoad) + ack_data->mem_size_;
 
-    pack->pack_type_ = (u8)(GtpPackType::kGtpAckPackType);
+    GtpAckPacketLoad *ack = (GtpAckPacketLoad*)(((u8*)pack) + pack->header_offset_);
 
-    GtpAckPacketLoad *ack_load = (GtpAckPacketLoad*)(((u8*)pack) + hdr_off);
+    pack->pack_type_     = (u8)(GtpPackType::kGtpAckPackType);
+    ack->sn_size_        = (u16)(ack_data->mem_size_);
+    ack->tail_sn_offset_ = tail_sn_offset;
+    ack->rto_sn_offset_  = rto_sn_offset;
+    ack->head_sn_        = ack_data->head_sn_;
+    ack->recv_loss_      = ack_data->recv_loss_;
 
-    ack_load->sn_size_        = (u16)(ack_data->mem_size_);
-    ack_load->tail_sn_offset_ = tail_sn_offset;
-    ack_load->rto_sn_offset_  = rto_sn_offset;
-    ack_load->head_sn_        = ack_data->head_sn_;
-    ack_load->recv_loss_      = ack_data->recv_loss_;
-
-    chg_len_zone = ((u8*)ack_load) + sizeof(GtpAckPacketLoad);
+    chg_len_zone = ((u8*)ack) + sizeof(GtpAckPacketLoad);
 
     if (0 != session->com_cache_ts_us_) {
         if (now_ts_us >= session->at_com_cache_ts_us_) {
@@ -872,8 +858,8 @@ void WinSnBitmapCallback(slid_win_hdl win_hdl, void *cntxt_hdl, const void *bit_
 
         pack->cache_us_flag_  = GTP_YES;
         *((u64*)chg_len_zone) = session->com_cache_ts_us_ + now_ts_us;
-        chg_len_zone          += sizeof(u64);
-        pack_size              += sizeof(u64);
+        chg_len_zone         += sizeof(u64);
+        pack_size            += sizeof(u64);
 
         session->com_cache_ts_us_    = 0;
         session->at_com_cache_ts_us_ = 0;
@@ -883,7 +869,7 @@ void WinSnBitmapCallback(slid_win_hdl win_hdl, void *cntxt_hdl, const void *bit_
                "[win_hdl=%p]%s:%u<-->%s:%u(ack) head_sn=%u tail_sn=%u rto_sn=%u.\r\n", win_hdl,
                session->pb_dt_.self_ip_, (u32)(session->pb_dt_.self_port_),
                session->pb_dt_.peer_ip_, (u32)(session->pb_dt_.peer_port_),
-               ack_load->head_sn_, ack_data->tail_sn_, ack_data->rto_sn_);
+               ack->head_sn_, ack_data->tail_sn_, ack_data->rto_sn_);
         #endif
     }
 
@@ -917,13 +903,18 @@ session_send_ack_nack_pos_:
     if (GTP_OK != result) {
         GtpLog(session->cb_.write_log_cb_, kGtpSessionMd, kGtpLogLevelError,
                "call send_pack_cb_() failed(0x%08x)\r\n", result);
+        return;
     }
 
-    session->pb_dt_.send_stat_.ack_sum_         += 1;
+    if (((u8)(GtpPackType::kGtpAckPackType)) == pack->pack_type_) {
+        session->pb_dt_.send_stat_.ack_sum_ += 1;
+    } else if (((u8)(GtpPackType::kGtpNackPackType)) == pack->pack_type_) {
+        session->pb_dt_.send_stat_.nack_sum_ += 1;
+    }
     session->pb_dt_.send_stat_.net_pack_sum_    += 1;
     session->pb_dt_.send_stat_.net_bitrate_sum_ += pack_size;
 
-    session->last_feedback_nack_ts_us_ = real_ts_us;
+    session->last_feedback_nack_ts_us_    = now_ts_us;
 
     return;
 }
@@ -962,12 +953,8 @@ GtpSession::GtpSession(const goodtp_sock &sfd, const u8 dst_sock_addr[], const u
     net_quality_((u8)(NetQuality::kNetQualityGood)),
     rpt_snd_qualit_(GTP_NO),
     session_health_((u8)(SessionHealthState::kHealthNoraml)),
-    net_bad_pending_cnt_(0),
-    nack_burst_detected_(0),
-    new_gap_detected_(0),
     cur_cache_loss_idx_(0),
     test_rtt_period_us_(TEST_RTT_PERIOD_US),
-    recv_max_data_sn_(0),
     loss_sum_(0),
     self_session_ttl_us_((u32)ttl),
     self_bin_port_(0),
@@ -989,7 +976,16 @@ GtpSession::GtpSession(const goodtp_sock &sfd, const u8 dst_sock_addr[], const u
     fec2_obj_(GtpSendPackCallBack, cb.write_log_cb_, pack_mem_pool,
               (pFec2RestroreReceive)(GtpSession::Fec2RestoreFrameReceive), fec_code_book),
     arq_node_mem_pool_(arq_node_mem_pool),
-    pack_mem_pool_(pack_mem_pool) {
+    pack_mem_pool_(pack_mem_pool),
+    realtime_reorder_last_arrival_ts_us_(0),
+    realtime_reorder_next_sn_(0),
+    realtime_reorder_last_arrival_sn_(0),
+    realtime_reorder_avg_interval_us_(0),
+    realtime_reorder_buffered_num_(0),
+    realtime_reorder_late_drop_num_(0),
+    realtime_reorder_timeout_skip_num_(0),
+    realtime_reorder_direct_num_(0),
+    realtime_reorder_inited_(GTP_NO) {
     win_mem_s_  = ((u8*)this) + sizeof(GtpSession);
     win_mem_r_  = win_mem_s_ + SlidwinInstanceSize();
     filter_mem_ = win_mem_r_ + SlidwinInstanceSize();
@@ -999,6 +995,7 @@ GtpSession::GtpSession(const goodtp_sock &sfd, const u8 dst_sock_addr[], const u
     pb_dt_.tran_addr_.sock_addr_len_ = dst_sock_addr_size;
     pb_dt_.tran_addr_.self_addr_len_ = slf_sock_addr_size;
     pb_dt_.tran_addr_.stream_type_   = stream_type;
+    pb_dt_.tran_addr_.smooth_jitter_ = smooth_jiter;
 
     memcpy(pb_dt_.tran_addr_.sock_addr_, dst_sock_addr, dst_sock_addr_size);
     memcpy(pb_dt_.tran_addr_.self_addr_, slf_sock_addr, slf_sock_addr_size);
@@ -1006,10 +1003,6 @@ GtpSession::GtpSession(const goodtp_sock &sfd, const u8 dst_sock_addr[], const u
     memset(self_bin_ip_, 0x00, GTP_MAX_BIN_IP_SZ);
     memset(peer_bin_ip_, 0x00, GTP_MAX_BIN_IP_SZ);
     memset(cache_loss_, 0x00, sizeof(cache_loss_));
-    memset(reorder_buf_, 0x00, sizeof(reorder_buf_));
-    reorder_inited_       = 0;
-    reorder_next_sn_      = 0;
-    reorder_gap_since_us_ = 0;
 
     send_session_stat_ = (u8)(GtpSessStat::kInitReq);
     recv_session_stat_ = (u8)(GtpSessStat::kInitRes);
@@ -1047,12 +1040,8 @@ GtpSession::GtpSession(GtpAddr *tran_addr, const GtpHandler &gtp_hdl, GtpMemPool
     net_quality_((u8)(NetQuality::kNetQualityGood)),
     rpt_snd_qualit_(GTP_NO),
     session_health_((u8)(SessionHealthState::kHealthNoraml)),
-    net_bad_pending_cnt_(0),
-    nack_burst_detected_(0),
-    new_gap_detected_(0),
     cur_cache_loss_idx_(0),
     test_rtt_period_us_(TEST_RTT_PERIOD_US),
-    recv_max_data_sn_(0),
     loss_sum_(0),
     self_session_ttl_us_((u32)ttl),
     self_bin_port_(0),
@@ -1074,7 +1063,16 @@ GtpSession::GtpSession(GtpAddr *tran_addr, const GtpHandler &gtp_hdl, GtpMemPool
     fec2_obj_(GtpSendPackCallBack, cb.write_log_cb_, pack_mem_pool,
               (pFec2RestroreReceive)(GtpSession::Fec2RestoreFrameReceive), fec_code_book),
     arq_node_mem_pool_(arq_node_mem_pool),
-    pack_mem_pool_(pack_mem_pool) {
+    pack_mem_pool_(pack_mem_pool),
+    realtime_reorder_last_arrival_ts_us_(0),
+    realtime_reorder_next_sn_(0),
+    realtime_reorder_last_arrival_sn_(0),
+    realtime_reorder_avg_interval_us_(0),
+    realtime_reorder_buffered_num_(0),
+    realtime_reorder_late_drop_num_(0),
+    realtime_reorder_timeout_skip_num_(0),
+    realtime_reorder_direct_num_(0),
+    realtime_reorder_inited_(GTP_NO) {
     win_mem_s_  = ((u8*)this) + sizeof(GtpSession);
     win_mem_r_  = win_mem_s_ + SlidwinInstanceSize();
     filter_mem_ = win_mem_r_ + SlidwinInstanceSize();
@@ -1082,22 +1080,17 @@ GtpSession::GtpSession(GtpAddr *tran_addr, const GtpHandler &gtp_hdl, GtpMemPool
     memcpy(&(pb_dt_.tran_addr_), tran_addr, sizeof(GtpAddr));
 
     pb_dt_.tran_addr_.stream_type_   = 0;
+    pb_dt_.tran_addr_.smooth_jitter_ = 0;
 
     memset(self_bin_ip_, 0x00, GTP_MAX_BIN_IP_SZ);
     memset(peer_bin_ip_, 0x00, GTP_MAX_BIN_IP_SZ);
     memset(cache_loss_, 0x00, sizeof(cache_loss_));
-    memset(reorder_buf_, 0x00, sizeof(reorder_buf_));
-    reorder_inited_       = 0;
-    reorder_next_sn_      = 0;
-    reorder_gap_since_us_ = 0;
 
     send_session_stat_ = (u8)(GtpSessStat::kInitReq);
     recv_session_stat_ = (u8)(GtpSessStat::kInitRes);
 }
 
 GtpSession::~GtpSession() {
-    ReorderClear();
-
     if (NULL != data_win_s_) {
         DeleteSlidWin(data_win_s_);
         data_win_s_ = NULL;
@@ -1136,6 +1129,12 @@ void* GtpSession::operator new(size_t n, void *psp_mem) {
     return session_mem;
 }
 
+void GtpSession::operator delete(void *psp_mem, void *placement_mem) {
+    if (NULL != psp_mem) {
+        GtpSession::operator delete(psp_mem);
+    }
+}
+
 void GtpSession::operator delete(void *psp_mem) {
     u8 *save_mem_pool_ptr = ((u8*)psp_mem) - sizeof(void*);
 
@@ -1150,11 +1149,6 @@ void GtpSession::operator delete(void *psp_mem) {
     mem_pool->FreeItem(save_mem_pool_ptr);
 
     return;
-}
-
-void GtpSession::operator delete(void *psp_mem, void *psp_mem_for_new) {
-    (void)psp_mem_for_new;
-    GtpSession::operator delete(psp_mem);
 }
 
 u32 GtpSession::Init(const u64 &ts_us, u8 *win_cache, const u32 &pack_sn, const u32 &next_out_sn) {
@@ -1308,6 +1302,7 @@ u32 GtpSession::PackRetransmit(void *session, ArqNode *arq_node, GtpAddr *tran_a
     if (GTP_OK != nret) {
         GtpLog(cur_session->cb_.write_log_cb_, kGtpSessionMd, kGtpLogLevelError,
                "calling send_pack_cb_() failed(0x%08x)\r\n", nret);
+        return nret;
     }
 
 #if (1 == ENABLE_TRAN_MEM_CHECK)
@@ -1331,7 +1326,7 @@ u32 GtpSession::Fec2RestoreFrameReceive(void *session, GtpHandler gtp_hdl, GtpPa
     u32 first_sn  = 0;
     u32 ret_value = GTP_OK;
 
-    ret_value = GtpCheckPacketInvalid(pack, (u32)(pack->pack_size_), NULL);
+    ret_value = GtpCheckPacketInvalid(pack, (u32)(pack->pack_size_));
     if (GTP_OK != ret_value) {
         GtpLog(s_obj->cb_.write_log_cb_, kGtpSessionMd, kGtpLogLevelError, "%s:%u---->%s:%u fec2 restore an invalid "\
                "packet(ver=0x%02x offset=%u loss_flag=%u check_flag=%u ts_flag=%u rtt_flag=%u repeat_num=%u "\
@@ -1350,7 +1345,7 @@ u32 GtpSession::Fec2RestoreFrameReceive(void *session, GtpHandler gtp_hdl, GtpPa
 
     (*fec_res_sucess_stat) += 1;
 
-    if ((kReliableStream > s_obj->pb_dt_.tran_addr_.stream_type_) || (0x02 > pack->goodtp_ver_)
+    if ((kRealTimeStream == s_obj->pb_dt_.tran_addr_.stream_type_) || (0x02 > pack->goodtp_ver_)
      || (GTP_NO == pack->has_chg_zone_)) {
         if (0 == pack->repeat_counter_) {
             first_sn = pack->pack_sn_;
@@ -1384,207 +1379,74 @@ u32 GtpSession::Fec2RestoreFrameReceive(void *session, GtpHandler gtp_hdl, GtpPa
                ret_value, first_sn);
     }
 
+    ret_value = SnEntrySlidWin(s_obj->data_win_r_, pack->pack_sn_, s_obj->last_active_ts_us_);
+    if (GTP_OK != ret_value) {
+        GtpLog(s_obj->cb_.write_log_cb_, kGtpSessionMd, kGtpLogLevelError,
+               "%s:%u---->%s:%u Call SnEntrySlidWin(data_win_r_) failed(0x%08x) pack_sn=%u first_sn=%u.\r\n",
+               s_obj->pb_dt_.peer_ip_, (u32)(s_obj->pb_dt_.peer_port_),
+               s_obj->pb_dt_.self_ip_, (u32)(s_obj->pb_dt_.self_port_),
+               ret_value, pack->pack_sn_, first_sn);
+    }
+
     u8 *frame = (u8*)pack;
     u32 size  = (u32)(pack->pack_size_);
 
     frame += pack->header_offset_;
     size  -= pack->header_offset_;
 
-    // Route through per-session reorder buffer so the application always receives packets in SN order.
-    // ReorderEnqueue delivers immediately if in-order, or buffers until the gap is filled or times out.
-    s_obj->ReorderEnqueue(pack->pack_sn_, frame, size, tran_addr, s_obj->last_active_ts_us_);
+    #if (1 == ENABLE_FRAME_COPY_OUT)
+    u32 mem_spec = kMemSpec1Dot5k;
 
-    // Register the FEC-recovered SN in data_win_r_ so the next ACK bitmap includes it.
-    // Without this, data_win_r_ has no record of the recovered packet, the ACK omits the SN,
-    // and the sender's ARQ waits for RTO then retransmits a packet already delivered to the app.
-    u32 win_ret = SnEntrySlidWin(s_obj->data_win_r_, pack->pack_sn_, s_obj->last_active_ts_us_);
-    if (GTP_OK != win_ret) {
-        GtpLog(s_obj->cb_.write_log_cb_, kGtpSessionMd, kGtpLogLevelWarning,
-               "%s:%u<-->%s:%u fec restore: SnEntrySlidWin(data_win_r_) failed(0x%08x) pack_sn=%u.\r\n",
+    /* the pack's memory has been cached to fec receiving buffer,
+       so needing a new memory for handing in frame. */
+    u8 *out_mem = NULL;
+    GtpAddr *out_addr = NULL;
+    
+    mem_spec = GtpPackSizeToMemSpec(size);
+    out_mem  = s_obj->pack_mem_pool_.MallocTranBuf(NULL, 0, &ret_value, (void**)(&out_addr), (BufSizeType)mem_spec);
+    if (NULL == out_mem) {
+        const string &err_info = s_obj->pack_mem_pool_.Error();
+        GtpLog(s_obj->cb_.write_log_cb_, kGtpSessionMd, kGtpLogLevelError, "Call MallocTranBuf() failed(%s).\r\n",
+               err_info.c_str());
+
+        const string &stat_info = s_obj->pack_mem_pool_.TranMemPoolStatInfo();
+        GtpLog(s_obj->cb_.write_log_cb_, kGtpArqMd, kGtpLogLevelWarning, "%s\r\n", stat_info.c_str());
+
+        return GTP_OK;
+    }
+
+    memcpy(out_mem, frame, size);
+    memcpy(out_addr, tran_addr, sizeof(GtpAddr));
+
+    frame     = out_mem;
+    tran_addr = out_addr;
+    #endif
+
+    ret_value = s_obj->DeliverFrameInOrder(GtpHdlIntToPointer(gtp_hdl), first_sn, frame, size, tran_addr);
+
+    #if (1 == ENABLE_FRAME_COPY_OUT)
+    s_obj->pack_mem_pool_.FreeTranBuf(out_mem);
+    out_mem = NULL;
+    #endif
+
+    if (GTP_OK != ret_value) {
+        GtpLog(s_obj->cb_.write_log_cb_, kGtpSessionMd, kGtpLogLevelError,
+               "%s:%u<-->%s:%u hand on fec restore frame failed(0x%08x) when calling receive_frame_cb().\r\n",
                s_obj->pb_dt_.self_ip_, (u32)(s_obj->pb_dt_.self_port_),
-               s_obj->pb_dt_.peer_ip_, (u32)(s_obj->pb_dt_.peer_port_),
-               win_ret, pack->pack_sn_);
+               s_obj->pb_dt_.peer_ip_, (u32)(s_obj->pb_dt_.peer_port_), ret_value);
     }
 
-    return GTP_OK;
-}
-
-void GtpSession::ReorderClear() {
-    for (u32 i = 0; i < REORDER_BUF_SIZE; i++) {
-        if (NULL != reorder_buf_[i].frame) {
-            pack_mem_pool_.FreeTranBuf(reorder_buf_[i].frame);
-            reorder_buf_[i].frame = NULL;
-        }
-        reorder_buf_[i].placeholder_ = 0;
-    }
-    reorder_inited_       = 0;
-    reorder_next_sn_      = 0;
-    reorder_gap_since_us_ = 0;
-}
-
-void GtpSession::ReorderFlush(u64 ts_us) {
-    while (true) {
-        u32 idx = reorder_next_sn_ % REORDER_BUF_SIZE;
-        ReorderSlot &slot = reorder_buf_[idx];
-        if (NULL == slot.frame && 0 == slot.placeholder_) break;
-        if (NULL != slot.frame) {
-            cb_.receive_frame_cb_(app_gtp_hdl_, slot.frame, slot.frame_size, &slot.tran_addr);
-            pack_mem_pool_.FreeTranBuf(slot.frame);
-            slot.frame = NULL;
-        }
-        slot.placeholder_ = 0;
-        reorder_next_sn_++;
-    }
-
-    bool found = false;
-    for (u32 i = 0; i < REORDER_BUF_SIZE && !found; i++) {
-        if (NULL != reorder_buf_[i].frame || 0 != reorder_buf_[i].placeholder_) found = true;
-    }
-    if (!found) {
-        reorder_gap_since_us_ = 0;
-    } else if (0 == reorder_gap_since_us_) {
-        // A new gap remains after flush (e.g. second missing SN); restart timer.
-        reorder_gap_since_us_ = ts_us;
-    }
-}
-
-void GtpSession::ReorderEnqueue(u32 sn, u8 *frame, u32 frame_size,
-                                 const GtpAddr *tran_addr, u64 ts_us,
-                                 u32 first_sn_hint) {
-    if (0 == reorder_inited_) {
-        reorder_next_sn_ = sn;
-        reorder_inited_  = 1;
-    }
-
-    i32 delta = (i32)(sn - reorder_next_sn_);
-
-    if (delta < 0) {
-        return;  // duplicate or late retransmit already passed
-    }
-
-    if (NULL == frame) {
-        // Non-data SN (FEC packet, ACK, RTT probe): advance past it if in-order,
-        // or mark as placeholder so ReorderFlush can skip it.
-        if (0 == delta) {
-            reorder_next_sn_++;
-            reorder_gap_since_us_ = 0;
-            ReorderFlush(ts_us);
-        } else if ((u32)delta < REORDER_BUF_SIZE) {
-            u32 idx = sn % REORDER_BUF_SIZE;
-            // Don't overwrite a slot that already holds real recovered data (e.g. from FEC).
-            // If the slot is empty, mark it as a placeholder so ReorderFlush can advance past it.
-            if (NULL == reorder_buf_[idx].frame) {
-                reorder_buf_[idx].placeholder_ = 1;
-                if (0 == reorder_gap_since_us_) {
-                    reorder_gap_since_us_ = ts_us;
-                }
-            }
-        }
-        return;
-    }
-
-    if (0 == delta) {
-        // In-order data: deliver directly
-        cb_.receive_frame_cb_(app_gtp_hdl_, frame, frame_size, (GtpAddr*)tran_addr);
-        reorder_next_sn_++;
-        reorder_gap_since_us_ = 0;
-        ReorderFlush(ts_us);
-        return;
-    }
-
-    // Out-of-order data: gap exists (delta > 0)
-    if ((u32)delta >= REORDER_BUF_SIZE) {
-        // ARQ retransmit fallback: if the caller supplied a first_sn_hint (logical SN) that
-        // differs from sn (retransmit's new pack_sn_), land at the logical position instead
-        // of flushing the entire window and skipping all buffered packets in between.
-        if (UINT32_MAX != first_sn_hint && first_sn_hint != sn) {
-            sn    = first_sn_hint;
-            delta = (i32)(sn - reorder_next_sn_);
-            if (delta < 0) {
-                return;  // logical SN already delivered; discard
-            }
-            // Re-enter the normal buffering path with the corrected SN.
-            // Fall through to the small-delta or delta==0 handling below.
-            if (0 == delta) {
-                cb_.receive_frame_cb_(app_gtp_hdl_, frame, frame_size, (GtpAddr*)tran_addr);
-                reorder_next_sn_++;
-                reorder_gap_since_us_ = 0;
-                ReorderFlush(ts_us);
-                return;
-            }
-            if ((u32)delta < REORDER_BUF_SIZE) {
-                goto reorder_buffer_slot_;  // buffer at first_sn_hint's slot
-            }
-            // first_sn_hint is also a large gap — fall through to flush
-        }
-        // Gap too large: flush the buffered window first (preserves in-order delivery
-        // for packets already buffered), then skip the large gap.
-        for (u32 i = 0; i < REORDER_BUF_SIZE; i++) {
-            u32 flush_sn = reorder_next_sn_ + i;
-            u32 fidx     = flush_sn % REORDER_BUF_SIZE;
-            if (NULL != reorder_buf_[fidx].frame) {
-                cb_.receive_frame_cb_(app_gtp_hdl_, reorder_buf_[fidx].frame,
-                                      reorder_buf_[fidx].frame_size, &reorder_buf_[fidx].tran_addr);
-                pack_mem_pool_.FreeTranBuf(reorder_buf_[fidx].frame);
-                reorder_buf_[fidx].frame = NULL;
-            }
-            reorder_buf_[fidx].placeholder_ = 0;
-        }
-        reorder_next_sn_      = sn;
-        reorder_gap_since_us_ = 0;
-        cb_.receive_frame_cb_(app_gtp_hdl_, frame, frame_size, (GtpAddr*)tran_addr);
-        reorder_next_sn_++;
-        return;
-    }
-
-reorder_buffer_slot_:
-
-    u32 idx = sn % REORDER_BUF_SIZE;
-    if (NULL != reorder_buf_[idx].frame) {
-        pack_mem_pool_.FreeTranBuf(reorder_buf_[idx].frame);
-        reorder_buf_[idx].frame = NULL;
-    }
-
-    u32 copy_size = 0;
-    void *dummy_addr = NULL;
-    u32 mem_spec = GtpPackSizeToMemSpec(frame_size);
-    u8 *copy = pack_mem_pool_.MallocTranBuf(NULL, 0, &copy_size, &dummy_addr, (BufSizeType)mem_spec);
-    if (NULL == copy) {
-        // OOM: deliver directly to avoid stalling
-        cb_.receive_frame_cb_(app_gtp_hdl_, frame, frame_size, (GtpAddr*)tran_addr);
-        return;
-    }
-
-    memcpy(copy, frame, frame_size);
-    reorder_buf_[idx].frame        = copy;
-    reorder_buf_[idx].frame_size   = frame_size;
-    reorder_buf_[idx].arrive_ts_us = ts_us;
-    memcpy(&reorder_buf_[idx].tran_addr, tran_addr, sizeof(GtpAddr));
-
-    if (0 == reorder_gap_since_us_) {
-        reorder_gap_since_us_ = ts_us;
-    }
+    return ret_value;
 }
 
 u32 GtpSession::FramePrepHandler(void *frame, const u32 &frame_size, GtpPacket **out_pack, u32 *out_pack_size,
                          const u32 &hash, const u32 &user_id, const u32 &first_pack_sn, const u32 &resend_num) {
-    u32 real_hash    = hash;
-    u32 real_user_id = user_id;
-
-    // when the session is identified by stream_key_, embed it into the existing hash_/user_id_ optional
-    // field(carried under has_check_flag_) instead of the caller-supplied token/token_id, so the peer can
-    // recover stream_key_ from the raw packet without a session lookup(see GtpCheckPacketInvalid()).
-    if (GTP_YES == pb_dt_.tran_addr_.enable_key_) {
-        real_hash    = (u32)(pb_dt_.tran_addr_.stream_key_ >> 32);
-        real_user_id = (u32)(pb_dt_.tran_addr_.stream_key_ & 0x00000000FFFFFFFFULL);
-    }
-
     if ((0xFF == pb_dt_.peer_version_) || (GTP_VERSION == pb_dt_.peer_version_)) {
-        return FramePrepHandlerWithSelfVer(frame, frame_size, out_pack, out_pack_size, real_hash, real_user_id,
+        return FramePrepHandlerWithSelfVer(frame, frame_size, out_pack, out_pack_size, hash, user_id,
                                            first_pack_sn, resend_num);
     }
 
-    return FramePrepHandlerWithPeerVer(frame, frame_size, out_pack, out_pack_size, real_hash, real_user_id,
+    return FramePrepHandlerWithPeerVer(frame, frame_size, out_pack, out_pack_size, hash, user_id,
                                        first_pack_sn, resend_num);
 }
 
@@ -1612,7 +1474,7 @@ u32 GtpSession::CalcHeaderSize(const u32 &hash, const u32 &user_id, const u32 &r
         hdr_size += sizeof(u32);
     }
 
-    if ((kReliableStream <= pb_dt_.tran_addr_.stream_type_) && (0 == resend_num)) {
+    if ((kReliableStream == pb_dt_.tran_addr_.stream_type_) && (0 == resend_num)) {
         hdr_size += sizeof(ChangeZone);
     }
 
@@ -1676,7 +1538,7 @@ u32 GtpSession::FramePrepHandlerWithSelfVer(void *frame, const u32 &frame_size, 
     hdr_size = 0;
     move_pos = (u8*)frame;
 
-    if ((kReliableStream <= pb_dt_.tran_addr_.stream_type_) && (0 == resend_num)) {
+    if ((kReliableStream == pb_dt_.tran_addr_.stream_type_) && (0 == resend_num)) {
         has_chg   = GTP_YES;
         hdr_size += sizeof(ChangeZone);
         move_pos -= sizeof(ChangeZone);
@@ -1763,6 +1625,15 @@ u32 GtpSession::FramePrepHandlerWithSelfVer(void *frame, const u32 &frame_size, 
                "header_offset=%u peer_version=0x%02x resend_num=%u frame_size=%u pack_size=%u.\r\n",
                pb_dt_.self_ip_, (u32)(pb_dt_.self_port_), pb_dt_.peer_ip_, (u32)(pb_dt_.peer_port_),
                hdr_size, (u32)(pb_dt_.peer_version_), resend_num, frame_size, *out_pack_size);
+        RETURN_ERR(kGtpSessionMd, kGtpPackLengthErr);
+    }
+
+    if (0x1FFF < (hdr_size + frame_size)) {
+        GtpLog(cb_.write_log_cb_, kGtpSessionMd, kGtpLogLevelError, "%s:%u<-->%s:%u packet is too long("\
+               "header_offset=%u peer_version=0x%02x resend_num=%u frame_size=%u pack_size=%u).\r\n",
+               pb_dt_.self_ip_, (u32)(pb_dt_.self_port_), pb_dt_.peer_ip_, (u32)(pb_dt_.peer_port_),
+               hdr_size, (u32)(pb_dt_.peer_version_), resend_num, frame_size, hdr_size + frame_size);
+        RETURN_ERR(kGtpSessionMd, kGtpPackLengthErr);
     }
 
     GtpPacket *pack = (GtpPacket*)move_pos;
@@ -1782,7 +1653,7 @@ u32 GtpSession::FramePrepHandlerWithSelfVer(void *frame, const u32 &frame_size, 
     pack->is_qos_flg_     = GTP_YES;
     pack->share_zone_     = pb_dt_.tran_addr_.qos_;
     pack->has_chg_zone_   = (u8)has_chg;
-    pack->stream_type_    = (kReliableStream <= pb_dt_.tran_addr_.stream_type_) ? 1 : 0;
+    pack->stream_type_    = pb_dt_.tran_addr_.stream_type_;
 
     pack_sn_ += 1;
 
@@ -1889,6 +1760,15 @@ u32 GtpSession::FramePrepHandlerWith01(void *frame, const u32 &frame_size, GtpPa
                "header_offset=%u peer_version=0x%02x resend_num=%u frame_size=%u pack_size=%u.\r\n",
                pb_dt_.self_ip_, (u32)(pb_dt_.self_port_), pb_dt_.peer_ip_, (u32)(pb_dt_.peer_port_),
                hdr_size, (u32)(pb_dt_.peer_version_), resend_num, frame_size, *out_pack_size);
+        RETURN_ERR(kGtpSessionMd, kGtpPackLengthErr);
+    }
+
+    if (0x0FFF < (hdr_size + frame_size)) {
+        GtpLog(cb_.write_log_cb_, kGtpSessionMd, kGtpLogLevelError, "%s:%u<-->%s:%u packet is too long("\
+               "header_offset=%u peer_version=0x%02x resend_num=%u frame_size=%u pack_size=%u).\r\n",
+               pb_dt_.self_ip_, (u32)(pb_dt_.self_port_), pb_dt_.peer_ip_, (u32)(pb_dt_.peer_port_),
+               hdr_size, (u32)(pb_dt_.peer_version_), resend_num, frame_size, hdr_size + frame_size);
+        RETURN_ERR(kGtpSessionMd, kGtpPackLengthErr);
     }
 
     GtpPacket *pack = (GtpPacket*)move_pos;
@@ -1908,7 +1788,7 @@ u32 GtpSession::FramePrepHandlerWith01(void *frame, const u32 &frame_size, GtpPa
     pack->is_qos_flg_      = GTP_YES;
     pack->share_zone_      = pb_dt_.tran_addr_.qos_;
     pack->has_chg_zone_    = GTP_NO;
-    pack->stream_type_     = 0;
+    pack->stream_type_     = kRealTimeStream;
 
     pack_sn_ += 1;
 
@@ -1960,6 +1840,7 @@ u32 GtpSession::FramePostHandler(GtpAddr *tran_addr, GtpPacket *pack, const u32 
     #if (1 == ENABLE_FEC)
     // step1: FEC encode.
     if ((0x00 != pb_dt_.peer_version_) && (GTP_ON == pb_dt_.alg_top_switch_)
+     && (0 == ((u8)(pack->repeat_counter_)))
      && ((u8)STREAM_QOS_WITH_FEC == GetStreamQos(kSenderQuality))) {
         run_result = fec2_obj_.Encode(pack, last_active_ts_us_);
         if (GTP_OK != run_result) {
@@ -2069,7 +1950,7 @@ update_last_sn_pos_:
 
             last_recv_data_pack_ts_us_ = last_active_ts_us_;
 
-            if ((kReliableStream > pb_dt_.tran_addr_.stream_type_) || (0x02 > pack->goodtp_ver_)
+            if ((kRealTimeStream == pb_dt_.tran_addr_.stream_type_) || (0x02 > pack->goodtp_ver_)
              || (GTP_NO == pack->has_chg_zone_)) {
                 if (0x00 == pack->goodtp_ver_) {
                     first_sn = *((u32*)(((u8*)pack) + pack->header_offset_));
@@ -2279,16 +2160,6 @@ u32 GtpSession::PackPostHandler(GtpPacket *pack, const u32 &size, GtpAddr *tran_
                 #endif
             }
 
-            // Method B: detect first new gap → start 2-shot NACK countdown (4ms apart)
-            if (recv_max_data_sn_ != 0) {
-                if ((i32)(pack->pack_sn_ - recv_max_data_sn_) > 1) {
-                    new_gap_detected_ = 2;
-                }
-            }
-            if (recv_max_data_sn_ == 0 || (i32)(pack->pack_sn_ - recv_max_data_sn_) > 0) {
-                recv_max_data_sn_ = pack->pack_sn_;
-            }
-
             break;
         }
 
@@ -2336,10 +2207,9 @@ u32 GtpSession::PackPostHandler(GtpPacket *pack, const u32 &size, GtpAddr *tran_
 
             run_result = ProcAckSnBitMap(chg_len_zone, ack_load->sn_size_, ack_load->head_sn_, tail_sn, rto_sn);
             #if (1 == ENABLE_ARQ)
-            arq_.ProcAck(chg_len_zone, ack_load->sn_size_, ack_load->head_sn_, tail_sn, rto_sn);
+            arq_.ProcAck(chg_len_zone, ack_load->sn_size_, ack_load->head_sn_, tail_sn, rto_sn,
+                         ack_load->recv_loss_);
             #endif
-
-            pack_mem_pool_.FreeTranBuf((u8*)pack);
 
             break;
         }
@@ -2357,8 +2227,6 @@ u32 GtpSession::PackPostHandler(GtpPacket *pack, const u32 &size, GtpAddr *tran_
                 }
             }
             #endif
-
-            pack_mem_pool_.FreeTranBuf((u8*)pack);
 
             break;
         }
@@ -2400,8 +2268,6 @@ u32 GtpSession::PackPostHandler(GtpPacket *pack, const u32 &size, GtpAddr *tran_
                        (unsigned long long)recv_idle_calc_loss_ts_us, (unsigned long long)recv_idle_calc_period_us_);
                 #endif
             }
-
-            pack_mem_pool_.FreeTranBuf((u8*)pack);
 
             break;
         }
@@ -2447,13 +2313,11 @@ u32 GtpSession::PackPostHandler(GtpPacket *pack, const u32 &size, GtpAddr *tran_
                 move += sizeof(u64);
             }
 
-            pack_mem_pool_.FreeTranBuf((u8*)pack);
-
             break;
         }
 
         case ((u8)(GtpPackType::kGtpNackPackType)): {
-            pb_dt_.recv_stat_.ack_sum_ += 1;  // TODO(Albert.feng) :: nack
+            pb_dt_.recv_stat_.nack_sum_ += 1;
 
             GtpNackPacketLoad *nack_load = (GtpNackPacketLoad*)(((u8*)pack) + pack->header_offset_);
 
@@ -2522,8 +2386,6 @@ u32 GtpSession::PackPostHandler(GtpPacket *pack, const u32 &size, GtpAddr *tran_
                           nack_data->rto_sn_);
             #endif
 
-            pack_mem_pool_.FreeTranBuf((u8*)pack);
-
             break;
         }
 
@@ -2533,7 +2395,6 @@ u32 GtpSession::PackPostHandler(GtpPacket *pack, const u32 &size, GtpAddr *tran_
                    pb_dt_.self_ip_, (u32)(pb_dt_.self_port_), (u32)(pack->pack_type_));
             return_code = GEN_ERR(kGtpMgrMd, kUnknownPackTypeErr);
 
-            pack_mem_pool_.FreeTranBuf((u8*)pack);
             break;
         }
     }
@@ -2541,8 +2402,236 @@ u32 GtpSession::PackPostHandler(GtpPacket *pack, const u32 &size, GtpAddr *tran_
     return return_code;
 }
 
+bool GtpSession::RealtimeSnBefore(const u32 &left, const u32 &right) const {
+    return (left != right) && (((u32)(right - left)) < 0x80000000U);
+}
+
+u32 GtpSession::RealtimeSnDistance(const u32 &from, const u32 &to) const {
+    return to - from;
+}
+
+u32 GtpSession::CalcRealtimeReorderWaitUs() const {
+    u32 wait_us = realtime_reorder_avg_interval_us_;
+    if (0 == wait_us) {
+        wait_us = 8000;
+    }
+
+    wait_us += (wait_us >> 1);
+
+    if (restore_factor1_tm_span_us_ > wait_us) {
+        wait_us = restore_factor1_tm_span_us_;
+    }
+
+    const u32 pps = pb_dt_.recv_stat_.data_pack_pps_ > pb_dt_.send_stat_.data_pack_pps_
+                  ? pb_dt_.recv_stat_.data_pack_pps_
+                  : pb_dt_.send_stat_.data_pack_pps_;
+    const f32 loss = pb_dt_.max_send_loss_per_s_;
+    u32 max_wait_us = 80000;
+
+    if ((4.000001 <= loss) || (180 <= pps)) {
+        max_wait_us = 100000;
+    }
+    if ((8.000001 <= loss) || (260 <= pps)) {
+        max_wait_us = 120000;
+    }
+    if (12.000001 <= loss) {
+        max_wait_us = 150000;
+    }
+    if ((15.000001 <= loss) && (180 <= pps)) {
+        max_wait_us = 160000;
+    }
+
+    const u32 reorder_total = realtime_reorder_direct_num_ + realtime_reorder_buffered_num_;
+    if ((128 <= reorder_total) && ((realtime_reorder_timeout_skip_num_ * 100U) >= reorder_total)) {
+        max_wait_us += 20000;
+        if (180000 < max_wait_us) {
+            max_wait_us = 180000;
+        }
+    }
+
+    if (3000 > wait_us) {
+        return 3000;
+    }
+
+    if (max_wait_us < wait_us) {
+        return max_wait_us;
+    }
+
+    return wait_us;
+}
+
+u32 GtpSession::CalcRealtimeReorderMaxCacheNum() const {
+    const u32 pps = pb_dt_.recv_stat_.data_pack_pps_ > pb_dt_.send_stat_.data_pack_pps_
+                  ? pb_dt_.recv_stat_.data_pack_pps_
+                  : pb_dt_.send_stat_.data_pack_pps_;
+    const f32 loss = pb_dt_.max_send_loss_per_s_;
+    const u32 reorder_total = realtime_reorder_direct_num_ + realtime_reorder_buffered_num_;
+
+    u32 max_cache_num = 32;
+    if ((4.000001 <= loss) || (180 <= pps)) {
+        max_cache_num = 48;
+    }
+    if ((8.000001 <= loss) || (260 <= pps)) {
+        max_cache_num = 64;
+    }
+    if ((128 <= reorder_total) && ((realtime_reorder_timeout_skip_num_ * 100U) >= reorder_total)) {
+        max_cache_num = 64;
+    }
+
+    return max_cache_num;
+}
+
+void GtpSession::UpdateRealtimeReorderInterval(const u32 &first_sn, const u64 &ts_us) {
+    if (0 == realtime_reorder_last_arrival_ts_us_) {
+        realtime_reorder_last_arrival_ts_us_ = ts_us;
+        realtime_reorder_last_arrival_sn_    = first_sn;
+        return;
+    }
+
+    u32 sn_delta = RealtimeSnDistance(realtime_reorder_last_arrival_sn_, first_sn);
+    if ((0 == sn_delta) || (64 < sn_delta) || RealtimeSnBefore(first_sn, realtime_reorder_last_arrival_sn_)) {
+        realtime_reorder_last_arrival_ts_us_ = ts_us;
+        realtime_reorder_last_arrival_sn_    = first_sn;
+        return;
+    }
+
+    u64 ts_delta = ts_us >= realtime_reorder_last_arrival_ts_us_
+                 ? (ts_us - realtime_reorder_last_arrival_ts_us_)
+                 : (realtime_reorder_last_arrival_ts_us_ - ts_us);
+    u32 interval_us = (u32)(ts_delta / sn_delta);
+    if ((0 != interval_us) && (100000 > interval_us)) {
+        if (0 == realtime_reorder_avg_interval_us_) {
+            realtime_reorder_avg_interval_us_ = interval_us;
+        } else {
+            realtime_reorder_avg_interval_us_ = ((realtime_reorder_avg_interval_us_ * 7) + interval_us) >> 3;
+        }
+    }
+
+    realtime_reorder_last_arrival_ts_us_ = ts_us;
+    realtime_reorder_last_arrival_sn_    = first_sn;
+}
+
+u32 GtpSession::DeliverFrameNow(GtpHandler_p gtp_hdl, const u8 *frame, const u32 &frame_size, GtpAddr *tran_addr) {
+    u32 ret_value = GTP_OK;
+
+    #if (1 == ENABLE_MD_PERF_CHECK)
+    {
+    u64 back_recv_tm = pb_dt_.recv_consume_.ts_us_;
+    u64 bkup_send_tm = pb_dt_.send_consume_.ts_us_;
+    u64 app_consume_us = GtpSysTimestampUs();
+
+    ret_value = cb_.receive_frame_cb_(gtp_hdl, (void*)frame, frame_size, tran_addr);
+    app_consume_us = GtpSysTimestampUs() - app_consume_us;
+    pb_dt_.app_recv_consume_.CacheConsumeTime(app_consume_us);
+
+    pb_dt_.send_consume_.ts_us_ = bkup_send_tm + app_consume_us;
+    pb_dt_.recv_consume_.ts_us_ = back_recv_tm + app_consume_us;
+    }
+    #else
+    ret_value = cb_.receive_frame_cb_(gtp_hdl, (void*)frame, frame_size, tran_addr);
+    #endif
+
+    return ret_value;
+}
+
+u32 GtpSession::FlushRealtimeReorder(const u64 &ts_us, GtpHandler_p gtp_hdl) {
+    u32 ret_value = GTP_OK;
+    const u32 max_cache_num = CalcRealtimeReorderMaxCacheNum();
+
+    while (!realtime_reorder_cache_.empty()) {
+        std::map<u32, RealtimeReorderFrame>::iterator exact = realtime_reorder_cache_.find(realtime_reorder_next_sn_);
+        if (exact != realtime_reorder_cache_.end()) {
+            ret_value = DeliverFrameNow(gtp_hdl, exact->second.frame_.data(),
+                                        (u32)exact->second.frame_.size(), &exact->second.tran_addr_);
+            realtime_reorder_cache_.erase(exact);
+            realtime_reorder_next_sn_ += 1;
+            if (GTP_OK != ret_value) {
+                return ret_value;
+            }
+            continue;
+        }
+
+        std::map<u32, RealtimeReorderFrame>::iterator best = realtime_reorder_cache_.end();
+        u32 best_distance = 0xFFFFFFFFU;
+        for (std::map<u32, RealtimeReorderFrame>::iterator it = realtime_reorder_cache_.begin();
+             it != realtime_reorder_cache_.end(); ++it) {
+            if (RealtimeSnBefore(it->first, realtime_reorder_next_sn_)) {
+                realtime_reorder_late_drop_num_ += 1;
+                realtime_reorder_cache_.erase(it++);
+                if (it == realtime_reorder_cache_.end()) {
+                    break;
+                }
+                --it;
+                continue;
+            }
+
+            u32 distance = RealtimeSnDistance(realtime_reorder_next_sn_, it->first);
+            if (distance < best_distance) {
+                best_distance = distance;
+                best = it;
+            }
+        }
+
+        if (best == realtime_reorder_cache_.end()) {
+            break;
+        }
+
+        u64 age_us = ts_us >= best->second.arrival_ts_us_
+                   ? (ts_us - best->second.arrival_ts_us_)
+                   : (best->second.arrival_ts_us_ - ts_us);
+        if ((realtime_reorder_cache_.size() < max_cache_num) && (age_us < CalcRealtimeReorderWaitUs())) {
+            break;
+        }
+
+        realtime_reorder_timeout_skip_num_ += best_distance;
+        realtime_reorder_next_sn_ = best->first;
+    }
+
+    return ret_value;
+}
+
+u32 GtpSession::DeliverFrameInOrder(GtpHandler_p gtp_hdl, const u32 &first_sn, const u8 *frame,
+                                    const u32 &frame_size, GtpAddr *tran_addr) {
+    if ((kRealTimeStream != pb_dt_.tran_addr_.stream_type_) || (NULL == frame) || (0 == frame_size)) {
+        return DeliverFrameNow(gtp_hdl, frame, frame_size, tran_addr);
+    }
+
+    const u64 ts_us = last_active_ts_us_;
+    UpdateRealtimeReorderInterval(first_sn, ts_us);
+
+    if (GTP_YES != realtime_reorder_inited_) {
+        realtime_reorder_next_sn_ = first_sn;
+        realtime_reorder_inited_  = GTP_YES;
+    }
+
+    if (RealtimeSnBefore(first_sn, realtime_reorder_next_sn_)) {
+        realtime_reorder_late_drop_num_ += 1;
+        return GTP_OK;
+    }
+
+    if (realtime_reorder_cache_.find(first_sn) != realtime_reorder_cache_.end()) {
+        return GTP_OK;
+    }
+
+    RealtimeReorderFrame cached_frame;
+    cached_frame.frame_.assign(frame, frame + frame_size);
+    cached_frame.tran_addr_     = *tran_addr;
+    cached_frame.arrival_ts_us_ = ts_us;
+    realtime_reorder_cache_[first_sn] = cached_frame;
+
+    if (first_sn != realtime_reorder_next_sn_) {
+        realtime_reorder_buffered_num_ += 1;
+    } else {
+        realtime_reorder_direct_num_ += 1;
+    }
+
+    return FlushRealtimeReorder(ts_us, gtp_hdl);
+}
+
 void GtpSession::TimerHandler(const u64 &ts_us, ConsumeTime *wheel_consume) {
     pb_dt_.tran_addr_.timestamp_ = ts_us;
+
+    (void)FlushRealtimeReorder(ts_us, app_gtp_hdl_);
 
     #if (1 == ENABLE_ARQ)
     arq_.CheckRtoRetran(ts_us);
@@ -2586,31 +2675,12 @@ timer_handler_continue_pos_:
         SendSetRecvRttPacket();
     }
 
-    // Method B: 2-shot NACK for gap loss protection (tick N and N+4ms, independent drop probability)
-    if (new_gap_detected_ > 0) {
-        new_gap_detected_--;
-        nret = CalcQualityByHandler(data_win_r_, ts_us, GTP_YES);
-        if (GTP_OK != nret) {
-            GtpLog(cb_.write_log_cb_, kGtpSessionMd, kGtpLogLevelError,
-                   "new_gap CalcQualityByHandler() failed(0x%08x %s).\r\n",
-                   nret, WinErrorInfo(data_win_r_, nret));
-        }
-        if (0xFFFFFFFFFFFFFFFF != recv_idle_calc_loss_ts_us) {
-            recv_idle_calc_loss_ts_us = ts_us;
-        }
-    }
-
     if ((0xFFFFFFFFFFFFFFFF != recv_idle_calc_loss_ts_us)
      && ((recv_idle_calc_loss_ts_us + recv_idle_calc_period_us_) <= ts_us)) {
-        {
-        u32 burst_flag = nack_burst_detected_;
-        nack_burst_detected_ = 0;
-        if ((GTP_NO == burst_flag) &&
-            (MAX_FEEDBACK_NACK_PERIOD_US >= (ts_us - last_feedback_nack_ts_us_))) {
+        if (MAX_FEEDBACK_NACK_PERIOD_US >= (ts_us - last_feedback_nack_ts_us_)) {
             nret = CalcQualityByHandler(data_win_r_, ts_us, GTP_NO);
         } else {
             nret = CalcQualityByHandler(data_win_r_, ts_us, GTP_YES);
-        }
         }
 
         if (GTP_OK != nret) {
@@ -2645,21 +2715,6 @@ timer_handler_continue_pos_:
     #if (1 == ENABLE_FEC)
     fec2_obj_.ClearResource(arq_.r_cur_loss_rate_, ts_us);
     #endif
-
-    // Reorder gap timeout: skip a gap that hasn't been filled within 2×inter-packet interval.
-    if (0 != reorder_gap_since_us_) {
-        u32 pps = pb_dt_.recv_stat_.data_pack_pps_;
-        if (0 == pps) pps = 1;
-        u64 timeout_us = 2000000ULL / (u64)pps;    // 2×inter-packet: fast gap recovery
-        if (timeout_us < 13000)  timeout_us = 13000;   // floor 13ms
-        if (timeout_us > 500000) timeout_us = 500000;  // ceil 500ms
-
-        if ((ts_us - reorder_gap_since_us_) >= timeout_us) {
-            reorder_next_sn_++;
-            reorder_gap_since_us_ = 0;
-            ReorderFlush(ts_us);
-        }
-    }
 
     return;
 }
@@ -2878,10 +2933,9 @@ u32 GtpSession::GetQuality(const GtpNetQualityPosEnU32 &pos, GtpLinkQuality *qua
     quality->peer_ip_       = &(pb_dt_.peer_ip_[0]);
     quality->self_port_     = pb_dt_.self_port_;
     quality->peer_port_     = pb_dt_.peer_port_;
-    quality->bitrage_chg_k_         = 0;
-    quality->context_               = pb_dt_.tran_addr_.context_;
-
-    u32 tmp_congest_rank = 0;
+    quality->bitrage_chg_k_ = 0;
+    quality->rsv_           = 0;
+    quality->context_       = pb_dt_.tran_addr_.context_;
 
     if (kSenderQuality == pos) {
         quality->report_pos_       = kSenderQuality;
@@ -2896,7 +2950,7 @@ u32 GtpSession::GetQuality(const GtpNetQualityPosEnU32 &pos, GtpLinkQuality *qua
         arq_.GetStat(&(quality->total_ack_loss_num_), &(quality->total_rto_loss_num_),
                      &(quality->total_ack_err_num_), &(quality->total_ai_repair_num_));
 
-        nret = ObtainNetworkQuality(data_win_s_, &(quality->loss_), &rrt_us, &jitter_us, &tmp_congest_rank,
+        nret = ObtainNetworkQuality(data_win_s_, &(quality->loss_), &rrt_us, &jitter_us, &(quality->pre_congest_rank_),
                                     &rto_us, &(quality->data_pack_pps_), &(quality->loss_direct_));
 
         quality->data_pack_pps_ = pb_dt_.send_stat_.data_pack_pps_;
@@ -2915,7 +2969,7 @@ u32 GtpSession::GetQuality(const GtpNetQualityPosEnU32 &pos, GtpLinkQuality *qua
         arq_.GetStat(&(quality->total_ack_loss_num_), &(quality->total_rto_loss_num_),
                      &(quality->total_ack_err_num_), &(quality->total_ai_repair_num_));
 
-        nret = ObtainNetworkQuality(data_win_r_, &(quality->loss_), &rrt_us, &jitter_us, &tmp_congest_rank,
+        nret = ObtainNetworkQuality(data_win_r_, &(quality->loss_), &rrt_us, &jitter_us, &(quality->pre_congest_rank_),
                                     &rto_us, &(quality->data_pack_pps_), &(quality->loss_direct_));
 
         quality->data_pack_pps_ = pb_dt_.recv_stat_.data_pack_pps_;
@@ -3034,6 +3088,83 @@ u32 GtpSession::CalcLossStd(const u32 &loss, u32 *out_avg_loss) {
     *out_avg_loss = avg_loss;
 
     return std_sum;
+}
+
+u8 GtpSession::CalcGameFecPolicy(void) const {
+    #if (2 == APPLICATION_TYPE)
+    static const u8 game_fec_policy_table[][10] = {
+        {  2,   2,   2,   2,   2,   2,   2,   2,   2,   2},  // 0%
+        {  2,   2,   2,   2,   2,   2,   2,   2,   2,   2},  // 2%
+        {  2,   2,   2,   2,   2,   2,   2,   2,   2,   2},  // 4%
+        {  2,   2,   2,   2,   2,   2,   2,   2,   2,   2},  // 6%
+        {  2,   2,   2,   2,   2,   2,   2,   2,   2,   2},  // 8%
+        {  2,   2,   2,   2,   2,   2,   2,   2,   2,   2},  // 10%
+        {  5,   5,   5,   5,   5,   5,   2,   2,   2,   2},  // 12%
+        {  4,   4,   5,   5,   5,   5,   2,   2,   2,   2},  // 14%
+        {  5,   4,   4,   4,   4,   4,   2,   2,   2,   2},  // 16%
+        {  4,   4,   4,   4,   4,   4,   2,   2,   2,   2},  // 18%
+        {  4,   4,   4,   3,   3,   3,   2,   2,   2,   2},  // 20%
+        {  0,   4,   4,   3,   3,   3,   2,   2,   2,   5},  // 22%
+        {  3,   3,   3,   3,   3,   3,   3,   4,   2,   4},  // 24%
+        {  0,   3,   3,   0,   0,   3,   4,   4,   4,   0},  // 26%
+        {  3,   3,   0,   0,   0,   3,   0,   0,   4,   4},  // 28%
+        {  0,   0,   0,   0,   0,   0,   0,   4,   4,   4}   // 30%
+    };
+
+    const u32 loss_idx = CalcGameFecTableLossIndex(pb_dt_.max_send_loss_per_s_);
+    const u32 pps_idx  = CalcGameFecTablePpsIndex(pb_dt_.send_stat_.data_pack_pps_);
+
+    return game_fec_policy_table[loss_idx][pps_idx];
+    #else
+    return DEFAULT_FEC2_BOOK_ID;
+    #endif
+}
+
+u8 GtpSession::CalcGameFecBookId(void) const {
+    #if (2 == APPLICATION_TYPE)
+    u8 policy = CalcGameFecPolicy();
+
+    if (0xFF == policy) {
+        return DEFAULT_FEC2_BOOK_ID;
+    }
+
+    return CalcGameFecUpshiftBookId(policy);
+    #else
+    return DEFAULT_FEC2_BOOK_ID;
+    #endif
+}
+
+u8 GtpSession::CalcGameFecUpshiftBookId(const u8 &book_id) const {
+    #if (2 == APPLICATION_TYPE)
+    switch (book_id) {
+        case 2:
+            return 5;  // 4-packet horizontal -> 2-packet horizontal, faster for small reorder windows.
+        case 5:
+            return 4;  // Add 2x2 vertical protection.
+        case 4:
+            return 3;  // Add 2x2 diagonal protection.
+        case 3:
+            return 1;  // Move to 4x4 horizontal+vertical protection.
+        case 1:
+            return 0;  // Add 4x4 diagonal protection.
+        case 0:
+        default:
+            return book_id;
+    }
+    #else
+    return book_id;
+    #endif
+}
+
+u8 GtpSession::CalcGameFecQos(void) const {
+    #if (2 == APPLICATION_TYPE)
+    if (0xFF == CalcGameFecPolicy()) {
+        return TURN_OFF_FEC;
+    }
+    return STREAM_QOS_WITH_FEC;
+    #else
+    return STREAM_QOS_WITH_FEC;
+    #endif
 }
 
 void GtpSession::UpdateSelfIp(const goodtp_sock &sfd) {
@@ -3218,11 +3349,11 @@ u32 GtpSession::PrintHarqParam(u8 *out_str, const u32 &mem_size) {
     PrintAfterHandlerReturn(str_len, wrt_num, free_sz, wrt_pos);
 
     wrt_num = (u32)snprintf((char*)wrt_pos, free_sz, "\r\n    stream_type= %s",
-                            ((kReliableStream > pb_dt_.tran_addr_.stream_type_) ? "Real time" : "reliable"));
+                            ((kRealTimeStream == pb_dt_.tran_addr_.stream_type_) ? "Real time" : "reliable"));
     PrintAfterHandlerReturn(str_len, wrt_num, free_sz, wrt_pos);
 
     wrt_num = (u32)snprintf((char*)wrt_pos, free_sz, "\r\n  smooth_jitter= %s",
-                            ((pb_dt_.tran_addr_.stream_type_ & 1) ? "Yes" : "No"));
+                            ((GTP_NO == pb_dt_.tran_addr_.smooth_jitter_) ? "No" : "Yes"));
     PrintAfterHandlerReturn(str_len, wrt_num, free_sz, wrt_pos);
 
     wrt_num = (u32)snprintf((char*)wrt_pos, free_sz, "\r\n disorder_delta= %u", ai_learn_sn_delta_);
@@ -3235,15 +3366,6 @@ u32 GtpSession::PrintHarqParam(u8 *out_str, const u32 &mem_size) {
     PrintAfterHandlerReturn(str_len, wrt_num, free_sz, wrt_pos);
 
     wrt_num = (u32)snprintf((char*)wrt_pos, free_sz, "\r\n  harq_node_num= %u", arq_.arq_list_.node_num_);
-    PrintAfterHandlerReturn(str_len, wrt_num, free_sz, wrt_pos);
-
-    wrt_num = (u32)snprintf((char*)wrt_pos, free_sz, "\r\n ack_resend_counter= %u", arq_.ack_resend_counter_);
-    PrintAfterHandlerReturn(str_len, wrt_num, free_sz, wrt_pos);
-
-    wrt_num = (u32)snprintf((char*)wrt_pos, free_sz, "\r\n rto_resend_counter= %u", arq_.rto_resend_counter_);
-    PrintAfterHandlerReturn(str_len, wrt_num, free_sz, wrt_pos);
-
-    wrt_num = (u32)snprintf((char*)wrt_pos, free_sz, "\r\n boost_resend_counter= %u", arq_.arq_list_.ai_repair_sum_);
     PrintAfterHandlerReturn(str_len, wrt_num, free_sz, wrt_pos);
 
     return str_len;
@@ -3292,43 +3414,33 @@ void GtpSession::SendSetRecvRttPacket(void) {
     u8 tmp_buf[1024];
     GtpPacket *pack = (GtpPacket*)tmp_buf;
 
-    u16 has_check  = GTP_NO;
-    u32 rtt_offset = (u32)sizeof(GtpPacket);
-
-    if (GTP_YES == pb_dt_.tran_addr_.enable_key_) {
-        has_check = GTP_YES;
-        u8 *key_ptr = ((u8*)pack) + sizeof(GtpPacket);
-        *((u32*)(key_ptr))              = (u32)(pb_dt_.tran_addr_.stream_key_ >> 32);
-        *((u32*)(key_ptr + sizeof(u32))) = (u32)(pb_dt_.tran_addr_.stream_key_);
-        rtt_offset += (u32)sizeof(u64);
-    }
-
-    u32 pack_size = rtt_offset + (u32)sizeof(u32);
-
     pack->goodtp_ver_     = CalcRightGtpVer(GTP_VERSION, pb_dt_.peer_version_);
-    pack->header_offset_  = (u8)pack_size;
+    pack->header_offset_  = (u8)sizeof(GtpPacket);
     pack->cache_us_flag_  = GTP_NO;
     pack->has_loss_flag_  = GTP_NO;
     pack->pack_type_      = (u8)(GtpPackType::kGtpSetRecvRttPackType);
-    pack->pack_size_      = (u16)pack_size;
+    pack->pack_size_      = (u16)sizeof(GtpPacket);
     pack->pack_sn_        = 0;         // the sn is invalid in set receiving rtt packet.
-    pack->has_check_flag_ = (u8)has_check;
+    pack->has_check_flag_ = GTP_NO;
     pack->has_ts_flag_    = GTP_NO;
     pack->has_rtt_flag_   = GTP_YES;
     pack->init_flag_      = (u8)((((u8)(GtpSessStat::kRunning)) == send_session_stat_) ? GTP_NO : GTP_YES);
     pack->repeat_counter_ = 0;
     pack->is_qos_flg_     = GTP_NO;
     pack->share_zone_     = 0;
+    pack->has_chg_zone_   = GTP_NO;
+    pack->stream_type_    = kRealTimeStream;
 
-    *((u32*)(((u8*)(pack)) + rtt_offset)) = rtt_us_;
+    *((u32*)(((u8*)(pack)) + pack->header_offset_)) = rtt_us_;
+    pack->header_offset_ += sizeof(u32);
+    pack->pack_size_     += sizeof(u32);
+    GtpInsertStreamKeyHeader(pack, pb_dt_.tran_addr_.stream_key_);
 
     #ifdef _SELFDEBUG
     GtpLog(cb_.write_log_cb_, kGtpSessionMd, kGtpLogLevelDebug, "%s:%u<-->%s:%u send to receive windows's rrt=%uus.\r\n",
            pb_dt_.self_ip_, (u32)(pb_dt_.self_port_), pb_dt_.peer_ip_,
            (u32)(pb_dt_.peer_port_), rtt_us_);
     #endif
-
-    rtt_us_ = 0;
 
     GtpHeaderNewToOld(pack, pb_dt_.peer_version_);
 
@@ -3337,23 +3449,28 @@ void GtpSession::SendSetRecvRttPacket(void) {
     #if (1 == ENABLE_MD_PERF_CHECK)
     {
     u64 app_consume_us = GtpSysTimestampUs();
-    result = cb_.send_pack_cb_(GtpHdlIntToPointer(pb_dt_.gtp_hdl_), pack, pack_size, &(pb_dt_.tran_addr_));
+    result = cb_.send_pack_cb_(GtpHdlIntToPointer(pb_dt_.gtp_hdl_), pack,
+                               (u32)(pack->pack_size_), &(pb_dt_.tran_addr_));
     app_consume_us = GtpSysTimestampUs() - app_consume_us;
     pb_dt_.app_send_consume_.CacheConsumeTime(app_consume_us);
     pb_dt_.send_consume_.ts_us_ += app_consume_us;
     pb_dt_.recv_consume_.ts_us_ += app_consume_us;
     }
     #else
-    result = cb_.send_pack_cb_(GtpHdlIntToPointer(pb_dt_.gtp_hdl_), pack, pack_size, &(pb_dt_.tran_addr_));
+    result = cb_.send_pack_cb_(GtpHdlIntToPointer(pb_dt_.gtp_hdl_), pack,
+                               (u32)(pack->pack_size_), &(pb_dt_.tran_addr_));
     #endif
 
     if (GTP_OK != result) {
         GtpLog(cb_.write_log_cb_, kGtpSessionMd, kGtpLogLevelError,
                "call send_pack_cb_() failed(0x%08x)\r\n", result);
+        return;
     }
 
+    rtt_us_ = 0;
+
     pb_dt_.send_stat_.net_pack_sum_    += 1;
-    pb_dt_.send_stat_.net_bitrate_sum_ += pack_size;
+    pb_dt_.send_stat_.net_bitrate_sum_ += ((u32)(pack->pack_size_));
 
     return;
 }
@@ -3362,35 +3479,27 @@ void GtpSession::SendRttTestResPacket(const u64 &ts_us) {
     u8 tmp_buf[1024];
     GtpPacket *pack = (GtpPacket*)tmp_buf;
 
-    u16 has_check = GTP_NO;
-    u32 ts_offset = (u32)sizeof(GtpPacket);
-
-    if (GTP_YES == pb_dt_.tran_addr_.enable_key_) {
-        has_check = GTP_YES;
-        u8 *key_ptr = ((u8*)pack) + sizeof(GtpPacket);
-        *((u32*)(key_ptr))              = (u32)(pb_dt_.tran_addr_.stream_key_ >> 32);
-        *((u32*)(key_ptr + sizeof(u32))) = (u32)(pb_dt_.tran_addr_.stream_key_);
-        ts_offset += (u32)sizeof(u64);
-    }
-
-    u32 pack_size = ts_offset + (u32)sizeof(u64);
-
     pack->goodtp_ver_     = CalcRightGtpVer(GTP_VERSION, pb_dt_.peer_version_);
-    pack->header_offset_  = (u8)pack_size;
+    pack->header_offset_  = (u8)sizeof(GtpPacket);
     pack->cache_us_flag_  = GTP_NO;
     pack->has_loss_flag_  = GTP_NO;
     pack->pack_type_      = (u8)(GtpPackType::kGtpRttTstResPackType);
-    pack->pack_size_      = (u16)pack_size;
+    pack->pack_size_      = (u16)sizeof(GtpPacket);
     pack->pack_sn_        = 0;
-    pack->has_check_flag_ = (u8)has_check;
+    pack->has_check_flag_ = GTP_NO;
     pack->has_ts_flag_    = GTP_YES;
     pack->has_rtt_flag_   = GTP_NO;
     pack->init_flag_      = (u8)(((u8)(GtpSessStat::kRunning) == recv_session_stat_) ? GTP_NO : GTP_YES);
     pack->repeat_counter_ = 0;
     pack->is_qos_flg_     = GTP_NO;
     pack->share_zone_     = 0;
+    pack->has_chg_zone_   = GTP_NO;
+    pack->stream_type_    = kRealTimeStream;
 
-    *((u64*)(((u8*)(pack)) + ts_offset)) = ts_us;
+    *((u64*)(((u8*)(pack)) + pack->header_offset_)) = ts_us;
+    pack->header_offset_ += sizeof(u64);
+    pack->pack_size_     += sizeof(u64);
+    GtpInsertStreamKeyHeader(pack, pb_dt_.tran_addr_.stream_key_);
 
     GtpHeaderNewToOld(pack, pb_dt_.peer_version_);
 
@@ -3399,7 +3508,8 @@ void GtpSession::SendRttTestResPacket(const u64 &ts_us) {
     #if (1 == ENABLE_MD_PERF_CHECK)
     {
     u64 app_consume_us = GtpSysTimestampUs();
-    result = cb_.send_pack_cb_(GtpHdlIntToPointer(pb_dt_.gtp_hdl_), pack, pack_size, &(pb_dt_.tran_addr_));
+    result = cb_.send_pack_cb_(GtpHdlIntToPointer(pb_dt_.gtp_hdl_), pack,
+                               (u32)(pack->pack_size_), &(pb_dt_.tran_addr_));
     app_consume_us = GtpSysTimestampUs() - app_consume_us;
     pb_dt_.app_send_consume_.CacheConsumeTime(app_consume_us);
 
@@ -3407,16 +3517,18 @@ void GtpSession::SendRttTestResPacket(const u64 &ts_us) {
     pb_dt_.recv_consume_.ts_us_ += app_consume_us;
     }
     #else
-    result = cb_.send_pack_cb_(GtpHdlIntToPointer(pb_dt_.gtp_hdl_), pack, pack_size, &(pb_dt_.tran_addr_));
+    result = cb_.send_pack_cb_(GtpHdlIntToPointer(pb_dt_.gtp_hdl_), pack,
+                               (u32)(pack->pack_size_), &(pb_dt_.tran_addr_));
     #endif
 
     if (GTP_OK != result) {
         GtpLog(cb_.write_log_cb_, kGtpSessionMd, kGtpLogLevelError,
                "call send_pack_cb_() failed(0x%08x)\r\n", result);
+        return;
     }
 
     pb_dt_.send_stat_.net_pack_sum_    += 1;
-    pb_dt_.send_stat_.net_bitrate_sum_ += pack_size;
+    pb_dt_.send_stat_.net_bitrate_sum_ += ((u32)(pack->pack_size_));
 
     return;
 }
@@ -3438,8 +3550,6 @@ void GtpSession::ResetSession(const u32 &cur_sn, const u32 &sort_sn, const u32 &
 
     ResetSlidWin(data_win_r_, l_border_sn, last_active_ts_us_);
     ResetSlidWin(filter_win_, l_border_sn, last_active_ts_us_);
-
-    ReorderClear();
 
     if (GTP_YES == chg_status_flag) {
         GtpLog(cb_.write_log_cb_, kGtpSessionMd, kGtpLogLevelWarning, "the peer sending has been recreated, "\
@@ -3484,4 +3594,3 @@ void GtpSession::RttHandler(const u32 &rtt_us) {
 #ifdef __cplusplus
 }
 #endif
-

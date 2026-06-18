@@ -46,6 +46,7 @@
 
 #if (2 == APPLICATION_TYPE)
 #define MAX_FEEDBACK_NACK_SN_NUM    (12)
+#define MAX_GAME_FAST_NACK_SN_NUM   (64)
 
 #define WIN_SPECS                   (3)
 #define WIN_POS_MASK                (0x00001FFF)
@@ -159,6 +160,7 @@ extern "C" {
 class SlidWin {
 public:
     static void* operator new(size_t n, void *psp_mem);
+    static void operator delete(void *psp_mem, void *placement_mem);
     static void operator delete(void *psp_mem);
     static void operator delete(void *psp_mem, size_t n);
 

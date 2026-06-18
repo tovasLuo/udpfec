@@ -229,6 +229,9 @@ void* SlidWin::operator new(size_t n, void *psp_mem) {
     return psp_mem;
 }
 
+void SlidWin::operator delete(void *psp_mem, void *placement_mem) {
+}
+
 void SlidWin::operator delete(void *psp_mem) {
 }
 
@@ -2607,13 +2610,19 @@ calc_rcv_loss_rsp_ack_nack_pos_:
         goto calc_rcv_loss_move_win_pos_;
     }
 
-    if ((2.000001 > report_loss) || (MAX_FEEDBACK_NACK_SN_NUM > loss_pack_num)) {
+    #if (2 == APPLICATION_TYPE)
+    if ((0 < loss_pack_num) && (loss_pack_num == ((u32)sv_loss_sn_pos))
+        && (MAX_GAME_FAST_NACK_SN_NUM >= loss_pack_num)) {
+    #else
+    if ((0 < loss_pack_num) &&
+        ((2.000001 > report_loss) || (MAX_FEEDBACK_NACK_SN_NUM > loss_pack_num))) {
+    #endif
         NackData *nack_sn_bitmap = (NackData*)cache_;
 
         nack_sn_bitmap->head_sn_     = l_border_sn_;
         nack_sn_bitmap->tail_sn_     = max_sn_;
         nack_sn_bitmap->recv_loss_   = loss_;
-        nack_sn_bitmap->nack_num_    = (u16)loss_pack_num;
+        nack_sn_bitmap->nack_num_    = (u16)sv_loss_sn_pos;
         nack_sn_bitmap->cache_ts_us_ = ts_us;
 
         if (l_border_pos_ <= rto_tmout_pos) {
@@ -2651,17 +2660,26 @@ calc_rcv_loss_rsp_ack_nack_pos_:
 
     ack_sn_bitmap->rto_sn_ = max_sn_;
 
+    {
+    u32 ack_span = 0;
+    u8* tmp_mem  = &(cache_[sizeof(ReceivedSnBitMap) + sizeof(u64)]);
+
     if (l_border_pos_ <= max_sn_pos_) {
-        ack_sn_bitmap->mem_size_   = ((max_sn_pos_ - l_border_pos_) >> 3) + 8;
-        ack_sn_bitmap->sn_bit_map_ = (u8*)&(sn_bit_map_[l_border_pos_ >> 6]);
+        ack_span = max_sn_pos_ - l_border_pos_;
     } else {
-        u32 mem_size = ((WIN_BUF_SIZE - l_border_pos_) >> 3);
-        u8* tmp_mem  = &(cache_[sizeof(ReceivedSnBitMap) + sizeof(u64)]);
+        ack_span = max_sn_pos_ + (WIN_BUF_SIZE - l_border_pos_);
+    }
 
-        memcpy(tmp_mem, &(sn_bit_map_[l_border_pos_ >> 6]), mem_size);
-        memcpy((tmp_mem + mem_size), &(sn_bit_map_[0]), (max_sn_pos_ >> 3) + 8);
+    ack_sn_bitmap->mem_size_   = (ack_span >> 3) + 8;
+    ack_sn_bitmap->sn_bit_map_ = tmp_mem;
+    memset(tmp_mem, 0x00, ack_sn_bitmap->mem_size_);
 
-        ack_sn_bitmap->mem_size_ = mem_size + (max_sn_pos_ >> 3) + 8;
+    for (u32 ack_offset = 0; ack_span >= ack_offset; ++ack_offset) {
+        u32 win_pos = (l_border_pos_ + ack_offset) & WIN_POS_MASK;
+        if (0 != (sn_bit_map_[win_pos >> 6] & (((u64)1) << (win_pos & 0x0000003F)))) {
+            tmp_mem[ack_offset >> 3] |= (u8)(0x01 << (ack_offset & 0x00000007));
+        }
+    }
     }
 
     #ifdef _SELFDEBUG
