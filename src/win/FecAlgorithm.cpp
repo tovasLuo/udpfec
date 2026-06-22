@@ -147,7 +147,15 @@ auto FecAlgorithm::_coro_main() -> awaitable<void>
 				//�˳�
 				break;
 			}else if (closeInfo == nullptr) [[likely]] {
-				u64 streamKey = get_stream_key(_cfg_udppwd, pkt->info->local.port_net, route::get_index(pkt->node.si4.sin_addr.S_un.S_addr));
+				u16 node_idx = route::get_index(pkt->node.si4.sin_addr.S_un.S_addr);
+				u64 streamKey = get_stream_key(_cfg_udppwd, pkt->info->local.port_net, node_idx);
+				if (streamKey == 0) [[unlikely]] {
+					TRACEX_PAGE_("_coro_main: streamKey=0! udppwd={} port_net={} node_idx={} nid={}",
+						_cfg_udppwd, pkt->info->local.port_net, node_idx, pkt->info->nid);
+					// get_stream_key returns 0 when all inputs are 0; server mirrors this key back in downlink,
+					// causing _coro_main_down to drop with streamKey2=0. Use nid as non-zero fallback.
+					streamKey = pkt->info->nid != 0 ? pkt->info->nid : u64(1);
+				}
 
 				_info.try_emplace(streamKey, pkt->info);
 				_streamKeys[pkt->info->nid].try_insert(streamKey);

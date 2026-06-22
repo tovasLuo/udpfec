@@ -547,9 +547,11 @@ bool pair_session_mgr::handle_game_client_data(std::shared_ptr<listen_session_in
 
     pair_session->return_user_wan_addr = ((m_udp_base_header*)buf_.data())->rt_user_wan_addr == M_UDP_FLAG_RETURN_USER_WAN_ADDR_ENABLE;
     pair_session->last_transpond_time = cur_sys_ts_.tv_sec;
-    pair_session->game_client_fec_stream_key = fec_stream_key_;
-    pair_session->game_client_fec_stream_type = fec_stream_type_;
-    pair_session->game_client_fec_qos = fec_qos_;
+    if (fec_stream_key_ != 0) {
+        pair_session->game_client_fec_stream_key = fec_stream_key_;
+        pair_session->game_client_fec_stream_type = fec_stream_type_;
+        pair_session->game_client_fec_qos = fec_qos_;
+    }
 
     m_udp_up_base_header* header = (m_udp_up_base_header*)buf_.data();
     if (header->pkg_type == M_UDP_FLAG_PKG_TYPE_CONTROL)
