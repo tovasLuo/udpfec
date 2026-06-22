@@ -18,7 +18,7 @@
 #include "goodtp_comstruct.h"
 #include "goodtp_macrodefine.h"
 #include "goodtp_mem_pool.h"
-#include "bitlinker.h"
+#include "goodtp.h"
 
 #include "tranmempool.h"
 
@@ -74,7 +74,7 @@ class GtpArq {
     void AdjustRtoTimeout(const u32 &rto_timeout_us, const u32 &rtt_us);
 
     void ProcAck(const u8 ack_sn_bitmap[], const u32 &bitmap_sz, const u32 &head_sn, const u32 &tail_sn,
-                            const u32 &rto_sn);
+                 const u32 &rto_sn, const u32 &recv_loss);
 
     void ProcNack(const u16 nack_sn_offset[], const u32 &nack_num, const u32 &head_sn, const u32 &tail_sn,
                   const u32 &rto_sn);
@@ -86,10 +86,10 @@ class GtpArq {
 PRIVATE:
     
     void ProcArqIn32BitSys(const u8 ack_sn_bitmap[], const u32 &bitmap_sz, const u32 &head_sn, const u32 &tail_sn,
-                           const u32 &rto_sn);
+                           const u32 &rto_sn, const u32 &recv_loss);
 
     void ProcArqIn64BitSys(const u8 ack_sn_bitmap[], const u32 &bitmap_sz, const u32 &head_sn, const u32 &tail_sn,
-                           const u32 &rto_sn);
+                           const u32 &rto_sn, const u32 &recv_loss);
 
     void ProcNotLossNack(const u32 &head_sn, const u32 &tail_sn);
 
@@ -105,7 +105,7 @@ PRIVATE:
     void ClearArqList(void);
     void CloneBoostNode(ArqNode *node, const u64 &ts_us);
     void TranFailedPostHandler(ArqNode *node, const u64 &cur_ts_us);
-    void DelNodeByFirstSn(const u32 first_sn_vec[], const u32 &vec_size);
+    void DelNodeByFirstSn(const u32 &first_sn, ArqNode **next_node);
 
  public:
     u32 rto_timeout_us_;
@@ -147,4 +147,3 @@ PRIVATE:
 #endif
 
 #endif
-

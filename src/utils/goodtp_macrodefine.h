@@ -24,7 +24,7 @@
 #define ENABLE_UDP_LOG            (0)
 #define ENABLE_INTERFACE_LOG      (0)
 #define ENABLE_INPUT_PARAM_CHCK   (0)
-#define ENABLE_INNER_VALID_CHCK   (0)
+#define ENABLE_INNER_VALID_CHCK   (1)
 #define ENABLE_TRACE_CODE_FLAG    (0)
 #define ENABLE_BOOST_AI_FLAG      (1)
 #define ENABLE_ARQ_BOOST_FLAG     (0)
@@ -94,13 +94,6 @@
 
 #define MAX_RSV_WIN_SIZE           (2176)
 
-#ifdef _UTTEST
-#define MAX_SORT_BUF_SIZE          (32)
-#else
-#define MAX_SORT_BUF_SIZE          (16384)
-#endif
-#define MAX_SORT_BUF_SIZE_BITMASK  ((MAX_SORT_BUF_SIZE - 1))
-
 #if (_WIN32 || _WIN64 || _SELFANDROID || __APPLE__)
 // client
 #define ARQ_SPECS                  (7)
@@ -120,16 +113,16 @@
 #define MIN_SESSION_TTL_US         (4000000)
 #define SLID_WIN_SIZE              (2048)
 
-#define DEFAULT_FEC2_BOOK_ID       (4)
+#define DEFAULT_FEC2_BOOK_ID       (5)
 
 #define DEFAULT_BOOST_TIMES        (3)
-#define INIT_BOOST_TIMES           (1)
+#define INIT_BOOST_TIMES           (0)
 
 #define MAX_RELIABLE_LOSS_THRESHLD (80.00001)
-#define MAX_REALTIME_LOSS_THRESHLD (65.00001)
+#define MAX_REALTIME_LOSS_THRESHLD (50.00001)
 
 #define RMV_RELIABLE_LOSS_THRESHLD (60.00001)
-#define RMV_REALTIME_LOSS_THRESHLD (40.00001)
+#define RMV_REALTIME_LOSS_THRESHLD (30.00001)
 
 #define MAX_SUPPORT_PPS            (20000)
 
@@ -141,13 +134,6 @@
 #define MAX_CLEAR_FEC_RECV_STEP    (28)
 
 #define MAX_RSV_WIN_SIZE           (640)
-
-#ifdef _UTTEST
-#define MAX_SORT_BUF_SIZE          (32)
-#else
-#define MAX_SORT_BUF_SIZE          (8192)
-#endif
-#define MAX_SORT_BUF_SIZE_BITMASK  ((MAX_SORT_BUF_SIZE - 1))
 
 #if (_WIN32 || _WIN64 || _SELFANDROID || __APPLE__)
 // client
@@ -188,11 +174,6 @@
 
 #define DEFAULT_MAX_FRAME_PERIOD_US    (50000)
 
-/* NACK 周期：game mode 缩短到 50ms 以匹配 50fps 帧周期（20ms），
- * 使 ARQ 在 FEC 无法恢复的突发场景下更快介入，降低 p99 延迟。
- * 测试数据：S6 突发 10 连丢 p99=41.6ms，NACK=50ms 可使 ARQ 在
- * 第 3 个 timer 周期（30ms）内介入，而非第 11 个（110ms）。
- * video/common 模式保持 110ms（吞吐优先，NACK 频率影响带宽）。 */
 #if (2 == APPLICATION_TYPE)
 #define MAX_FEEDBACK_NACK_PERIOD_US    (50000)
 #else
@@ -238,12 +219,11 @@
 
 #define MIN_RTT_EXIST_TM_SZ_US  (35000)
 
-// MIN_ENHANCE_BOOST_PPS removed: the PPS gate was suppressing boost even under packet loss.
-// boost_switch_ / max_boost_times_ (driven by LinkQualityCallback) is the correct control.
+#define MIN_ENHANCE_BOOST_PPS   (200)
 
 // new fec
-#define MAX_FEC2_MODE_BOOK_ID    (6)
-#define MAX_VALID_FEC2_BOOK_ID   (5)
+#define MAX_FEC2_MODE_BOOK_ID    (8)
+#define MAX_VALID_FEC2_BOOK_ID   (7)
 
 #define MAX_FEC2_MATRIX_H_SIZE   (4)
 #define MAX_FEC2_MATRIX_V_SIZE   (MAX_FEC2_MATRIX_H_SIZE)
@@ -401,4 +381,3 @@ enum class SessionHealthState: uint8_t {
 }
 
 #endif
-

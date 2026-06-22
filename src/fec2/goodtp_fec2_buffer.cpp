@@ -18,7 +18,7 @@
 #include "goodtp_comstruct.h"
 #include "goodtp_macrodefine.h"
 #include "tranmempool.h"
-#include "bitlinker.h"
+#include "goodtp.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -156,6 +156,17 @@ void Fec2Buffer::PopPack(const goodtp_pos &cache_pos) {
 }
 
 GtpPackCacheStru* Fec2Buffer::PushPack(GtpPacket *pack, const u32 &need_new_buf) {
+    if ((NULL == pack) || (sizeof(GtpPacket) > pack->pack_size_) || (0x1FFF < pack->pack_size_)) {
+        GtpLog(write_log_cb_, kGtpFecMd, kGtpLogLevelError, "Invalid fec cache packet(pack=%p size=%u).\r\n",
+               pack, ((NULL != pack) ? (u32)(pack->pack_size_) : 0));
+        return NULL;
+    }
+
+    if ((GTP_YES != need_new_buf) && (GTP_NO != need_new_buf)) {
+        GtpLog(write_log_cb_, kGtpFecMd, kGtpLogLevelError, "Invalid fec cache mode(%u).\r\n", need_new_buf);
+        return NULL;
+    }
+
     GtpPackCacheStru *new_cache = NULL;
     GtpAddr *tran_addr          = NULL;
     u32 com_var                 = 0;
@@ -182,12 +193,17 @@ GtpPackCacheStru* Fec2Buffer::PushPack(GtpPacket *pack, const u32 &need_new_buf)
 
         memcpy(new_cache->payload_, pack, pack->pack_size_);
     } else {
-        new_cache = (GtpPackCacheStru*)(((u8*)pack) - sizeof(GtpPackCacheStru));
+        if (NULL == pack_mem_pool_.TranBufUseRefAddOne((u8*)pack)) {
+            const std::string &err_info = pack_mem_pool_.Error();
+            GtpLog(write_log_cb_, kGtpFecMd, kGtpLogLevelError,
+                   "Fec cache packet memory is not owned by TranMemPool(%s pack=%p size=%u).\r\n",
+                   err_info.c_str(), pack, (u32)(pack->pack_size_));
+            return NULL;
+        }
 
+        new_cache = (GtpPackCacheStru*)(((u8*)pack) - sizeof(GtpPackCacheStru));
         new_cache->cache_id_    = CalcPosInPackCache(pack->pack_sn_);
         new_cache->payload_len_ = pack->pack_size_;
-
-        pack_mem_pool_.TranBufUseRefAddOne((u8*)pack);
     }
 
     if (NULL != pack_cache_[new_cache->cache_id_]) {
@@ -203,7 +219,7 @@ GtpPackCacheStru* Fec2Buffer::PushPack(GtpPacket *pack, const u32 &need_new_buf)
         goto fec2_cache_pack_exit_pos_;
     }
 
-    com_var = (0xFFFFFFFF - max_cached_sn_) + pack->pack_sn_;
+    com_var = (0xFFFFFFFF - max_cached_sn_) + pack->pack_sn_ + 1;
     if (MAX_FEC2_CACHE_CAPACITY >= com_var) {
         // packet's sn has been turn over.
         max_cached_sn_ = pack->pack_sn_;

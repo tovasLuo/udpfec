@@ -39,6 +39,7 @@
 #define MIN_LEARN_THRESHOLD         (10)
 
 #define MAX_RESET_RECV_WIN_THRSHLD  (8)
+#define RESET_RECV_WIN_SN_MASK      (0xFFFFFF80)
 
 #define DEFAULT_DISORDER_NUM        (3)
 
@@ -46,6 +47,7 @@
 
 #if (2 == APPLICATION_TYPE)
 #define MAX_FEEDBACK_NACK_SN_NUM    (12)
+#define MAX_GAME_FAST_NACK_SN_NUM   (64)
 
 #define WIN_SPECS                   (3)
 #define WIN_POS_MASK                (0x00001FFF)
@@ -54,6 +56,7 @@
 #define MIN_LEARN_THRESHOLD         (3)
 
 #define MAX_RESET_RECV_WIN_THRSHLD  (4)
+#define RESET_RECV_WIN_SN_MASK      (0xFFFFFFC0)
 
 #define DEFAULT_DISORDER_NUM        (2)
 
@@ -95,6 +98,9 @@
 #define MIN_RTO_TS_US               (25000)
 #define MAX_DISORDER_BUF_US         (10000)
 #define MIN_DISORDER_BUF_US         (1000)
+#define LOW_PPS_DISORDER_THRESHOLD  (80)
+#define MAX_LOW_PPS_DISORDER_BUF_US (15000)
+#define MIN_LOW_PPS_DISORDER_BUF_US (2000)
 
 #define MIN_FEEDBACK_FACTOR         (0.1)
 #define MAX_FEEDBACK_FACTOR         (1.0)
@@ -159,6 +165,7 @@ extern "C" {
 class SlidWin {
 public:
     static void* operator new(size_t n, void *psp_mem);
+    static void operator delete(void *psp_mem, void *placement_mem);
     static void operator delete(void *psp_mem);
     static void operator delete(void *psp_mem, size_t n);
 

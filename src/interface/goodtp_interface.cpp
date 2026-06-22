@@ -18,7 +18,7 @@
 #include "goodtp_mgr.h"
 #include "goodtp_comstruct.h"
 #include "goodtp_macrodefine.h"
-#include "bitlinker.h"
+#include "goodtp.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -151,6 +151,18 @@ u32 GtpFrameSend(GtpHandler_p gtp_hdl, void *frame, u32 size, GtpAddr *tran_addr
 
     u32 nret = GTP_OK;
 
+    nret = GtpTranAddrSockInputIsValid(tran_addr);
+    if (GTP_OK != nret) {
+        GtpLog(gtp_obj->cb_.write_log_cb_, kGtpSessionMd, kGtpLogLevelError, "Goodtp transport address socket "\
+               "input is invalid(0x%08x tran_addr=%p dst_addr_len=%u src_addr_len=%u dst_mem_addr=%p "\
+               "src_mem_addr=%p).\r\n", nret, tran_addr,
+               ((NULL != tran_addr) ? tran_addr->sock_addr_len_ : 0),
+               ((NULL != tran_addr) ? tran_addr->self_addr_len_ : 0),
+               ((NULL != tran_addr) ? tran_addr->sock_addr_ : NULL),
+               ((NULL != tran_addr) ? tran_addr->self_addr_ : NULL));
+         return nret;
+    }
+
     #if (1 == ENABLE_TRAN_MEM_CHECK)
     nret = GtpTranAddrIsValid(tran_addr);
     if (GTP_OK != nret) {
@@ -164,8 +176,6 @@ u32 GtpFrameSend(GtpHandler_p gtp_hdl, void *frame, u32 size, GtpAddr *tran_addr
          return nret;
     }
     #endif
-
-    tran_addr->stream_type_   = 0;
 
     if (GTP_OK != gtp_obj->CheckSingleThreadCalling()) {
         GtpLog(gtp_obj->cb_.write_log_cb_, kGtpInterfaceMd, kGtpLogLevelWarning, "The same goodtp instance used by "\
@@ -255,6 +265,10 @@ u32 GtpFrameSend(GtpHandler_p gtp_hdl, void *frame, u32 size, GtpAddr *tran_addr
     u32 pack_size   = 0;
     u32 first_sn    = session->pack_sn_;
 
+    if ((GTP_YES == tran_addr->enable_key_) && (0 != tran_addr->stream_key_)) {
+        GtpSplitStreamKey(tran_addr->stream_key_, &token, &token_id);
+    }
+
     nret = session->FramePrepHandler(frame, size, &pack, &pack_size, token, token_id, 0, 0);
     if (GTP_OK != nret) {
         GtpLog(gtp_obj->cb_.write_log_cb_, kGtpInterfaceMd, kGtpLogLevelError, "%s:%u<-->%s:%u calling session's "\
@@ -263,6 +277,8 @@ u32 GtpFrameSend(GtpHandler_p gtp_hdl, void *frame, u32 size, GtpAddr *tran_addr
                (u32)(session->pb_dt_.peer_port_), nret);
         return nret;
     }
+
+    session->FrameFecEncodeHandler(pack);
 
     GtpHeaderNewToOld(pack, session->pb_dt_.peer_version_);
 
@@ -288,10 +304,11 @@ u32 GtpFrameSend(GtpHandler_p gtp_hdl, void *frame, u32 size, GtpAddr *tran_addr
                "send_pack_cb_() failed(0x%08x)\r\n", session->pb_dt_.self_ip_,
                (u32)(session->pb_dt_.self_port_), session->pb_dt_.peer_ip_,
                (u32)(session->pb_dt_.peer_port_), nret);
+        return nret;
     }
 
     // step3: post handle after sending packet.
-    nret = session->FramePostHandler(tran_addr, pack, pack_size, size, GTP_YES, first_sn);
+    nret = session->FramePostHandler(tran_addr, pack, pack_size, size, GTP_YES, first_sn, GTP_YES, GTP_YES);
     if (GTP_OK != nret) {
         GtpLog(gtp_obj->cb_.write_log_cb_, kGtpInterfaceMd, kGtpLogLevelError, "%s:%u<-->%s:%u calling session's "\
                "FramePostHandler() failed(0x%08x)\r\n", session->pb_dt_.self_ip_,
@@ -299,9 +316,6 @@ u32 GtpFrameSend(GtpHandler_p gtp_hdl, void *frame, u32 size, GtpAddr *tran_addr
                (u32)(session->pb_dt_.peer_port_), nret);
         return nret;
     }
-
-    session->pb_dt_.send_stat_.data_pack_sum_    += 1;
-    session->pb_dt_.send_stat_.data_bitrate_sum_ += pack_size;
 
     #if (1 == ENABLE_MD_PERF_CHECK)
     u64 temp_ts_us = GtpSysTimestampUs();
@@ -340,6 +354,88 @@ inline u32 CalcHeaderOffset(const GtpPacket *pack) {
     return header_size;
 }
 
+inline u32 CheckPacketTypePayloadInvalid(const GtpPacket *pack, const u32 &size) {
+    const u32 header_offset = (u32)(pack->header_offset_);
+    const u32 payload_size  = size - header_offset;
+
+    switch (pack->pack_type_) {
+    case ((u8)(GtpPackType::kGtpDataPackType)): {
+        if (0 == payload_size) {
+            RETURN_ERR(kGtpInterfaceMd, kGtpPackLengthErr);
+        }
+        break;
+    }
+
+    case ((u8)(GtpPackType::kGtpAckPackType)): {
+        if (sizeof(GtpAckPacketLoad) > payload_size) {
+            RETURN_ERR(kGtpInterfaceMd, kGtpPackLengthErr);
+        }
+
+        const GtpAckPacketLoad *ack_load = (const GtpAckPacketLoad*)(((const u8*)pack) + header_offset);
+        u32 need_size = sizeof(GtpAckPacketLoad) + (u32)(ack_load->sn_size_);
+        if (GTP_YES == pack->cache_us_flag_) {
+            need_size += sizeof(u64);
+        }
+
+        if (payload_size != need_size) {
+            RETURN_ERR(kGtpInterfaceMd, kGtpPackLengthErr);
+        }
+        break;
+    }
+
+    case ((u8)(GtpPackType::kGtpFecPackType)): {
+        const u32 fec_head_size = sizeof(Fec2CodePack) - sizeof(GtpPacket);
+        if (fec_head_size > payload_size) {
+            RETURN_ERR(kGtpInterfaceMd, kGtpPackLengthErr);
+        }
+
+        const u8 *fec_head = ((const u8*)pack) + header_offset;
+        const u16 code_len = GtpReadU16Unaligned(fec_head + sizeof(u8) + sizeof(u8) + sizeof(u8) + sizeof(u8));
+        if (payload_size != (fec_head_size + ((u32)code_len))) {
+            RETURN_ERR(kGtpInterfaceMd, kGtpPackLengthErr);
+        }
+        break;
+    }
+
+    case ((u8)(GtpPackType::kGtpSetRecvRttPackType)): {
+        if ((GTP_YES != pack->has_rtt_flag_) || (0 != payload_size)) {
+            RETURN_ERR(kGtpInterfaceMd, kGtpPackHeaderErr);
+        }
+        break;
+    }
+
+    case ((u8)(GtpPackType::kGtpRttTstResPackType)): {
+        if ((GTP_YES != pack->has_ts_flag_) || (0 != payload_size)) {
+            RETURN_ERR(kGtpInterfaceMd, kGtpPackHeaderErr);
+        }
+        break;
+    }
+
+    case ((u8)(GtpPackType::kGtpNackPackType)): {
+        if (sizeof(GtpNackPacketLoad) > payload_size) {
+            RETURN_ERR(kGtpInterfaceMd, kGtpPackLengthErr);
+        }
+
+        const GtpNackPacketLoad *nack_load = (const GtpNackPacketLoad*)(((const u8*)pack) + header_offset);
+        u32 need_size = sizeof(GtpNackPacketLoad) + (((u32)(nack_load->nack_num_)) << 1);
+        if (GTP_YES == pack->cache_us_flag_) {
+            need_size += sizeof(u64);
+        }
+
+        if (payload_size != need_size) {
+            RETURN_ERR(kGtpInterfaceMd, kGtpPackLengthErr);
+        }
+        break;
+    }
+
+    default: {
+        RETURN_ERR(kGtpInterfaceMd, kUnknownPackTypeErr);
+    }
+    }
+
+    return GTP_OK;
+}
+
 inline u32 InnerCheckPacketInvalid(const GtpPacket *pack, const u32 &size) {
     // basical check.
     if ((0x00 == pack->pack_type_) || (((u8)(GtpPackType::GtpPackTypeButt)) <= pack->pack_type_)) {
@@ -354,26 +450,50 @@ inline u32 InnerCheckPacketInvalid(const GtpPacket *pack, const u32 &size) {
     u32 nret          = GTP_OK;
     u32 header_offset = 0;
 
-    // offset check: only version 0x02 is supported.
-    if (0x02 != pack->goodtp_ver_) {
-        return GEN_ERR(kGtpInterfaceMd, kUnknownGtpVerErr);
+    // offset check.
+    switch (pack->goodtp_ver_) {
+    case 0x00: {
+        header_offset = CalcHeaderOffset(pack);
+        if (header_offset != pack->header_offset_) {
+            nret = GEN_ERR(kGtpInterfaceMd, kGtpPackHeaderErr);
+        }
+        break;
     }
 
-    header_offset = CalcHeaderOffset(pack);
-    if (header_offset > pack->header_offset_) {
-        nret = GEN_ERR(kGtpInterfaceMd, kGtpPackHeaderErr);
+    case 0x01: {
+        header_offset = CalcHeaderOffset(pack);
+        if (header_offset > pack->header_offset_) {
+            nret = GEN_ERR(kGtpInterfaceMd, kGtpPackHeaderErr);
+        }
+        break;
     }
 
-    return nret;
+    case 0x02: {
+        header_offset = CalcHeaderOffset(pack);
+        if (header_offset > pack->header_offset_) {
+            nret = GEN_ERR(kGtpInterfaceMd, kGtpPackHeaderErr);
+        }
+        break;
+    }
+
+    default: {
+        nret = GEN_ERR(kGtpInterfaceMd, kUnknownGtpVerErr);
+    }
+    }
+
+    if (GTP_OK != nret) {
+        return nret;
+    }
+
+    return CheckPacketTypePayloadInvalid(pack, size);
 }
 
 /*****************************************************************************************************************
 Name     : GtpCheckPacketInvalid
 Function : check goodtp packet's validity.
-In param : void *pack
+In param : GtpHandler_p gtp_hdl
+           void *pack
            u32 pack_size
-           u64 *stream_key  // 0: stream_key unavailable, others: session's stream key.
-                            // can be NULL if not needed.
 Out param: void
 Return   : u32    // GTP_OK: packet is valid, the others: packet is invalid.
 
@@ -392,38 +512,23 @@ u32 GtpCheckPacketInvalid(void *pack, u32 pack_size, u64 *stream_key) {
         *stream_key = 0;
     }
 
-    GtpPacket *gtp_pack = (GtpPacket*)pack;
-
-    u32 nret = InnerCheckPacketInvalid(gtp_pack, pack_size);
-    if (GTP_OK != nret) {
-        return nret;
+    if (sizeof(u32) > pack_size) {
+        RETURN_ERR(kGtpInterfaceMd, kGtpPackLengthErr);
     }
 
-    // when the sender embedded stream_key_ under has_check_flag_, recover it here without needing a
-    // session lookup.
-    // DATA/ACK/NACK/RTT: layout [GtpPacket][optional first_pack_sn u32][hash u32][user_id u32]...
-    // FEC: layout [Fec2CodePack header][hash u32][user_id u32][fec_code_...]
-    if ((NULL != stream_key) && (GTP_YES == gtp_pack->has_check_flag_)) {
-        u32 key_offset = (u32)sizeof(GtpPacket);
-        if ((u8)(GtpPackType::kGtpFecPackType) == gtp_pack->pack_type_) {
-            key_offset = (u32)sizeof(Fec2CodePack);
-        } else if (0 != ((u8)(gtp_pack->repeat_counter_))) {
-            key_offset += (u32)sizeof(u32);
-        }
+    u32 org_value  = GtpReadU32Unaligned(pack);
+    u32 check_rslt = GTP_OK;
 
-        if ((key_offset + sizeof(u64)) <= pack_size) {
-            // wire layout: [HIGH32 of stream_key][LOW32 of stream_key] at key_offset.
-            // local names 'hash'/'user_id' are misleading relics — the math is correct.
-            u32 hash    = 0;
-            u32 user_id = 0;
-            memcpy(&hash,    ((u8*)gtp_pack) + key_offset,              sizeof(u32));
-            memcpy(&user_id, ((u8*)gtp_pack) + key_offset + sizeof(u32), sizeof(u32));
+    GtpHeaderOldToNew(pack);
 
-            *stream_key = (((u64)hash) << 32) | ((u64)user_id);
-        }
+    check_rslt = InnerCheckPacketInvalid((GtpPacket*)pack, pack_size);
+    if ((GTP_OK == check_rslt) && (NULL != stream_key)) {
+        *stream_key = GtpReadPacketStreamKey((GtpPacket*)pack);
     }
 
-    return GTP_OK;
+    GtpWriteU32Unaligned(pack, org_value);
+
+    return check_rslt;
 }
 
 /*****************************************************************************************************************
@@ -448,6 +553,10 @@ u32 GtpPacketReceive(GtpHandler_p gtp_hdl, void *pack, u32 pack_sz, GtpAddr *tra
         RETURN_ERR(kGtpMgrMd, kInvalidInPutParam);
     }
 
+    if (sizeof(u32) > pack_sz) {
+        RETURN_ERR(kGtpInterfaceMd, kGtpPackLengthErr);
+    }
+
     #if ((_WIN32 || _WIN64) && (1 == ENABLE_INPUT_PARAM_CHCK))
     const GtpHandler_p in_gtp_hdl = gtp_hdl;
     const void *in_pack = pack;
@@ -465,6 +574,18 @@ u32 GtpPacketReceive(GtpHandler_p gtp_hdl, void *pack, u32 pack_sz, GtpAddr *tra
     CheckThreadStackFreeSize(gtp_obj->cb_.write_log_cb_, kGtpInterfaceMd);
 
     u32 nret = GTP_OK;
+
+    nret = GtpTranAddrSockInputIsValid(tran_addr);
+    if (GTP_OK != nret) {
+        GtpLog(gtp_obj->cb_.write_log_cb_, kGtpSessionMd, kGtpLogLevelError, "Goodtp transport address socket "\
+               "input is invalid(0x%08x tran_addr=%p dst_addr_len=%u src_addr_len=%u dst_mem_addr=%p "\
+               "src_mem_addr=%p).\r\n", nret, tran_addr,
+               ((NULL != tran_addr) ? tran_addr->sock_addr_len_ : 0),
+               ((NULL != tran_addr) ? tran_addr->self_addr_len_ : 0),
+               ((NULL != tran_addr) ? tran_addr->sock_addr_ : NULL),
+               ((NULL != tran_addr) ? tran_addr->self_addr_ : NULL));
+         return nret;
+    }
 
     #if (1 == ENABLE_TRAN_MEM_CHECK)
     nret = GtpTranAddrIsValid(tran_addr);
@@ -486,6 +607,7 @@ u32 GtpPacketReceive(GtpHandler_p gtp_hdl, void *pack, u32 pack_sz, GtpAddr *tra
     }
 
     tran_addr->stream_type_   = 0;
+    tran_addr->smooth_jitter_ = 0;
 
     if (GTP_OK != gtp_obj->CheckSingleThreadCalling()) {
         GtpLog(gtp_obj->cb_.write_log_cb_, kGtpInterfaceMd, kGtpLogLevelWarning, "The same goodtp instance used by "\
@@ -493,7 +615,7 @@ u32 GtpPacketReceive(GtpHandler_p gtp_hdl, void *pack, u32 pack_sz, GtpAddr *tra
     }
 
     #if ((_WIN32 || _WIN64) && (1 == ENABLE_INPUT_PARAM_CHCK))
-    if ((in_gtp_hdl != gtp_hdl) || (in_pack != pack) || (in_pack_sz != pack_sz) || (in_tran_addr != in_tran_addr)) {
+    if ((in_gtp_hdl != gtp_hdl) || (in_pack != pack) || (in_pack_sz != pack_sz) || (in_tran_addr != tran_addr)) {
         GtpLog(gtp_obj->cb_.write_log_cb_, kGtpInterfaceMd, kGtpLogLevelWarning, "in parameter is modify abnormal("\
                "gtp_hdl(%p|%p) pack(%p|%p) size(%u|%u) tran_addr(%p|%p) pid=%d tid=%d\r\n", in_gtp_hdl, gtp_hdl,
                in_pack, pack, in_pack_sz, pack_sz, in_tran_addr, tran_addr, (i32)GtpGetProcessId(),
@@ -508,7 +630,7 @@ u32 GtpPacketReceive(GtpHandler_p gtp_hdl, void *pack, u32 pack_sz, GtpAddr *tra
         RETURN_ERR(kGtpInterfaceMd, kPackMemIsInvalid);
     }
 
-    if ((in_gtp_hdl != gtp_hdl) || (in_pack != pack) || (in_pack_sz != pack_sz) || (in_tran_addr != in_tran_addr)) {
+    if ((in_gtp_hdl != gtp_hdl) || (in_pack != pack) || (in_pack_sz != pack_sz) || (in_tran_addr != tran_addr)) {
         GtpLog(gtp_obj->cb_.write_log_cb_, kGtpInterfaceMd, kGtpLogLevelWarning, "in parameter is modify abnormal("\
                "gtp_hdl(%p|%p) pack(%p|%p) size(%u|%u) tran_addr(%p|%p) pid=%d tid=%d\r\n", in_gtp_hdl, gtp_hdl,
                in_pack, pack, in_pack_sz, pack_sz, in_tran_addr, tran_addr, (i32)GtpGetProcessId(),
@@ -517,7 +639,7 @@ u32 GtpPacketReceive(GtpHandler_p gtp_hdl, void *pack, u32 pack_sz, GtpAddr *tra
     #endif
 
     #if (1 == ENABLE_INNER_VALID_CHCK)
-    u32 org_value = *((u32*)pack);
+    u32 org_value = GtpReadU32Unaligned(pack);
     #endif
 
     GtpHeaderOldToNew(pack);
@@ -538,23 +660,20 @@ u32 GtpPacketReceive(GtpHandler_p gtp_hdl, void *pack, u32 pack_sz, GtpAddr *tra
         if (0 == gtp_pack->repeat_counter_) {
             first_sn = gtp_pack->pack_sn_;
         } else {
-            first_sn = *((u32*)(((u8*)gtp_pack) + sizeof(GtpPacket)));
+            first_sn = GtpReadU32Unaligned(((u8*)gtp_pack) + sizeof(GtpPacket));
         }
     }
 
     GtpAddrToStrIpAndPort(tran_addr, self_ip, peer_ip, &self_port, &peer_port);
     #endif
 
-    u32 frame_size      = 0;
-    u8  saved_pack_type = 0;
-    u32 saved_pack_sn   = 0;
-    u32 saved_first_sn  = 0;
+    u32 frame_size = 0;
 
     #if (1 == ENABLE_INNER_VALID_CHCK)
     nret = InnerCheckPacketInvalid(gtp_pack, pack_sz);
 
     #if ((_WIN32 || _WIN64) && (1 == ENABLE_INPUT_PARAM_CHCK))
-    if ((in_gtp_hdl != gtp_hdl) || (in_pack != pack) || (in_pack_sz != pack_sz) || (in_tran_addr != in_tran_addr)) {
+    if ((in_gtp_hdl != gtp_hdl) || (in_pack != pack) || (in_pack_sz != pack_sz) || (in_tran_addr != tran_addr)) {
         GtpLog(gtp_obj->cb_.write_log_cb_, kGtpInterfaceMd, kGtpLogLevelWarning, "in parameter is modify abnormal("\
                "gtp_hdl(%p|%p) pack(%p|%p) size(%u|%u) tran_addr(%p|%p) pid=%d tid=%d\r\n", in_gtp_hdl, gtp_hdl,
                in_pack, pack, in_pack_sz, pack_sz, in_tran_addr, tran_addr, (i32)GtpGetProcessId(),
@@ -583,7 +702,7 @@ u32 GtpPacketReceive(GtpHandler_p gtp_hdl, void *pack, u32 pack_sz, GtpAddr *tra
                (i32)GtpGetProcessId(), (i32)GtpGetThreadId());
 
         if (0x00 == gtp_pack->goodtp_ver_) {
-            *((u32*)pack) = org_value;  // restore original value.
+            GtpWriteU32Unaligned(pack, org_value);  // restore original value.
         }
 
         return nret;
@@ -595,25 +714,14 @@ u32 GtpPacketReceive(GtpHandler_p gtp_hdl, void *pack, u32 pack_sz, GtpAddr *tra
         gtp_pack->stream_type_  = kRealTimeStream;
     }
 
-    // If caller did not pre-set enable_key_, extract stream_key from the packet so that
-    // GetSession can find or create the session by key rather than by five-tuple.
-    if ((GTP_NO == tran_addr->enable_key_) && (GTP_YES == gtp_pack->has_check_flag_)) {
-        u32 key_offset = (u32)sizeof(GtpPacket);
-        if ((u8)(GtpPackType::kGtpFecPackType) == gtp_pack->pack_type_) {
-            key_offset = (u32)sizeof(Fec2CodePack);
-        } else if (0 != ((u8)(gtp_pack->repeat_counter_))) {
-            key_offset += (u32)sizeof(u32);
-        }
-        if ((key_offset + (u32)sizeof(u64)) <= pack_sz) {
-            u32 hi = 0, lo = 0;
-            memcpy(&hi, ((u8*)gtp_pack) + key_offset,              sizeof(u32));
-            memcpy(&lo, ((u8*)gtp_pack) + key_offset + sizeof(u32), sizeof(u32));
-            u64 embedded_key = ((u64)hi << 32) | (u64)lo;
-            if (0 != embedded_key) {
-                tran_addr->enable_key_ = GTP_YES;
-                tran_addr->stream_key_ = embedded_key;
-            }
-        }
+    if ((((u8)(GtpPackType::kGtpDataPackType)) == gtp_pack->pack_type_) && (0x02 <= gtp_pack->goodtp_ver_)) {
+        tran_addr->stream_type_ = gtp_pack->stream_type_;
+    }
+
+    u64 stream_key = GtpReadPacketStreamKey(gtp_pack);
+    if (0 != stream_key) {
+        tran_addr->enable_key_ = GTP_YES;
+        tran_addr->stream_key_ = stream_key;
     }
 
     gtp_obj->current_ts_us_ = GtpSysTimestampUs();
@@ -667,8 +775,18 @@ u32 GtpPacketReceive(GtpHandler_p gtp_hdl, void *pack, u32 pack_sz, GtpAddr *tra
         session->pb_dt_.peer_version_ = gtp_pack->goodtp_ver_;
     }
 
+    if ((((u8)(GtpPackType::kGtpDataPackType)) == gtp_pack->pack_type_) && (0x02 <= gtp_pack->goodtp_ver_)
+     && (session->pb_dt_.tran_addr_.stream_type_ != gtp_pack->stream_type_)) {
+        session->pb_dt_.tran_addr_.stream_type_ = gtp_pack->stream_type_;
+    }
+
     if (((u8)(GtpPackType::kGtpDataPackType)) == gtp_pack->pack_type_) {
         session->last_active_ts_us_ = gtp_obj->current_ts_us_;
+    }
+
+    if ((((u8)(GtpPackType::kGtpFecPackType)) == gtp_pack->pack_type_) && (0 != stream_key)) {
+        GtpRemoveStreamKeyHeader(gtp_pack);
+        pack_sz = gtp_pack->pack_size_;
     }
 
     session->pb_dt_.tran_addr_.timestamp_ = gtp_obj->current_ts_us_;
@@ -697,8 +815,9 @@ u32 GtpPacketReceive(GtpHandler_p gtp_hdl, void *pack, u32 pack_sz, GtpAddr *tra
         }
     }
 
-    u8 *frame     = NULL;
-    u32 pack_size = (u32)(gtp_pack->pack_size_);
+    u8 *frame           = NULL;
+    u32 pack_size       = (u32)(gtp_pack->pack_size_);
+    u32 deliver_first_sn = 0;
 
     #if (1 == ENABLE_FRAME_COPY_OUT)
     u8 *out_mem       = NULL;
@@ -709,15 +828,8 @@ u32 GtpPacketReceive(GtpHandler_p gtp_hdl, void *pack, u32 pack_sz, GtpAddr *tra
 
     nret = session->PackPrepHandler(gtp_pack, pack_size, &frame, &frame_size);
     if (GEN_ERR(kGtpSessionMd, kDuplicatePackErr) == nret) {
-        u8  dup_pack_type = gtp_pack->pack_type_;
-        u32 dup_pack_sn   = gtp_pack->pack_sn_;
         session->PackPostHandler(gtp_pack, pack_size, tran_addr);
-        // ARQ retransmits use sequential new pack_sn_ values interleaved in the DATA stream.
-        // Pass dup_pack_sn (not first_sn) so the reorder buffer advances past the retransmit
-        // slot in the pack_sn_ sequence.
-        if (((u8)(GtpPackType::kGtpDataPackType)) == dup_pack_type) {
-            session->ReorderEnqueue(dup_pack_sn, NULL, 0, tran_addr, session->last_active_ts_us_);
-        }
+
         nret = GTP_OK;
         goto pack_receive_exit_pos_;
     }
@@ -727,45 +839,102 @@ u32 GtpPacketReceive(GtpHandler_p gtp_hdl, void *pack, u32 pack_sz, GtpAddr *tra
                "ver=0x%02x type=0x%02x pack_sn=%u first_sn=%u don't repeat but prep process failed(0x%08x)\r\n ",
                session->pb_dt_.self_ip_, (u32)(session->pb_dt_.self_port_), session->pb_dt_.peer_ip_,
                (u32)(session->pb_dt_.peer_port_), gtp_obj, gtp_hdl, (u32)(gtp_pack->goodtp_ver_),
-               (u32)(gtp_pack->pack_type_), gtp_pack->pack_sn_, *((u32*)(((u8*)gtp_pack) + gtp_pack->header_offset_)),
+               (u32)(gtp_pack->pack_type_), gtp_pack->pack_sn_,
+               GtpReadU32Unaligned(((u8*)gtp_pack) + gtp_pack->header_offset_),
                nret);
         goto pack_receive_exit_pos_;
     }
-
-    // Save pack_type and pack_sn before PackPostHandler, which frees FEC packet buffers.
-    saved_pack_type = gtp_pack->pack_type_;
-    saved_pack_sn   = gtp_pack->pack_sn_;
-    // For retransmits (repeat_counter > 0), first_sn (the original logical SN) is stored
-    // immediately after the fixed header.  We pass it as a hint to ReorderEnqueue so that when
-    // the retransmit's new pack_sn_ would trigger a large-gap flush (delta >= REORDER_BUF_SIZE),
-    // the frame lands at its correct logical position instead.
-    saved_first_sn = (0 == gtp_pack->repeat_counter_)
-                     ? gtp_pack->pack_sn_
-                     : *((u32*)(((u8*)gtp_pack) + sizeof(GtpPacket)));
 
     nret = session->PackPostHandler(gtp_pack, pack_size, tran_addr);
     if (GTP_OK != nret) {
         GtpLog(gtp_obj->cb_.write_log_cb_, kGtpInterfaceMd, kGtpLogLevelDebug, "%s:%u<-->%s:%u gtp_inst=%p gtp_hdl=%p "\
                "ver=0x%02x type=0x%02x pack_sn=%u first_sn=%u Call PackPostHandler() failed(0x%08x)\r\n ",
                session->pb_dt_.self_ip_, (u32)(session->pb_dt_.self_port_), session->pb_dt_.peer_ip_,
-               (u32)(session->pb_dt_.peer_port_), gtp_obj, gtp_hdl, (u32)saved_pack_type,
-               (u32)saved_pack_type, saved_pack_sn, *((u32*)(((u8*)gtp_pack) + gtp_pack->header_offset_)),
+               (u32)(session->pb_dt_.peer_port_), gtp_obj, gtp_hdl, (u32)(gtp_pack->goodtp_ver_),
+               (u32)(gtp_pack->pack_type_), gtp_pack->pack_sn_,
+               GtpReadU32Unaligned(((u8*)gtp_pack) + gtp_pack->header_offset_),
                nret);
+        goto pack_receive_exit_pos_;
+    }
+
+    if (NULL == frame) {
+        #if (1 == ENABLE_INTERFACE_LOG)
+        GtpLog(gtp_obj->cb_.write_log_cb_, kGtpInterfaceMd, kGtpLogLevelDebug, "%s:%u<-->%s:%u gtp_inst=%p gtp_hdl=%p "\
+               "ver=0x%02x type=0x%02x pack_sn=%u first_sn=%u isn't socks5 packet\r\n ",
+               self_ip, (u32)self_port, peer_ip, (u32)peer_port, gtp_obj, gtp_hdl, (u32)version,
+               (u32)pack_type, pack_sn, first_sn);
+        #endif
         goto pack_receive_exit_pos_;
     }
 
     tran_addr->timestamp_ = session->pb_dt_.tran_addr_.timestamp_;
 
-    // Only DATA packets go through the reorder buffer.
-    // FEC-recovered packets arrive via Fec2RestoreFrameReceive which calls ReorderEnqueue directly.
-    // FEC, ACK, NACK, and RTT packets use non-sequential or overlapping SNs and must be excluded.
-    if (((u8)(GtpPackType::kGtpDataPackType)) == saved_pack_type) {
-        // Primary key is pack_sn_ (retransmit's new SN) for normal nearby-slot behavior.
-        // Pass saved_first_sn as a hint: if pack_sn_ would cause a large-gap flush, fall back
-        // to the logical first_sn so the retransmit doesn't discard buffered good data.
-        session->ReorderEnqueue(saved_pack_sn, frame, frame_size, tran_addr,
-                                session->last_active_ts_us_, saved_first_sn);
+    #if (1 == ENABLE_FRAME_COPY_OUT)
+    if ((kRealTimeStream == session->pb_dt_.tran_addr_.stream_type_) || (0x02 > gtp_pack->goodtp_ver_)) {
+        mem_spec = GtpPackSizeToMemSpec(frame_size);
+    } else {
+        mem_spec = GtpPackSizeToMemSpec(pack_size);
     }
+    out_mem = session->pack_mem_pool_.MallocTranBuf(NULL, 0, &out_size, (void**)(&out_addr), (BufSizeType)mem_spec);
+    if (NULL == out_mem) {
+        const string &err_info = session->pack_mem_pool_.Error();
+        GtpLog(gtp_obj->cb_.write_log_cb_, kGtpInterfaceMd, kGtpLogLevelError, "calling MallocTranBuf() "\
+               "failed(%s)\r\n", err_info.c_str());
+
+        const string &stat_info = session->pack_mem_pool_.TranMemPoolStatInfo();
+        GtpLog(gtp_obj->cb_.write_log_cb_, kGtpArqMd, kGtpLogLevelWarning, "%s\r\n", stat_info.c_str());
+
+        goto pack_receive_exit_pos_;
+    }
+
+    if ((kRealTimeStream == session->pb_dt_.tran_addr_.stream_type_) || (0x02 > gtp_pack->goodtp_ver_)) {
+        memcpy(out_mem, frame, frame_size);
+        frame = out_mem;
+    } else {
+        memcpy(out_mem, gtp_pack, pack_size);
+        gtp_pack = (GtpPacket*)out_mem;
+    }
+
+    memcpy(out_addr, tran_addr, sizeof(GtpAddr));
+    tran_addr  = out_addr;
+    #endif
+
+    #if (1 == ENABLE_INTERFACE_LOG)
+    GtpLog(gtp_obj->cb_.write_log_cb_, kGtpInterfaceMd, kGtpLogLevelDebug, "%s:%u<-->%s:%u gtp_inst=%p gtp_hdl=%p "\
+           "ver=0x%02x type=0x%02x pack_sn=%u first_sn=%u start frame cb out\r\n ",
+           self_ip, (u32)self_port, peer_ip, (u32)peer_port, gtp_obj, gtp_hdl, (u32)version, (u32)pack_type,
+           pack_sn, first_sn);
+    #endif
+
+    if ((kRealTimeStream == session->pb_dt_.tran_addr_.stream_type_) || (0x02 > gtp_pack->goodtp_ver_)
+     || (GTP_NO == gtp_pack->has_chg_zone_)) {
+        if (0 == gtp_pack->repeat_counter_) {
+            deliver_first_sn = gtp_pack->pack_sn_;
+        } else {
+            deliver_first_sn = GtpReadU32Unaligned(((u8*)gtp_pack) + sizeof(GtpPacket));
+        }
+    } else {
+        deliver_first_sn = ((ChangeZone*)(((u8*)gtp_pack) + gtp_pack->header_offset_))->sort_sn_;
+    }
+
+    nret = session->DeliverFrameInOrder(gtp_hdl, deliver_first_sn, frame, frame_size, tran_addr);
+
+    if (GTP_OK != nret) {
+        GtpLog(gtp_obj->cb_.write_log_cb_, kGtpInterfaceMd, kGtpLogLevelError,
+               "calling receive_frame_cb_() failed(0x%08x)\r\n", nret);
+    }
+
+    #if (1 == ENABLE_INTERFACE_LOG)
+    GtpLog(gtp_obj->cb_.write_log_cb_, kGtpInterfaceMd, kGtpLogLevelDebug, "%s:%u<-->%s:%u gtp_inst=%p gtp_hdl=%p "\
+           "ver=0x%02x type=0x%02x pack_sn=%u first_sn=%u end frame cb out\r\n ",
+           self_ip, (u32)self_port, peer_ip, (u32)peer_port, gtp_obj, gtp_hdl, (u32)version, (u32)pack_type,
+           pack_sn, first_sn);
+    #endif
+
+    #if (1 == ENABLE_FRAME_COPY_OUT)
+    session->pack_mem_pool_.FreeTranBuf(out_mem);
+    out_mem = NULL;
+    #endif
 
 pack_receive_exit_pos_:
     #if (1 == ENABLE_INTERFACE_LOG)
@@ -844,11 +1013,19 @@ u32 GetLinkerQuality(GtpHandler_p gtp_hdl, GtpLinkerKey *linker_key, GtpLinkQual
                "the diffrent thread.\r\n");
     }
 
+    u32 nret = GtpLinkerKeySockInputIsValid(linker_key);
+    if (GTP_OK != nret) {
+        GtpLog(gtp_obj->cb_.write_log_cb_, kGtpInterfaceMd, kGtpLogLevelError,
+               "Goodtp linker key socket input is invalid(0x%08x peer_addr_len=%u self_addr_len=%u).\r\n",
+               nret, linker_key->peer_socket_addr_len_, linker_key->self_socket_addr_len_);
+        return nret;
+    }
+
     goodtp_sock sfd = (goodtp_sock)(linker_key->sfd_);
 
     u8  peer_bin_ip[IPV6_BIN_IP_SIZE] = {0};
     u8  self_bin_ip[IPV6_BIN_IP_SIZE] = {0};
-
+    
     u16 peer_ip_size  = 0;
     u16 peer_bin_port = 0;
     u16 self_ip_size  = 0;
@@ -863,7 +1040,7 @@ u32 GetLinkerQuality(GtpHandler_p gtp_hdl, GtpLinkerKey *linker_key, GtpLinkQual
     }
 
     GtpSessionKey session_key(sfd, &(peer_bin_ip[0]), peer_ip_size, peer_bin_port, &(self_bin_ip[0]), self_ip_size,
-                              peer_bin_port);
+                              self_bin_port);
 
     GtpSession *session = gtp_obj->GetSession(session_key);
     if (NULL == session) {
@@ -871,6 +1048,61 @@ u32 GetLinkerQuality(GtpHandler_p gtp_hdl, GtpLinkerKey *linker_key, GtpLinkQual
     }
 
     if (1 == linker_key->direction_) {
+        return session->GetQuality((u32)kSenderQuality, out_quality);
+    }
+
+    return session->GetQuality((u32)kReceiverQuality, out_quality);
+}
+
+static u32 GetSessionByAddrForQuery(GtpHandler_p gtp_hdl, GtpAddr *tran_addr, GoodTp **out_gtp_obj,
+                                    GtpSession **out_session) {
+    if ((NULL == tran_addr) || (NULL == out_gtp_obj) || (NULL == out_session)) {
+        RETURN_ERR(kGtpMgrMd, kInvalidInPutParam);
+    }
+
+    GoodTp *gtp_obj = GtpHandlerToObj(GtpHdlPointerToInt(gtp_hdl));
+    if (NULL == gtp_obj) {
+        RETURN_ERR(kGtpMgrMd, kInvalidGtpHandler);
+    }
+
+    if (GTP_OK != gtp_obj->CheckSingleThreadCalling()) {
+        GtpLog(gtp_obj->cb_.write_log_cb_, kGtpInterfaceMd, kGtpLogLevelWarning, "The same goodtp instance used by "\
+               "the diffrent thread.\r\n");
+    }
+
+    u32 nret = GtpTranAddrSockInputIsValid(tran_addr);
+    if (GTP_OK != nret) {
+        GtpLog(gtp_obj->cb_.write_log_cb_, kGtpInterfaceMd, kGtpLogLevelError,
+               "Goodtp transport address socket input is invalid(0x%08x dst_addr_len=%u src_addr_len=%u).\r\n",
+               nret, tran_addr->sock_addr_len_, tran_addr->self_addr_len_);
+        return nret;
+    }
+
+    GtpSession *session = gtp_obj->GetSessionByAddr(tran_addr);
+    if (NULL == session) {
+        RETURN_ERR(kGtpMgrMd, kLinkerNoExistErr);
+    }
+
+    *out_gtp_obj = gtp_obj;
+    *out_session = session;
+
+    return GTP_OK;
+}
+
+u32 GetLinkerQualityByAddr(GtpHandler_p gtp_hdl, GtpAddr *tran_addr, u32 direction, GtpLinkQuality *out_quality) {
+    if (NULL == out_quality) {
+        RETURN_ERR(kGtpMgrMd, kInvalidInPutParam);
+    }
+
+    GoodTp *gtp_obj = NULL;
+    GtpSession *session = NULL;
+    u32 nret = GetSessionByAddrForQuery(gtp_hdl, tran_addr, &gtp_obj, &session);
+    if (GTP_OK != nret) {
+        return nret;
+    }
+
+    (void)gtp_obj;
+    if (1 == direction) {
         return session->GetQuality((u32)kSenderQuality, out_quality);
     }
 
@@ -904,6 +1136,19 @@ void DelGtpLinker(GtpHandler_p gtp_hdl, GtpAddr *tran_addr) {
     if (GTP_OK != gtp_obj->CheckSingleThreadCalling()) {
         GtpLog(gtp_obj->cb_.write_log_cb_, kGtpInterfaceMd, kGtpLogLevelWarning, "The same goodtp instance used by "\
                "the diffrent thread.\r\n");
+    }
+
+    if ((GTP_YES == tran_addr->enable_key_) && (0 != tran_addr->stream_key_)) {
+        gtp_obj->DelSpsSession(gtp_hdl, tran_addr);
+        return;
+    }
+
+    u32 nret = GtpTranAddrSockInputIsValid(tran_addr);
+    if (GTP_OK != nret) {
+        GtpLog(gtp_obj->cb_.write_log_cb_, kGtpInterfaceMd, kGtpLogLevelError,
+               "Goodtp transport address socket input is invalid(0x%08x dst_addr_len=%u src_addr_len=%u).\r\n",
+               nret, tran_addr->sock_addr_len_, tran_addr->self_addr_len_);
+        return;
     }
 
     gtp_obj->DelSpsSession(gtp_hdl, tran_addr);
@@ -946,6 +1191,23 @@ u32 PrintSessionWinBitMap(GtpHandler_p gtp_hdl, const u8 *src_ip, const u8 *dst_
     return gtp_obj->ShowBitMap(src_ip, dst_ip, out_str, mem_size);
 }
 
+u32 PrintSessionWinBitMapByAddr(GtpHandler_p gtp_hdl, GtpAddr *tran_addr, u8 *out_str, u32 mem_size) {
+    if ((NULL == out_str) || (0 == mem_size)) {
+        RETURN_ERR(kGtpMgrMd, kInvalidInPutParam);
+    }
+
+    GoodTp *gtp_obj = NULL;
+    GtpSession *session = NULL;
+    u32 nret = GetSessionByAddrForQuery(gtp_hdl, tran_addr, &gtp_obj, &session);
+    if (GTP_OK != nret) {
+        return nret;
+    }
+
+    (void)gtp_obj;
+    u32 str_sz = 0;
+    return session->WinBitMap(out_str, mem_size, &str_sz);
+}
+
 /*****************************************************************************************************************
 Name     : GetAlgorithmParam
 Function : Get the goodtp algorithm parameters.
@@ -981,6 +1243,27 @@ u32 GetAlgorithmParam(GtpHandler_p gtp_hdl, const u8 *src_ip, const u8 *dst_ip, 
     u32 str_len = gtp_obj->ShowAlgorithmParam(src_ip, dst_ip, out_str, mem_size);
     if (0 == str_len) {
         RETURN_ERR(kGtpMgrMd, kGtpMgrMd);
+    }
+
+    return GTP_OK;
+}
+
+u32 GetAlgorithmParamByAddr(GtpHandler_p gtp_hdl, GtpAddr *tran_addr, u8 *out_str, u32 mem_size) {
+    if ((NULL == out_str) || (0 == mem_size)) {
+        RETURN_ERR(kGtpMgrMd, kInvalidInPutParam);
+    }
+
+    GoodTp *gtp_obj = NULL;
+    GtpSession *session = NULL;
+    u32 nret = GetSessionByAddrForQuery(gtp_hdl, tran_addr, &gtp_obj, &session);
+    if (GTP_OK != nret) {
+        return nret;
+    }
+
+    (void)gtp_obj;
+    u32 str_len = session->PrintAlgorithmParam(out_str, mem_size);
+    if (0 == str_len) {
+        RETURN_ERR(kGtpMgrMd, kMemNotEnoughErr);
     }
 
     return GTP_OK;
@@ -1056,11 +1339,19 @@ u32 GetSlidWinBitMapInfo(GtpHandler_p gtp_hdl, GtpLinkerKey *linker_key, u8 *out
                "the diffrent thread.\r\n");
     }
 
+    u32 nret = GtpLinkerKeySockInputIsValid(linker_key);
+    if (GTP_OK != nret) {
+        GtpLog(gtp_obj->cb_.write_log_cb_, kGtpInterfaceMd, kGtpLogLevelError,
+               "Goodtp linker key socket input is invalid(0x%08x peer_addr_len=%u self_addr_len=%u).\r\n",
+               nret, linker_key->peer_socket_addr_len_, linker_key->self_socket_addr_len_);
+        return nret;
+    }
+
     goodtp_sock sfd = (goodtp_sock)(linker_key->sfd_);
 
     u8  peer_bin_ip[IPV6_BIN_IP_SIZE] = {0};
     u8  self_bin_ip[IPV6_BIN_IP_SIZE] = {0};
-
+    
     u16 peer_ip_size  = 0;
     u16 peer_bin_port = 0;
     u16 self_ip_size  = 0;
@@ -1083,7 +1374,29 @@ u32 GetSlidWinBitMapInfo(GtpHandler_p gtp_hdl, GtpLinkerKey *linker_key, u8 *out
     }
 
     u32 str_sz = 0;
-    u32 nret   = session->WinBitMap(out_str, mem_size, &str_sz);
+    nret = session->WinBitMap(out_str, mem_size, &str_sz);
+    if (GTP_OK != nret) {
+        return nret;
+    }
+
+    return GTP_OK;
+}
+
+u32 GetSlidWinBitMapInfoByAddr(GtpHandler_p gtp_hdl, GtpAddr *tran_addr, u8 *out_str, u32 mem_size) {
+    if ((NULL == out_str) || (0 == mem_size)) {
+        RETURN_ERR(kGtpMgrMd, kInvalidInPutParam);
+    }
+
+    GoodTp *gtp_obj = NULL;
+    GtpSession *session = NULL;
+    u32 nret = GetSessionByAddrForQuery(gtp_hdl, tran_addr, &gtp_obj, &session);
+    if (GTP_OK != nret) {
+        return nret;
+    }
+
+    (void)gtp_obj;
+    u32 str_sz = 0;
+    nret = session->WinBitMap(out_str, mem_size, &str_sz);
     if (GTP_OK != nret) {
         return nret;
     }
@@ -1153,35 +1466,6 @@ u32 GetSessionNumber(GtpHandler_p gtp_hdl) {
     return gtp_obj->SessionNumber();
 }
 
-/*****************************************************************************************************************
-Name     : CalcOnePacketLength
-Function : get a bit linker packet's length from the four-byte header.
-In param : const uint8_t header[4]  // the first four bytes of one bit linker packet.
-Out param: void
-Return   : int32_t  // -1: not a valid bit linker packet, others: packet's byte length.
-
-Mdf history  :
-1.Date       : 2025.05.13
-    Author     : Albert.Feng
-    Mdf context: new function
-
-*****************************************************************************************************************/
-i32 CalcOnePacketLength(const u8 header[4]) {
-    NewGtpHeader4Byte h;
-    memcpy(&h, header, sizeof(h));
-
-    if (0x02 != h.goodtp_ver_) {
-        return -1;
-    }
-
-    if ((0x00 == h.pack_type_) || (((u8)(GtpPackType::GtpPackTypeButt)) <= h.pack_type_)) {
-        return -1;
-    }
-
-    return (i32)(h.pack_size_);
-}
-
 #ifdef __cplusplus
 }
 #endif
-

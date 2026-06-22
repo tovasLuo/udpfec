@@ -53,6 +53,8 @@ struct FactorCfg2 {};
 // };
 
 struct SendingFrequence {
+    SendingFrequence() : timestamp_us(0), factorA(0.0f), reserved_bytes(0) {}
+
     uint64_t timestamp_us;
     float    factorA;  // [0.526, 10];
     uint32_t reserved_bytes;
