@@ -977,15 +977,14 @@ h_first_fec_encode_pos_:
         encode_.encode_matrix_.h_fec_code_[h_pos].fec_pack_->fec_encode_dir_ = (u8)(Fec2CodeDir::kHorizontal);
         encode_.encode_matrix_.h_fec_code_[h_pos].fec_pack_->fec_encode_pos_ = (u8)h_pos;
 
-        // temporary cache in the stream_key_ memory.
-        encode_.encode_matrix_.h_fec_code_[h_pos].tran_addr_->stream_key_    = (u64)com_var;  // temp cache.
+        encode_.encode_matrix_.h_fec_code_[h_pos].alloc_cap_ = com_var;
 
         goto h_fec_encode_exit_pos_;
     }
 
     if (0 == v_pos) {
         Fec2CodePackMgr &hmgr = encode_.encode_matrix_.h_fec_code_[h_pos];
-        if (data_size <= (u32)(hmgr.tran_addr_->stream_key_)) {
+        if (data_size <= hmgr.alloc_cap_) {
             memcpy(hmgr.fec_pack_->fec_code_, data, data_size);
             hmgr.fec_pack_->code_len_       = (u16)data_size;
             hmgr.fec_pack_->code_book_id_   = encode_.encode_matrix_.code_book_id_;
@@ -1001,7 +1000,7 @@ h_first_fec_encode_pos_:
         goto h_first_fec_encode_pos_;
     }
 
-    if (data_size > ((u32)(encode_.encode_matrix_.h_fec_code_[h_pos].tran_addr_->stream_key_))) {
+    if (data_size > encode_.encode_matrix_.h_fec_code_[h_pos].alloc_cap_) {
         com_var = ReAllocateEncodeMem(data_size, encode_.encode_matrix_.h_fec_code_[h_pos]);
         if (GTP_OK != com_var) {
             GtpLog(write_log_cb_, kGtpFecMd, kGtpLogLevelError,
@@ -1058,15 +1057,14 @@ v_first_fec_encode_pos_:
         encode_.encode_matrix_.v_fec_code_[v_pos].fec_pack_->fec_encode_dir_ = (u8)(Fec2CodeDir::kVertical);
         encode_.encode_matrix_.v_fec_code_[v_pos].fec_pack_->fec_encode_pos_ = (u8)v_pos;
 
-        // temporary in the stream_key_ memory.
-        encode_.encode_matrix_.v_fec_code_[v_pos].tran_addr_->stream_key_   = (u64)com_var;  // temp cache.
+        encode_.encode_matrix_.v_fec_code_[v_pos].alloc_cap_ = com_var;
 
         goto v_fec_encode_exit_pos_;
     }
 
     if (0 == h_pos) {
         Fec2CodePackMgr &vmgr = encode_.encode_matrix_.v_fec_code_[v_pos];
-        if (data_size <= (u32)(vmgr.tran_addr_->stream_key_)) {
+        if (data_size <= vmgr.alloc_cap_) {
             memcpy(vmgr.fec_pack_->fec_code_, data, data_size);
             vmgr.fec_pack_->code_len_       = (u16)data_size;
             vmgr.fec_pack_->code_book_id_   = encode_.encode_matrix_.code_book_id_;
@@ -1082,7 +1080,7 @@ v_first_fec_encode_pos_:
         goto v_first_fec_encode_pos_;
     }
 
-    if (data_size > ((u32)(encode_.encode_matrix_.v_fec_code_[v_pos].tran_addr_->stream_key_))) {
+    if (data_size > encode_.encode_matrix_.v_fec_code_[v_pos].alloc_cap_) {
         com_var = ReAllocateEncodeMem(data_size, encode_.encode_matrix_.v_fec_code_[v_pos]);
         if (GTP_OK != com_var) {
             GtpLog(write_log_cb_, kGtpFecMd, kGtpLogLevelError,
@@ -1148,13 +1146,13 @@ uh_first_fec_encode_pos_:
         mgr.fec_pack_->pack_sn_        = encode_.encode_matrix_.start_pack_sn_;
         mgr.fec_pack_->fec_encode_dir_ = (u8)(Fec2CodeDir::kUpHill);
         mgr.fec_pack_->fec_encode_pos_ = (u8)uh_idx;
-        mgr.tran_addr_->stream_key_    = (u64)com_var;
+        mgr.alloc_cap_ = com_var;
 
         goto uh_fec_encode_exit_pos_;
     }
 
     if (h_pos == h_pos_start) {
-        if (data_size <= (u32)(mgr.tran_addr_->stream_key_)) {
+        if (data_size <= mgr.alloc_cap_) {
             memcpy(mgr.fec_pack_->fec_code_, data, data_size);
             mgr.fec_pack_->code_len_       = (u16)data_size;
             mgr.fec_pack_->code_book_id_   = encode_.encode_matrix_.code_book_id_;
@@ -1170,7 +1168,7 @@ uh_first_fec_encode_pos_:
         goto uh_first_fec_encode_pos_;
     }
 
-    if (data_size > ((u32)(mgr.tran_addr_->stream_key_))) {
+    if (data_size > mgr.alloc_cap_) {
         com_var = ReAllocateEncodeMem(data_size, mgr);
         if (GTP_OK != com_var) {
             GtpLog(write_log_cb_, kGtpFecMd, kGtpLogLevelError,
@@ -1234,13 +1232,13 @@ dh_first_fec_encode_pos_:
         mgr.fec_pack_->pack_sn_        = encode_.encode_matrix_.start_pack_sn_;
         mgr.fec_pack_->fec_encode_dir_ = (u8)(Fec2CodeDir::kDownHill);
         mgr.fec_pack_->fec_encode_pos_ = (u8)dh_idx;
-        mgr.tran_addr_->stream_key_    = (u64)com_var;
+        mgr.alloc_cap_ = com_var;
 
         goto dh_fec_encode_exit_pos_;
     }
 
     if (h_pos == h_pos_start) {
-        if (data_size <= (u32)(mgr.tran_addr_->stream_key_)) {
+        if (data_size <= mgr.alloc_cap_) {
             memcpy(mgr.fec_pack_->fec_code_, data, data_size);
             mgr.fec_pack_->code_len_       = (u16)data_size;
             mgr.fec_pack_->code_book_id_   = encode_.encode_matrix_.code_book_id_;
@@ -1256,7 +1254,7 @@ dh_first_fec_encode_pos_:
         goto dh_first_fec_encode_pos_;
     }
 
-    if (data_size > ((u32)(mgr.tran_addr_->stream_key_))) {
+    if (data_size > mgr.alloc_cap_) {
         com_var = ReAllocateEncodeMem(data_size, mgr);
         if (GTP_OK != com_var) {
             GtpLog(write_log_cb_, kGtpFecMd, kGtpLogLevelError,
@@ -1285,12 +1283,14 @@ void GtpFec2::SendFecCodePacket(Fec2CodePackMgr &fec_code_mgr) {
     u32 pack_size = (u32)sizeof(Fec2CodePack) + (u32)(fec_code_mgr.fec_pack_->code_len_);
 
     if (GTP_YES == pb_dt_->tran_addr_.enable_key_) {
-        u32 alloc_cap = (u32)(fec_code_mgr.tran_addr_->stream_key_);  // com_var cached before memcpy
+        u32 alloc_cap = fec_code_mgr.alloc_cap_;
         u16 code_len  = fec_code_mgr.fec_pack_->code_len_;
         if (alloc_cap >= (u32)code_len + (u32)sizeof(u64)) {
             memmove(fec_code_mgr.fec_pack_->fec_code_ + sizeof(u64), fec_code_mgr.fec_pack_->fec_code_, code_len);
-            *((u32*)(fec_code_mgr.fec_pack_->fec_code_))              = (u32)(pb_dt_->tran_addr_.stream_key_ >> 32);
-            *((u32*)(fec_code_mgr.fec_pack_->fec_code_ + sizeof(u32))) = (u32)(pb_dt_->tran_addr_.stream_key_);
+            u32 fec_hi = (u32)(pb_dt_->tran_addr_.stream_key_ >> 32);
+            u32 fec_lo = (u32)(pb_dt_->tran_addr_.stream_key_);
+            memcpy(fec_code_mgr.fec_pack_->fec_code_,              &fec_hi, sizeof(u32));
+            memcpy(fec_code_mgr.fec_pack_->fec_code_ + sizeof(u32), &fec_lo, sizeof(u32));
             pack_size += (u32)sizeof(u64);
             has_check  = GTP_YES;
         }
@@ -1675,7 +1675,7 @@ u32 GtpFec2::ReAllocateEncodeMem(const u32 &new_size, Fec2CodePackMgr &fec_code_
     fec_code_mgr.fec_pack_  = (Fec2CodePack*)new_mem;
     fec_code_mgr.tran_addr_ = tran_addr;
 
-    fec_code_mgr.tran_addr_->stream_key_ = (u64)mem_size;
+    fec_code_mgr.alloc_cap_ = mem_size;
 
     return GTP_OK;
 }

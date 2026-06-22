@@ -412,8 +412,12 @@ u32 GtpCheckPacketInvalid(void *pack, u32 pack_size, u64 *stream_key) {
         }
 
         if ((key_offset + sizeof(u64)) <= pack_size) {
-            u32 hash    = *((u32*)(((u8*)gtp_pack) + key_offset));
-            u32 user_id = *((u32*)(((u8*)gtp_pack) + key_offset + sizeof(u32)));
+            // wire layout: [HIGH32 of stream_key][LOW32 of stream_key] at key_offset.
+            // local names 'hash'/'user_id' are misleading relics — the math is correct.
+            u32 hash    = 0;
+            u32 user_id = 0;
+            memcpy(&hash,    ((u8*)gtp_pack) + key_offset,              sizeof(u32));
+            memcpy(&user_id, ((u8*)gtp_pack) + key_offset + sizeof(u32), sizeof(u32));
 
             *stream_key = (((u64)hash) << 32) | ((u64)user_id);
         }
@@ -589,6 +593,27 @@ u32 GtpPacketReceive(GtpHandler_p gtp_hdl, void *pack, u32 pack_sz, GtpAddr *tra
     if (0x02 > gtp_pack->goodtp_ver_) {
         gtp_pack->has_chg_zone_ = GTP_NO;
         gtp_pack->stream_type_  = kRealTimeStream;
+    }
+
+    // If caller did not pre-set enable_key_, extract stream_key from the packet so that
+    // GetSession can find or create the session by key rather than by five-tuple.
+    if ((GTP_NO == tran_addr->enable_key_) && (GTP_YES == gtp_pack->has_check_flag_)) {
+        u32 key_offset = (u32)sizeof(GtpPacket);
+        if ((u8)(GtpPackType::kGtpFecPackType) == gtp_pack->pack_type_) {
+            key_offset = (u32)sizeof(Fec2CodePack);
+        } else if (0 != ((u8)(gtp_pack->repeat_counter_))) {
+            key_offset += (u32)sizeof(u32);
+        }
+        if ((key_offset + (u32)sizeof(u64)) <= pack_sz) {
+            u32 hi = 0, lo = 0;
+            memcpy(&hi, ((u8*)gtp_pack) + key_offset,              sizeof(u32));
+            memcpy(&lo, ((u8*)gtp_pack) + key_offset + sizeof(u32), sizeof(u32));
+            u64 embedded_key = ((u64)hi << 32) | (u64)lo;
+            if (0 != embedded_key) {
+                tran_addr->enable_key_ = GTP_YES;
+                tran_addr->stream_key_ = embedded_key;
+            }
+        }
     }
 
     gtp_obj->current_ts_us_ = GtpSysTimestampUs();
@@ -823,7 +848,7 @@ u32 GetLinkerQuality(GtpHandler_p gtp_hdl, GtpLinkerKey *linker_key, GtpLinkQual
 
     u8  peer_bin_ip[IPV6_BIN_IP_SIZE] = {0};
     u8  self_bin_ip[IPV6_BIN_IP_SIZE] = {0};
-    
+
     u16 peer_ip_size  = 0;
     u16 peer_bin_port = 0;
     u16 self_ip_size  = 0;
@@ -1035,7 +1060,7 @@ u32 GetSlidWinBitMapInfo(GtpHandler_p gtp_hdl, GtpLinkerKey *linker_key, u8 *out
 
     u8  peer_bin_ip[IPV6_BIN_IP_SIZE] = {0};
     u8  self_bin_ip[IPV6_BIN_IP_SIZE] = {0};
-    
+
     u16 peer_ip_size  = 0;
     u16 peer_bin_port = 0;
     u16 self_ip_size  = 0;

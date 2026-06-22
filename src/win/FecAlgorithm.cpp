@@ -210,23 +210,17 @@ auto FecAlgorithm::_coro_main_down(fec& fec) -> awaitable<void>
 
 		u64 streamKey2 = 0;
 		auto errCode = GtpCheckPacketInvalid(pkt->buffer.data.data() + pkt->buffer.pos, pkt->buffer.len, &streamKey2);
-		if (errCode == GTP_OK) {
+		if (errCode == GTP_OK && streamKey2 != 0 && _streamKeys.count(pkt->info->nid)) {
 			_info.try_emplace(streamKey2, pkt->info);
 			_streamKeys[pkt->info->nid].try_insert(streamKey2);
 
 			fec.recv_fec_pdu(streamKey2,
 				pkt->down_transer_local, pkt->node,
 				pkt->buffer.data.data() + pkt->buffer.pos, pkt->buffer.len);
-
-
-			u64 streamKey1 = get_stream_key(_cfg_udppwd, pkt->info->local.port_net,
-				route::get_index(pkt->node.si4.sin_addr.S_un.S_addr));
-			if (streamKey1 != streamKey2) {
-				TRACEX_PAGE_("_coro_main_down recv pkt streamKey invalid, streamKey1={}, streamKey2={}", streamKey1, streamKey2);
-			}
 		}
 		else {
-			TRACEX_PAGE_("_coro_main_down recv pkt invalid, errCode={}, data_len={}", errCode, pkt->buffer.len);
+			TRACEX_PAGE_("_coro_main_down drop pkt: errCode={}, streamKey2={}, nid_active={}, data_len={}",
+				errCode, streamKey2, _streamKeys.count(pkt->info->nid), pkt->buffer.len);
 		}
 	}
 	TRACEX_PAGE0("_coro_main_down end");

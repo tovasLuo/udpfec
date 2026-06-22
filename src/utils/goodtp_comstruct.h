@@ -563,6 +563,7 @@ typedef struct _Fec2CodePack {
 typedef struct _Fec2CodePackMgr {
     Fec2CodePack *fec_pack_;
     GtpAddr *tran_addr_;
+    u32 alloc_cap_;  // usable bytes in fec_code_[] buffer, from MallocTranBuf mem_size
 }Fec2CodePackMgr;
 
 typedef struct _Fec2EnDeCodeMatrix {
@@ -588,17 +589,21 @@ typedef struct _Fec2EnDeCodeMatrix {
         for (i = 0; MAX_FEC2_MATRIX_H_SIZE > i; ++i) {
             h_fec_code_[i].fec_pack_  = NULL;
             h_fec_code_[i].tran_addr_ = NULL;
+            h_fec_code_[i].alloc_cap_ = 0;
 
             v_fec_code_[i].fec_pack_  = NULL;
             v_fec_code_[i].tran_addr_ = NULL;
+            v_fec_code_[i].alloc_cap_ = 0;
         }
 
         for (i = 0; MAX_FEC2_HILL_SIZE > i; ++i) {
             uh_fec_code_[i].fec_pack_  = NULL;
             uh_fec_code_[i].tran_addr_ = NULL;
+            uh_fec_code_[i].alloc_cap_ = 0;
 
             dh_fec_code_[i].fec_pack_  = NULL;
             dh_fec_code_[i].tran_addr_ = NULL;
+            dh_fec_code_[i].alloc_cap_ = 0;
         }
     }
 
@@ -624,17 +629,21 @@ typedef struct _Fec2EnDeCodeMatrix {
         for (i = 0; MAX_FEC2_MATRIX_H_SIZE > i; ++i) {
             h_fec_code_[i].fec_pack_  = NULL;
             h_fec_code_[i].tran_addr_ = NULL;
+            h_fec_code_[i].alloc_cap_ = 0;
 
             v_fec_code_[i].fec_pack_  = NULL;
             v_fec_code_[i].tran_addr_ = NULL;
+            v_fec_code_[i].alloc_cap_ = 0;
         }
 
         for (i = 0; MAX_FEC2_HILL_SIZE > i; ++i) {
             uh_fec_code_[i].fec_pack_  = NULL;
             uh_fec_code_[i].tran_addr_ = NULL;
+            uh_fec_code_[i].alloc_cap_ = 0;
 
             dh_fec_code_[i].fec_pack_  = NULL;
             dh_fec_code_[i].tran_addr_ = NULL;
+            dh_fec_code_[i].alloc_cap_ = 0;
         }
     }
 
@@ -657,17 +666,21 @@ typedef struct _Fec2EnDeCodeMatrix {
         for (i = 0; MAX_FEC2_MATRIX_H_SIZE > i; ++i) {
             h_fec_code_[i].fec_pack_  = NULL;
             h_fec_code_[i].tran_addr_ = NULL;
+            h_fec_code_[i].alloc_cap_ = 0;
 
             v_fec_code_[i].fec_pack_  = NULL;
             v_fec_code_[i].tran_addr_ = NULL;
+            v_fec_code_[i].alloc_cap_ = 0;
         }
 
         for (i = 0; MAX_FEC2_HILL_SIZE > i; ++i) {
             uh_fec_code_[i].fec_pack_  = NULL;
             uh_fec_code_[i].tran_addr_ = NULL;
+            uh_fec_code_[i].alloc_cap_ = 0;
 
             dh_fec_code_[i].fec_pack_  = NULL;
             dh_fec_code_[i].tran_addr_ = NULL;
+            dh_fec_code_[i].alloc_cap_ = 0;
         }
     }
 
@@ -679,12 +692,14 @@ typedef struct _Fec2EnDeCodeMatrix {
                 pack_mem_pool.FreeTranBuf((u8*)(h_fec_code_[i].fec_pack_));
                 h_fec_code_[i].fec_pack_  = NULL;
                 h_fec_code_[i].tran_addr_ = NULL;
+                h_fec_code_[i].alloc_cap_ = 0;
             }
 
             if (NULL != v_fec_code_[i].fec_pack_) {
                 pack_mem_pool.FreeTranBuf((u8*)(v_fec_code_[i].fec_pack_));
                 v_fec_code_[i].fec_pack_  = NULL;
                 v_fec_code_[i].tran_addr_ = NULL;
+                v_fec_code_[i].alloc_cap_ = 0;
             }
         }
 
@@ -697,12 +712,14 @@ typedef struct _Fec2EnDeCodeMatrix {
                 pack_mem_pool.FreeTranBuf((u8*)(uh_fec_code_[i].fec_pack_));
                 uh_fec_code_[i].fec_pack_  = NULL;
                 uh_fec_code_[i].tran_addr_ = NULL;
+                uh_fec_code_[i].alloc_cap_ = 0;
             }
 
             if (NULL != dh_fec_code_[i].fec_pack_) {
                 pack_mem_pool.FreeTranBuf((u8*)(dh_fec_code_[i].fec_pack_));
                 dh_fec_code_[i].fec_pack_  = NULL;
                 dh_fec_code_[i].tran_addr_ = NULL;
+                dh_fec_code_[i].alloc_cap_ = 0;
             }
         }
 
@@ -732,12 +749,14 @@ recv_matrix_init_exit_pos_:
                 pack_mem_pool.FreeTranBuf((u8*)(h_fec_code_[i].fec_pack_));
                 h_fec_code_[i].fec_pack_  = NULL;
                 h_fec_code_[i].tran_addr_ = NULL;
+                h_fec_code_[i].alloc_cap_ = 0;
             }
 
             if (NULL != v_fec_code_[i].fec_pack_) {
                 pack_mem_pool.FreeTranBuf((u8*)(v_fec_code_[i].fec_pack_));
                 v_fec_code_[i].fec_pack_  = NULL;
                 v_fec_code_[i].tran_addr_ = NULL;
+                v_fec_code_[i].alloc_cap_ = 0;
             }
         }
 
@@ -750,12 +769,14 @@ recv_matrix_init_exit_pos_:
                 pack_mem_pool.FreeTranBuf((u8*)(uh_fec_code_[i].fec_pack_));
                 uh_fec_code_[i].fec_pack_  = NULL;
                 uh_fec_code_[i].tran_addr_ = NULL;
+                uh_fec_code_[i].alloc_cap_ = 0;
             }
 
             if (NULL != dh_fec_code_[i].fec_pack_) {
                 pack_mem_pool.FreeTranBuf((u8*)(dh_fec_code_[i].fec_pack_));
                 dh_fec_code_[i].fec_pack_  = NULL;
                 dh_fec_code_[i].tran_addr_ = NULL;
+                dh_fec_code_[i].alloc_cap_ = 0;
             }
         }
 
