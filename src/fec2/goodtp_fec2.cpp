@@ -950,6 +950,7 @@ void GtpFec2::HorizontalEncode(const encode_pos &h_pos, const encode_pos &v_pos,
     u32 mem_spec = 0;
     u8 *new_mem  = 0;
     GtpAddr* tran_addr = NULL;
+    u32 key_extra = (GTP_YES == pb_dt_->tran_addr_.enable_key_) ? (u32)sizeof(u64) : 0u;
 
     if (NULL == encode_.encode_matrix_.h_fec_code_[h_pos].fec_pack_) {
 h_first_fec_encode_pos_:
@@ -984,7 +985,7 @@ h_first_fec_encode_pos_:
 
     if (0 == v_pos) {
         Fec2CodePackMgr &hmgr = encode_.encode_matrix_.h_fec_code_[h_pos];
-        if (data_size <= hmgr.alloc_cap_) {
+        if (data_size + key_extra <= hmgr.alloc_cap_) {
             memcpy(hmgr.fec_pack_->fec_code_, data, data_size);
             hmgr.fec_pack_->code_len_       = (u16)data_size;
             hmgr.fec_pack_->code_book_id_   = encode_.encode_matrix_.code_book_id_;
@@ -1000,7 +1001,7 @@ h_first_fec_encode_pos_:
         goto h_first_fec_encode_pos_;
     }
 
-    if (data_size > encode_.encode_matrix_.h_fec_code_[h_pos].alloc_cap_) {
+    if (data_size + key_extra > encode_.encode_matrix_.h_fec_code_[h_pos].alloc_cap_) {
         com_var = ReAllocateEncodeMem(data_size, encode_.encode_matrix_.h_fec_code_[h_pos]);
         if (GTP_OK != com_var) {
             GtpLog(write_log_cb_, kGtpFecMd, kGtpLogLevelError,
@@ -1030,6 +1031,7 @@ void GtpFec2::VerticalEncode(const encode_pos &h_pos, const encode_pos &v_pos, u
     u32 mem_spec = 0;
     u8 *new_mem  = 0;
     GtpAddr* tran_addr = NULL;
+    u32 key_extra = (GTP_YES == pb_dt_->tran_addr_.enable_key_) ? (u32)sizeof(u64) : 0u;
 
     if (NULL == encode_.encode_matrix_.v_fec_code_[v_pos].fec_pack_) {
 v_first_fec_encode_pos_:
@@ -1064,7 +1066,7 @@ v_first_fec_encode_pos_:
 
     if (0 == h_pos) {
         Fec2CodePackMgr &vmgr = encode_.encode_matrix_.v_fec_code_[v_pos];
-        if (data_size <= vmgr.alloc_cap_) {
+        if (data_size + key_extra <= vmgr.alloc_cap_) {
             memcpy(vmgr.fec_pack_->fec_code_, data, data_size);
             vmgr.fec_pack_->code_len_       = (u16)data_size;
             vmgr.fec_pack_->code_book_id_   = encode_.encode_matrix_.code_book_id_;
@@ -1080,7 +1082,7 @@ v_first_fec_encode_pos_:
         goto v_first_fec_encode_pos_;
     }
 
-    if (data_size > encode_.encode_matrix_.v_fec_code_[v_pos].alloc_cap_) {
+    if (data_size + key_extra > encode_.encode_matrix_.v_fec_code_[v_pos].alloc_cap_) {
         com_var = ReAllocateEncodeMem(data_size, encode_.encode_matrix_.v_fec_code_[v_pos]);
         if (GTP_OK != com_var) {
             GtpLog(write_log_cb_, kGtpFecMd, kGtpLogLevelError,
@@ -1122,6 +1124,7 @@ void GtpFec2::UphillEncode(const encode_pos &h_pos, const encode_pos &v_pos, u8 
     u32 mem_spec = 0;
     u8 *new_mem  = NULL;
     GtpAddr *tran_addr = NULL;
+    u32 key_extra = (GTP_YES == pb_dt_->tran_addr_.enable_key_) ? (u32)sizeof(u64) : 0u;
 
     Fec2CodePackMgr &mgr = encode_.encode_matrix_.uh_fec_code_[uh_idx];
 
@@ -1152,7 +1155,7 @@ uh_first_fec_encode_pos_:
     }
 
     if (h_pos == h_pos_start) {
-        if (data_size <= mgr.alloc_cap_) {
+        if (data_size + key_extra <= mgr.alloc_cap_) {
             memcpy(mgr.fec_pack_->fec_code_, data, data_size);
             mgr.fec_pack_->code_len_       = (u16)data_size;
             mgr.fec_pack_->code_book_id_   = encode_.encode_matrix_.code_book_id_;
@@ -1168,7 +1171,7 @@ uh_first_fec_encode_pos_:
         goto uh_first_fec_encode_pos_;
     }
 
-    if (data_size > mgr.alloc_cap_) {
+    if (data_size + key_extra > mgr.alloc_cap_) {
         com_var = ReAllocateEncodeMem(data_size, mgr);
         if (GTP_OK != com_var) {
             GtpLog(write_log_cb_, kGtpFecMd, kGtpLogLevelError,
@@ -1208,6 +1211,7 @@ void GtpFec2::DownhillEncode(const encode_pos &h_pos, const encode_pos &v_pos, u
     u32 mem_spec = 0;
     u8 *new_mem  = NULL;
     GtpAddr *tran_addr = NULL;
+    u32 key_extra = (GTP_YES == pb_dt_->tran_addr_.enable_key_) ? (u32)sizeof(u64) : 0u;
 
     Fec2CodePackMgr &mgr = encode_.encode_matrix_.dh_fec_code_[dh_idx];
 
@@ -1238,7 +1242,7 @@ dh_first_fec_encode_pos_:
     }
 
     if (h_pos == h_pos_start) {
-        if (data_size <= mgr.alloc_cap_) {
+        if (data_size + key_extra <= mgr.alloc_cap_) {
             memcpy(mgr.fec_pack_->fec_code_, data, data_size);
             mgr.fec_pack_->code_len_       = (u16)data_size;
             mgr.fec_pack_->code_book_id_   = encode_.encode_matrix_.code_book_id_;
@@ -1254,7 +1258,7 @@ dh_first_fec_encode_pos_:
         goto dh_first_fec_encode_pos_;
     }
 
-    if (data_size > mgr.alloc_cap_) {
+    if (data_size + key_extra > mgr.alloc_cap_) {
         com_var = ReAllocateEncodeMem(data_size, mgr);
         if (GTP_OK != com_var) {
             GtpLog(write_log_cb_, kGtpFecMd, kGtpLogLevelError,

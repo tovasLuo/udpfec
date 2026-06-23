@@ -155,9 +155,18 @@ bool fec::recv_fec_pdu(const std::shared_ptr<listen_session_info>& listener)
     //client_gtp_addr->qos_ = 0;
 
     if (client_gtp_addr->enable_key_ == 0) {
-        plog(LOG_WARNING, "[%s][server]WARN: recv_fec_pdu fec_stream_key_=0 -> enable_key_=0 (will create 5-tuple session if auto-extraction fails) client=%s\n",
+        uint8_t pack_type = 0;
+        if (session_mgr_->data_len_ >= 4) {
+            uint32_t first4 = 0;
+            memcpy(&first4, mem, sizeof(uint32_t));
+            pack_type = (uint8_t)((first4 >> 16) & 0x7);
+        }
+        plog(LOG_WARNING, "[%s][server]WARN: recv_fec_pdu fec_stream_key_=0 pack_type=%u -> drop (no 5-tuple session) client=%s\n",
             session_mgr_->get_print_prefix_4_client_recv(listener),
+            (unsigned)pack_type,
             socket_helper::addr_to_ip_and_port(session_mgr_->data_addr_).c_str());
+        GtpFreePackMem(hdl_, mem);
+        return false;
     } else {
         plog(LOG_DEBUG, "[%s][server]INFO: recv_fec_pdu fec_stream_key_=%llu enable_key_=1 client=%s\n",
             session_mgr_->get_print_prefix_4_client_recv(listener),
