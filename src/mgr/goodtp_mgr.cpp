@@ -1611,9 +1611,10 @@ void GoodTp::CheckResourceActiveStatus(GtpHandler_p app_gtp_hdl) {
             itr->second->fec2_obj_.PopAllPack(current_ts_us_);
             #endif
 
-            GtpLog(cb_.write_log_cb_, kGtpSessionMd, kGtpLogLevelWarning, "deleted session%s:%u<--->%s:%u.\r\n",
+            GtpLog(cb_.write_log_cb_, kGtpSessionMd, kGtpLogLevelWarning, "deleted session%s:%u<--->%s:%u(key=%llu TTL-expired).\r\n",
                    itr->second->pb_dt_.self_ip_, (u32)(itr->second->pb_dt_.self_port_),
-                   itr->second->pb_dt_.peer_ip_, (u32)(itr->second->pb_dt_.peer_port_));
+                   itr->second->pb_dt_.peer_ip_, (u32)(itr->second->pb_dt_.peer_port_),
+                   (unsigned long long)(itr->second->pb_dt_.tran_addr_.stream_key_));
 
             delete (itr->second);
             itr = session_map_.erase(itr);

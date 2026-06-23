@@ -1348,6 +1348,15 @@ void GtpFec2::CachedFecEncodePack(Fec2CodePackMgr *fec_code_mgr, Fec2CodePack *f
     fec_code_mgr->fec_pack_  = fec_code_pack;
     fec_code_mgr->tran_addr_ = (GtpAddr*)((u8*)fec_code_pack - TP_ADDR_RSV_SIZE);
 
+    // When has_check_flag_=1, fec_code_[0..7] is the 8-byte stream key and the actual
+    // XOR parity data starts at fec_code_[8]. Strip the key in-place so RestoreDataBy*Dir
+    // can XOR from fec_code_[0] unconditionally and cast fec_code_[0] as GtpPacket*.
+    if (GTP_YES == fec_code_pack->has_check_flag_) {
+        memmove(&fec_code_pack->fec_code_[0], &fec_code_pack->fec_code_[sizeof(u64)],
+                fec_code_pack->code_len_);
+        fec_code_pack->has_check_flag_ = GTP_NO;
+    }
+
     return;
 }
 
