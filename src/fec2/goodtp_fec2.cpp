@@ -620,11 +620,20 @@ try_again_encode_pos_:
 
 u32 GtpFec2::Decode(Fec2CodePack *fec_code_pack, const u64 &ts_us) {
     if (GTP_YES == fec_code_pack->has_check_flag_) {
-        // strip the stream_key_ (8 bytes) prepended before fec_code_ so downstream is key-unaware
-        if ((u32)(fec_code_pack->code_len_) + (u32)sizeof(u64) <= (u32)(fec_code_pack->pack_size_)) {
-            memmove(fec_code_pack->fec_code_, fec_code_pack->fec_code_ + sizeof(u64), fec_code_pack->code_len_);
-            fec_code_pack->pack_size_     -= (u16)sizeof(u64);
+        // strip the stream_key_ (8 bytes) prepended before fec_code_ so downstream is key-unaware.
+        // Discard if pack_size is too small to hold key+parity, or code_len < 8: in the latter case
+        // memmove would not cover pack_sn_ (at byte offset 4), leaving key bytes in fec_code_[4..7];
+        // XorEncode would then zero those bytes before XOR, yielding the partner's SN instead of the
+        // recovered packet's SN — triggering spurious "fec restore abnormal" errors.
+        if ((u32)(fec_code_pack->code_len_) + (u32)sizeof(u64) > (u32)(fec_code_pack->pack_size_)
+         || fec_code_pack->code_len_ < (u16)sizeof(u64)) {
+            GtpLog(write_log_cb_, kGtpFecMd, kGtpLogLevelWarning,
+                   "Discard fec pack with invalid size(code_len=%u pack_size=%u).\r\n",
+                   (u32)(fec_code_pack->code_len_), (u32)(fec_code_pack->pack_size_));
+            return GTP_OK;
         }
+        memmove(fec_code_pack->fec_code_, fec_code_pack->fec_code_ + sizeof(u64), fec_code_pack->code_len_);
+        fec_code_pack->pack_size_     -= (u16)sizeof(u64);
         fec_code_pack->has_check_flag_  = GTP_NO;
     }
 
