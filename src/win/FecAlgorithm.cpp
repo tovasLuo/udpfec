@@ -227,8 +227,17 @@ auto FecAlgorithm::_coro_main_down(fec& fec) -> awaitable<void>
 				pkt->buffer.data.data() + pkt->buffer.pos, pkt->buffer.len);
 		}
 		else {
-			TRACEX_PAGE_("_coro_main_down drop pkt: errCode={}, streamKey2={}, nid_active={}, data_len={}",
-				errCode, streamKey2, _streamKeys.count(pkt->info->nid), pkt->buffer.len);
+			// Decode GTP header fields for diagnosis: has_check_flag_ at byte 8 bit0, pack_type_ at bits 16-18 of first u32
+			u8 has_check = 0, pack_type = 0;
+			if (pkt->buffer.len >= 10) {
+				u32 first4 = 0; u16 flags16 = 0;
+				memcpy(&first4,  pkt->buffer.data.data() + pkt->buffer.pos,     sizeof(u32));
+				memcpy(&flags16, pkt->buffer.data.data() + pkt->buffer.pos + 8, sizeof(u16));
+				pack_type = (u8)((first4 >> 16) & 0x7);
+				has_check = (u8)(flags16 & 1);
+			}
+			TRACEX_PAGE_("_coro_main_down drop pkt: errCode={}, streamKey2={}, nid_active={}, data_len={}, has_check={}, pack_type={}",
+				errCode, streamKey2, _streamKeys.count(pkt->info->nid), pkt->buffer.len, has_check, pack_type);
 		}
 	}
 	TRACEX_PAGE0("_coro_main_down end");

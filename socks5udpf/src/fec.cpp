@@ -300,6 +300,11 @@ bool fec::send_pdu(const std::shared_ptr<pair_session_info>& pair_session, size_
     client_gtp_addr->stream_type_ = pair_session->game_client_fec_stream_type;
     client_gtp_addr->qos_ = pair_session->game_client_fec_qos;
 
+    if (pair_session->game_client_fec_stream_key == 0) {
+        plog(LOG_WARNING, "[%s][server]WARN: send_pdu(pair_session) game_client_fec_stream_key=0, enable_key_=0, client=%s\n",
+            pair_session->get_print_prefix(), socket_helper::addr_to_ip_and_port(pair_session->game_client_addr).c_str());
+    }
+
     bool ret = true;
     uint32_t res = GtpFrameSend(hdl_, mem, (uint32_t)session_mgr_->data_len_, client_gtp_addr, 0, 0);
     if (res != GTP_OK)
@@ -334,6 +339,11 @@ uint32_t fec::send_fec_pdu_cb(GtpHandler_p gtp_hdl, void* data, uint32_t size, G
     session_mgr->fec_stream_key_ = client_gtp_addr->enable_key_ == 1 ? client_gtp_addr->stream_key_ : 0;
     session_mgr->fec_stream_type_ = client_gtp_addr->stream_type_;
     session_mgr->fec_qos_ = client_gtp_addr->qos_;
+
+    if (client_gtp_addr->enable_key_ == 0) {
+        plog(LOG_WARNING, "[server]WARN: send_fec_pdu_cb enable_key_=0 (5-tuple GoodTP session) size=%u client=%s\n",
+            size, socket_helper::addr_to_ip_and_port(*((sockaddr_storage*)client_gtp_addr->sock_addr_)).c_str());
+    }
 
     sockaddr_storage game_client_addr{};
     //memset(&game_client_addr, 0, sizeof(game_client_addr));
