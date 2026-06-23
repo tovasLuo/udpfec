@@ -548,9 +548,18 @@ bool pair_session_mgr::handle_game_client_data(std::shared_ptr<listen_session_in
     pair_session->return_user_wan_addr = ((m_udp_base_header*)buf_.data())->rt_user_wan_addr == M_UDP_FLAG_RETURN_USER_WAN_ADDR_ENABLE;
     pair_session->last_transpond_time = cur_sys_ts_.tv_sec;
     if (fec_stream_key_ != 0) {
+        plog(LOG_DEBUG, "[%s][server]INFO: handle_game_client_data set game_client_fec_stream_key=%llu (was=%llu)\n",
+            pair_session->get_print_prefix(),
+            (unsigned long long)fec_stream_key_,
+            (unsigned long long)pair_session->game_client_fec_stream_key);
         pair_session->game_client_fec_stream_key = fec_stream_key_;
         pair_session->game_client_fec_stream_type = fec_stream_type_;
         pair_session->game_client_fec_qos = fec_qos_;
+    } else {
+        plog(LOG_WARNING, "[%s][server]WARN: handle_game_client_data fec_stream_key_=0, game_client_fec_stream_key stays=%llu, fec_enable=%d\n",
+            pair_session->get_print_prefix(),
+            (unsigned long long)pair_session->game_client_fec_stream_key,
+            (int)pair_session->game_client_fec_enable);
     }
 
     m_udp_up_base_header* header = (m_udp_up_base_header*)buf_.data();
@@ -837,10 +846,18 @@ std::shared_ptr<pair_session_info> pair_session_mgr::get_game_client_pair_seesio
 
     if (pair_session != nullptr)
     {
+        bool old_fec_enable = pair_session->game_client_fec_enable;
         pair_session->game_client_fec_enable = fec_data_pkg_;
         pair_session->game_client_node_addr = data_node_addr_;
         //get_game_client_node_addr(pair_session);
         pair_session->get_print_prefix(true);
+        if (old_fec_enable != fec_data_pkg_) {
+            plog(LOG_WARNING, "[%s][server]WARN: get_game_client_pair_seesion fec_enable changed %d->%d fec_stream_key_=%llu game_client_fec_stream_key=%llu client=%s\n",
+                pair_session->get_print_prefix(), (int)old_fec_enable, (int)fec_data_pkg_,
+                (unsigned long long)fec_stream_key_,
+                (unsigned long long)pair_session->game_client_fec_stream_key,
+                socket_helper::addr_to_ip_and_port(pair_session->game_client_addr).c_str());
+        }
 #if 0
         //pair_session->game_client_slide_win.pkg_sn_valid(ntohs(header->pkg_sn));
         pair_session->game_client_pkg_loss_stat.cache_pkg_sn(ntohs(header->pkg_sn), cur_sys_ts_);
@@ -985,6 +1002,13 @@ bool pair_session_mgr::create_pair_session_and_init(std::shared_ptr<listen_sessi
     //get_game_client_node_addr(pair_session);
     pair_session->game_client_node_addr = data_node_addr_;
     pair_session->game_client_fec_enable = fec_data_pkg_;
+
+    plog(fec_data_pkg_ ? LOG_DEBUG : LOG_WARNING,
+        "[server]%s create_pair_session_and_init fec_enable=%d fec_stream_key_=%llu client=%s\n",
+        fec_data_pkg_ ? "INFO:" : "WARN: new session without FEC —",
+        (int)fec_data_pkg_,
+        (unsigned long long)fec_stream_key_,
+        socket_helper::addr_to_ip_and_port(data_addr_).c_str());
 
     if (!create_game_server_socket(pair_session))
     {
@@ -1131,6 +1155,11 @@ bool pair_session_mgr::process_yb_client_cmd(std::shared_ptr<pair_session_info>&
     fill_udp_base_header_4_line_idx(pair_session, 0);
     if (/*console_param_.fec_mode && */pair_session->game_client_fec_enable)
     {
+        if (pair_session->game_client_fec_stream_key == 0) {
+            plog(LOG_WARNING, "[%s][server]WARN: downlink(control_cmd) fec_enable=1 but game_client_fec_stream_key=0 -> 5-tuple session! client=%s\n",
+                pair_session->get_print_prefix(),
+                socket_helper::addr_to_ip_and_port(pair_session->game_client_addr).c_str());
+        }
         fec_->send_pdu(pair_session, 0);
     }
     else
@@ -1696,6 +1725,11 @@ bool pair_session_mgr::handle_game_server_recv(std::shared_ptr<pair_session_info
         fill_udp_base_header_4_line_idx(pair_session, head_offset);
         if (/*console_param_.fec_mode*/pair_session->game_client_fec_enable)
         {
+            if (pair_session->game_client_fec_stream_key == 0) {
+                plog(LOG_WARNING, "[%s][server]WARN: downlink(game_server_data) fec_enable=1 but game_client_fec_stream_key=0 -> 5-tuple session! client=%s\n",
+                    pair_session->get_print_prefix(),
+                    socket_helper::addr_to_ip_and_port(pair_session->game_client_addr).c_str());
+            }
             (void)fec_->send_pdu(pair_session, head_offset);
         }
         else

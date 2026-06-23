@@ -154,6 +154,17 @@ bool fec::recv_fec_pdu(const std::shared_ptr<listen_session_info>& listener)
     //client_gtp_addr->stream_type_ = 0;
     //client_gtp_addr->qos_ = 0;
 
+    if (client_gtp_addr->enable_key_ == 0) {
+        plog(LOG_WARNING, "[%s][server]WARN: recv_fec_pdu fec_stream_key_=0 -> enable_key_=0 (will create 5-tuple session if auto-extraction fails) client=%s\n",
+            session_mgr_->get_print_prefix_4_client_recv(listener),
+            socket_helper::addr_to_ip_and_port(session_mgr_->data_addr_).c_str());
+    } else {
+        plog(LOG_DEBUG, "[%s][server]INFO: recv_fec_pdu fec_stream_key_=%llu enable_key_=1 client=%s\n",
+            session_mgr_->get_print_prefix_4_client_recv(listener),
+            (unsigned long long)client_gtp_addr->stream_key_,
+            socket_helper::addr_to_ip_and_port(session_mgr_->data_addr_).c_str());
+    }
+
     bool ret = true;
     uint32_t res = GtpPacketReceive(hdl_, mem, (uint32_t)session_mgr_->data_len_, client_gtp_addr);
     if (res != GTP_OK)
@@ -182,6 +193,15 @@ uint32_t fec::recv_pdu_cb(GtpHandler_p gtp_hdl, void* data, uint32_t size, GtpAd
     session_mgr->fec_stream_key_ = client_gtp_addr->enable_key_ == 1 ? client_gtp_addr->stream_key_ : 0;
     session_mgr->fec_stream_type_ = client_gtp_addr->stream_type_;
     session_mgr->fec_qos_ = client_gtp_addr->qos_;
+
+    if (client_gtp_addr->enable_key_ == 0) {
+        plog(LOG_WARNING, "[client]WARN: recv_pdu_cb library returned enable_key_=0 (5-tuple session was used) client=%s\n",
+            socket_helper::addr_to_ip_and_port(*((sockaddr_storage*)client_gtp_addr->sock_addr_)).c_str());
+    } else {
+        plog(LOG_DEBUG, "[client]INFO: recv_pdu_cb library key=%llu enable_key_=1 client=%s\n",
+            (unsigned long long)client_gtp_addr->stream_key_,
+            socket_helper::addr_to_ip_and_port(*((sockaddr_storage*)client_gtp_addr->sock_addr_)).c_str());
+    }
 
     auto it_listener = session_mgr->listen_relation_s_.find((SOCKET)client_gtp_addr->sfd_);
     if (it_listener != session_mgr->listen_relation_s_.end())
@@ -242,6 +262,12 @@ bool fec::send_pdu(const std::shared_ptr<listen_session_info>& listener)
     client_gtp_addr->stream_key_ = session_mgr_->fec_stream_key_;
     client_gtp_addr->stream_type_ = session_mgr_->fec_stream_type_;
     client_gtp_addr->qos_ = session_mgr_->fec_qos_;
+
+    if (session_mgr_->fec_stream_key_ == 0) {
+        plog(LOG_WARNING, "[%s][server]WARN: send_pdu(listener/echo) fec_stream_key_=0 -> enable_key_=0 (5-tuple session) client=%s\n",
+            session_mgr_->get_print_prefix_4_client_recv(listener),
+            socket_helper::addr_to_ip_and_port(session_mgr_->data_addr_).c_str());
+    }
 
     bool ret = true;
     uint32_t res = GtpFrameSend(hdl_, mem, (uint32_t)session_mgr_->data_len_, client_gtp_addr, 0, 0);
