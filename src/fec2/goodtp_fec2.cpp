@@ -1733,6 +1733,13 @@ void GtpFec2::TryRecoveryPackByFecPack(const encode_pos &fec_encode_pos, const F
             break;
         }
 
+        // TOCTOU guard: if the missing slot was filled between CalcRestorePosByHDir and here
+        // (concurrent thread violation — two threads on same GoodTP handle), the XOR would
+        // include the newly-arrived packet and produce the wrong recovered SN. Skip silently.
+        if (NULL != decode_.fec_buf_.pack_cache_[res_pos]) {
+            break;
+        }
+
         nret = RestoreDataByHDir(start_pos, res_pos, (u8)(decode_matrix.h_size_),
                                  decode_matrix.h_fec_code_[fec_encode_pos], decode_matrix);
         if (GTP_OK != nret) {
@@ -1775,6 +1782,11 @@ void GtpFec2::TryRecoveryPackByFecPack(const encode_pos &fec_encode_pos, const F
 
         res_pos = CalcRestorePosByVDir(start_pos, fec_encode_pos, decode_matrix);
         if (MAX_FEC2_CACHE_CAPACITY <= res_pos) {
+            break;
+        }
+
+        // TOCTOU guard: same race as horizontal — skip if slot filled between Calc and Restore.
+        if (NULL != decode_.fec_buf_.pack_cache_[res_pos]) {
             break;
         }
 
@@ -1926,6 +1938,11 @@ void GtpFec2::TryRecoveryPackByDataPack(const goodtp_pos &cache_pos, Fec2EnDeCod
             goto try_restore_v_pack_pos_;
         }
 
+        // TOCTOU guard: concurrent thread may have filled res_pos between Calc and Restore.
+        if (NULL != decode_.fec_buf_.pack_cache_[res_pos]) {
+            goto try_restore_v_pack_pos_;
+        }
+
         // unreceived only one packet, it can be restore.
         nret = RestoreDataByHDir(move_pos, res_pos, (u8)(decode_matrix.h_size_), decode_matrix.h_fec_code_[h_pos],
                                  decode_matrix);
@@ -1968,6 +1985,11 @@ try_restore_v_pack_pos_:
 
         res_pos = CalcRestorePosByVDir(move_pos, v_pos, decode_matrix);
         if (MAX_FEC2_CACHE_CAPACITY <= res_pos) {
+            goto try_restore_uh_pack_pos_;
+        }
+
+        // TOCTOU guard: concurrent thread may have filled res_pos between Calc and Restore.
+        if (NULL != decode_.fec_buf_.pack_cache_[res_pos]) {
             goto try_restore_uh_pack_pos_;
         }
 
