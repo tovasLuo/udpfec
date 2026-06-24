@@ -45,8 +45,22 @@
  *         u32 pack_sn_ (bytes 4-7)
  *         u16 [has_check_flag_:1|...] (bytes 8-9)
  */
-#define GTP_RAW_PACK_TYPE(buf)  (((const uint8_t*)(buf))[2] & 0x07u)
-#define GTP_FEC_PACK_TYPE_VAL   0x03u
+/* GTP 包头原始字段提取（不依赖结构体，避免对齐/编译器差异）
+ * 包头布局（小端 x86）：
+ *   byte[0..3]  u32: goodtp_ver_:8 | header_offset_:6 | cache:1 | loss:1 | pack_type_:3 | pack_size_:13
+ *   byte[4..7]  u32: pack_sn_
+ *   byte[8..9]  u16: has_check_flag_:1 | has_ts_flag_:1 | has_rtt_flag_:1 | init_flag_:1
+ *                    | repeat_counter_:3 | is_qos_flg_:1 | ...
+ */
+#define GTP_RAW_PACK_TYPE(buf)       (((const uint8_t*)(buf))[2] & 0x07u)
+#define GTP_RAW_HAS_CHECK(buf)       (((const uint8_t*)(buf))[8] & 0x01u)
+#define GTP_RAW_REPEAT_COUNTER(buf)  ((((const uint8_t*)(buf))[8] >> 4) & 0x07u)
+#define GTP_DATA_PACK_TYPE_VAL   0x01u
+#define GTP_FEC_PACK_TYPE_VAL    0x03u
+#define GTP_ACK_PACK_TYPE_VAL    0x02u
+#define GTP_NACK_PACK_TYPE_VAL   0x06u
+#define GTP_RTT_REQ_TYPE_VAL     0x04u
+#define GTP_RTT_RES_TYPE_VAL     0x05u
 
 /* ───────────────────── 配置 ───────────────────── */
 #define MAX_PAYLOAD     512
@@ -69,11 +83,18 @@ struct Stats {
     std::atomic<uint32_t> recv_frames;
     std::atomic<uint32_t> dropped_at_net;
     std::atomic<uint32_t> fec_anomaly;
-    std::atomic<uint32_t> fec_key_ok;    /* FEC包中stream_key_提取正确 */
-    std::atomic<uint32_t> fec_key_bad;   /* FEC包中stream_key_提取错误（=0或!=TEST_KEY） */
+    std::atomic<uint32_t> fec_key_ok;       /* FEC包中stream_key_提取正确 */
+    std::atomic<uint32_t> fec_key_bad;      /* FEC包中stream_key_提取错误（=0或!=TEST_KEY） */
+    std::atomic<uint32_t> ack_nack_key_ok;  /* ACK/NACK/RTT包stream_key_提取正确 */
+    std::atomic<uint32_t> ack_nack_key_bad; /* ACK/NACK/RTT包stream_key_提取错误 */
+    std::atomic<uint32_t> arq_snd_key_ok;   /* ARQ重传包：A发出时stream_key_正确 */
+    std::atomic<uint32_t> arq_snd_key_bad;  /* ARQ重传包：A发出时stream_key_错误 */
+    std::atomic<uint32_t> arq_rcv_key_ok;   /* ARQ重传包：B收到后stream_key_提取正确 */
+    std::atomic<uint32_t> arq_rcv_key_bad;  /* ARQ重传包：B收到后stream_key_提取错误 */
 
     Stats() : sent_frames(0), recv_frames(0), dropped_at_net(0), fec_anomaly(0),
-              fec_key_ok(0), fec_key_bad(0) {}
+              fec_key_ok(0), fec_key_bad(0), ack_nack_key_ok(0), ack_nack_key_bad(0),
+              arq_snd_key_ok(0), arq_snd_key_bad(0), arq_rcv_key_ok(0), arq_rcv_key_bad(0) {}
 };
 
 static Stats g_stats;
@@ -122,6 +143,14 @@ static int should_drop(void) {
 /* ───────────────────── goodtp 回调 ───────────────────── */
 static uint32_t SendPackCbA(GtpHandler_p hdl, void *pack, uint32_t size, GtpAddr *addr) {
     (void)hdl;
+    /* 发包侧：在进入网络之前验证 ARQ 重传包的 stream_key_（drop 前统计，覆盖所有重传包） */
+    if (g_use_key && GTP_DATA_PACK_TYPE_VAL == GTP_RAW_PACK_TYPE(pack)
+                  && GTP_RAW_REPEAT_COUNTER(pack) > 0) {
+        uint64_t sk = 0;
+        GtpCheckPacketInvalid(pack, size, &sk);
+        if (sk == TEST_STREAM_KEY) g_stats.arq_snd_key_ok.fetch_add(1);
+        else                        g_stats.arq_snd_key_bad.fetch_add(1);
+    }
     if (should_drop()) {
         g_stats.dropped_at_net.fetch_add(1);
         return GTP_OK;
@@ -220,13 +249,21 @@ static void *recv_thread(void *arg) {
             uint64_t sk = 0;
             GtpCheckPacketInvalid(pack_mem, (uint32_t)n, &sk);
 
-            /* 所有包类型统一严格校验（ACK/NACK/RTT字节序已修正，不再需要fallback） */
-            if (GTP_FEC_PACK_TYPE_VAL == GTP_RAW_PACK_TYPE(pack_mem)) {
-                if (sk == TEST_STREAM_KEY) {
-                    g_stats.fec_key_ok.fetch_add(1);
-                } else {
-                    g_stats.fec_key_bad.fetch_add(1);
-                }
+            uint8_t pt = GTP_RAW_PACK_TYPE(pack_mem);
+            if (GTP_FEC_PACK_TYPE_VAL == pt) {
+                /* FEC parity 包：验证 stream_key_ 嵌入正确性 */
+                if (sk == TEST_STREAM_KEY) g_stats.fec_key_ok.fetch_add(1);
+                else                        g_stats.fec_key_bad.fetch_add(1);
+            } else if (GTP_RAW_HAS_CHECK(pack_mem) &&
+                       (pt == GTP_ACK_PACK_TYPE_VAL  || pt == GTP_NACK_PACK_TYPE_VAL ||
+                        pt == GTP_RTT_REQ_TYPE_VAL   || pt == GTP_RTT_RES_TYPE_VAL)) {
+                /* ACK/NACK/RTT 控制包：has_check_flag_=1 时必须携带正确 key */
+                if (sk == TEST_STREAM_KEY) g_stats.ack_nack_key_ok.fetch_add(1);
+                else                        g_stats.ack_nack_key_bad.fetch_add(1);
+            } else if (GTP_DATA_PACK_TYPE_VAL == pt && GTP_RAW_REPEAT_COUNTER(pack_mem) > 0) {
+                /* ARQ 重传数据包：收包侧验证 stream_key_ 提取正确性 */
+                if (sk == TEST_STREAM_KEY) g_stats.arq_rcv_key_ok.fetch_add(1);
+                else                        g_stats.arq_rcv_key_bad.fetch_add(1);
             }
             tran_addr->enable_key_  = 1;
             tran_addr->stream_key_  = sk;  /* 直接用提取结果，无 fallback */
@@ -446,8 +483,14 @@ int main(int argc, char *argv[]) {
     uint32_t recvd    = g_stats.recv_frames.load();
     uint32_t drops    = g_stats.dropped_at_net.load();
     uint32_t anom     = g_stats.fec_anomaly.load();
-    uint32_t fec_ok   = g_stats.fec_key_ok.load();
-    uint32_t fec_bad  = g_stats.fec_key_bad.load();
+    uint32_t fec_ok       = g_stats.fec_key_ok.load();
+    uint32_t fec_bad      = g_stats.fec_key_bad.load();
+    uint32_t ack_nack_ok  = g_stats.ack_nack_key_ok.load();
+    uint32_t ack_nack_bad = g_stats.ack_nack_key_bad.load();
+    uint32_t arq_snd_ok   = g_stats.arq_snd_key_ok.load();
+    uint32_t arq_snd_bad  = g_stats.arq_snd_key_bad.load();
+    uint32_t arq_rcv_ok   = g_stats.arq_rcv_key_ok.load();
+    uint32_t arq_rcv_bad  = g_stats.arq_rcv_key_bad.load();
 
     printf("\n========== 结果 ==========\n");
     printf("发送帧:      %u\n", sent);
@@ -456,7 +499,10 @@ int main(int argc, char *argv[]) {
     printf("FEC异常日志: %u  (期望: 0)\n", anom);
     printf("帧丢失率:    %.1f%%\n", sent ? (sent - recvd) * 100.0 / sent : 0.0);
     if (g_use_key) {
-        printf("FEC包key正确: %u  key错误: %u  (use_key=1时统计)\n", fec_ok, fec_bad);
+        printf("FEC包         key正确: %-5u  key错误: %u\n", fec_ok, fec_bad);
+        printf("ACK/NACK      key正确: %-5u  key错误: %u\n", ack_nack_ok, ack_nack_bad);
+        printf("ARQ重传(发包) key正确: %-5u  key错误: %u\n", arq_snd_ok, arq_snd_bad);
+        printf("ARQ重传(收包) key正确: %-5u  key错误: %u\n", arq_rcv_ok, arq_rcv_bad);
     }
 
     printf("\n--- 发送端(A)算法参数 ---\n%s\n", alg_buf_a);
@@ -483,6 +529,33 @@ int main(int argc, char *argv[]) {
             printf("[WARN] use_key=1 但未收到任何FEC包（fec_key_ok=0），无法验证\n");
         } else {
             printf("[PASS] FEC包stream_key_提取全部正确（%u 次）\n", fec_ok);
+        }
+    }
+
+    /* TEST 5：use_key=1 时 ACK/NACK/RTT 控制包 stream_key_ 提取正确 */
+    if (g_use_key) {
+        if (ack_nack_bad > 0) {
+            printf("[FAIL] ACK/NACK包stream_key_提取错误 %u 次（正确 %u 次）\n",
+                   ack_nack_bad, ack_nack_ok);
+            pass = 0;
+        } else if (ack_nack_ok == 0) {
+            printf("[WARN] use_key=1 但未收到任何带key的ACK/NACK包，无法验证\n");
+        } else {
+            printf("[PASS] ACK/NACK包stream_key_提取全部正确（%u 次）\n", ack_nack_ok);
+        }
+    }
+
+    /* TEST 6：use_key=1 时 ARQ 重传包 stream_key_ 正确（发包+收包两侧） */
+    if (g_use_key) {
+        if (arq_snd_bad > 0 || arq_rcv_bad > 0) {
+            printf("[FAIL] ARQ重传包stream_key_错误: 发包侧 %u 次，收包侧 %u 次\n",
+                   arq_snd_bad, arq_rcv_bad);
+            pass = 0;
+        } else if (arq_snd_ok == 0 && arq_rcv_ok == 0) {
+            printf("[WARN] use_key=1 但未触发任何ARQ重传（丢包率可能不足），无法验证\n");
+        } else {
+            printf("[PASS] ARQ重传包stream_key_全部正确（发包侧 %u 次，收包侧 %u 次）\n",
+                   arq_snd_ok, arq_rcv_ok);
         }
     }
 

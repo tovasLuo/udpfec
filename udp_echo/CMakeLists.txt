@@ -38,3 +38,7 @@ target_link_libraries(fec_loss_test PRIVATE ${COMMON_LIBS})
 # ── 全方位专业测试 ──
 add_executable(game_net_test game_net_test.cpp)
 target_link_libraries(game_net_test PRIVATE ${COMMON_LIBS})
+
+# ── 多会话 + stream_key_ + FEC 集成测试 ──
+add_executable(multi_session_test multi_session_test.cpp)
+target_link_libraries(multi_session_test PRIVATE ${COMMON_LIBS})
