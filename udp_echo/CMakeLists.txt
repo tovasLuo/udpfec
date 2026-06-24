@@ -42,3 +42,7 @@ target_link_libraries(game_net_test PRIVATE ${COMMON_LIBS})
 # ── 多会话 + stream_key_ + FEC 集成测试 ──
 add_executable(multi_session_test multi_session_test.cpp)
 target_link_libraries(multi_session_test PRIVATE ${COMMON_LIBS})
+
+# ── 重连 + SN 跳变 FEC 状态清理回归测试 ──
+add_executable(reconnect_test reconnect_test.cpp)
+target_link_libraries(reconnect_test PRIVATE ${COMMON_LIBS})
