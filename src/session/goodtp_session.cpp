@@ -3444,6 +3444,13 @@ void GtpSession::ResetSession(const u32 &cur_sn, const u32 &sort_sn, const u32 &
 
     ReorderClear();
 
+    #if (1 == ENABLE_FEC)
+    // Flush all stale FEC decode matrices and data-packet cache so that packets from the
+    // restarted peer (starting from a low sn) don't collide with parity cached for the
+    // previous connection's high sn range.
+    fec2_obj_.PopAllPack(last_active_ts_us_);
+    #endif
+
     if (GTP_YES == chg_status_flag) {
         GtpLog(cb_.write_log_cb_, kGtpSessionMd, kGtpLogLevelWarning, "the peer sending has been recreated, "\
                "now reset the receiving win(%p) and the filter win(%p) 's left border sn to %u, sort_sn=%u\r\n",
