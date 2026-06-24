@@ -1351,11 +1351,14 @@ void GtpFec2::CachedFecEncodePack(Fec2CodePackMgr *fec_code_mgr, Fec2CodePack *f
     // Zero-copy: bump the refcount on the incoming TranBuf so PackPostHandler's
     // FreeTranBuf only decrements to 1, not 0. The actual free happens when the
     // decode matrix is cleared (via Fec2EnDeCodeMatrix::Clear → FreeTranBuf).
-    // GtpAddr sits at fec_code_pack - TP_ADDR_RSV_SIZE within the same TranBuf block.
+    // GtpAddr is at packet_ptr - BUF_OFFSET_SIZE (= tran_buf_mem[0]), NOT at
+    // packet_ptr - TP_ADDR_RSV_SIZE (= tran_buf_mem[HEADER_RSV_SIZE]) — that would
+    // land 128 bytes inside the GtpAddr region and corrupt it on the memcpy in
+    // RestoreDataBy{H,V}Dir.
     pack_mem_pool_.TranBufUseRefAddOne((u8*)fec_code_pack);
 
     fec_code_mgr->fec_pack_  = fec_code_pack;
-    fec_code_mgr->tran_addr_ = (GtpAddr*)((u8*)fec_code_pack - TP_ADDR_RSV_SIZE);
+    fec_code_mgr->tran_addr_ = (GtpAddr*)((u8*)fec_code_pack - BUF_OFFSET_SIZE);
 
     // When has_check_flag_=1, fec_code_[0..7] is the 8-byte stream key and the actual
     // XOR parity data starts at fec_code_[8]. Strip the key in-place so RestoreDataBy*Dir
