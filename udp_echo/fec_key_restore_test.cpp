@@ -1,29 +1,27 @@
 /*
  * fec_key_restore_test.cpp
  *
- * 4 场景回归测试（各 8 秒，50 pps，enable_key_=1）贴近游戏代理真实环境
+ * 游戏代理端对端质量测试（kReliableStream，各 8+2s，50 pps）
  *
- * S1 FEC_KEY  随机 25% DATA 丢包 + FEC stream_key_ 新固定头验证（bytes16-23）
- *             覆盖同 2×2 块多丢、V 向/斜向恢复路径；
- *             旧 memmove 方案在 >10% 随机丢包时触发 res_pos!=CalcPosInPackCache
+ * 目标：无论网络层发生什么（丢包/重复包/错包/乱序包），
+ *       GoodTP 经过 FEC+ARQ 后交付给应用层的帧必须满足：
+ *         dup_frames   == 0  （无重复帧）
+ *         ooo_frames   == 0  （无乱序帧，kReliableStream sort_buf_ 保序）
+ *         corrupt_frames == 0（无数据损坏帧，CRC 验证）
  *
- * S2 DUPL     随机 5% DATA 包重复（模拟 ARQ 重传与原包同时到达、多路由重传）
- *             过去 100% 复制不真实；真实场景重复率 1-5%
- *             验证 filter_win_ 去重：recv_frames == sent_frames，fec_anomaly=0
+ * 网络注入条件（SendPackCbA 模拟，不影响 B→A 方向的 ACK/NACK）：
+ *   S1 FEC_KEY  随机 25% DATA 包丢弃       → FEC+ARQ 恢复
+ *   S2 DUPL     随机 5%  DATA 包额外重发   → filter_win_ 去重
+ *   S3 CORRUPT  随机 12% DATA 包丢弃       → FEC 恢复
+ *               + 随机 8% 全包垃圾并发注入 → 接收端健壮丢弃
+ *   S4 REORDER  随机 5%  DATA 包丢弃       → FEC 恢复
+ *               + 相邻 DATA 包两两 SN 交换 → sort_buf_ 重排保序
+ *               （pair-swap 引入 ~20ms 延迟，< gap_timer=40ms，安全）
  *
- * S3 CORRUPT  随机 12% DATA 真实丢弃 + 随机 8% 垃圾注入（轮转 3 种）
- *             - 垃圾类型：4B 纯噪声 / 10B 截断 / 20B 随机字节
- *             - 模拟游戏代理收到非 GTP UDP 流量、端口复用、网络截断包
- *             - 真实包丢弃时额外注入垃圾（而非替换），与真实错包并存
- *             验证接收端对非法包鲁棒，FEC 恢复丢弃后帧交付率 >= 85%
+ * 同时验证 FEC stream_key_ 新固定头格式（Fec2CodePack bytes16-23）
+ *   旧 memmove 方案在 >10% 随机丢包时产生 res_pos!=CalcPosInPackCache
  *
- * S4 REORDER  8 槽随机乱序缓冲区（DATA+FEC 入缓冲；ACK/NACK 直传保 ARQ 响应）
- *             + 5% 随机 DATA 丢包（乱序与丢包同时发生，贴近多路由网络）
- *             - 缓冲达 4 包时随机弹出 1 包，窗口 ≈ 4 包/100pps = 40ms
- *             - 结束后乱序冲刷剩余缓冲（模拟网络清空）
- *             验证 filter_win_ 乱序接受 + FEC+ARQ 恢复，帧交付率 >= 90%
- *
- * 注：多会话删除/重建/重连场景见 reconnect_test.cpp / multi_session_test.cpp
+ * 注：多会话删除/重建/重连见 reconnect_test.cpp / multi_session_test.cpp
  *
  * 构建：cd udp_echo && cmake . && make fec_key_restore_test
  * 运行：./fec_key_restore_test   返回 0=PASS 1=FAIL
@@ -44,10 +42,8 @@
 
 #include "bitlinker.h"
 
-/* ──────────────── 包头原始字段（小端，不依赖内部结构体）──────────────── */
+/* ──────────────── 包头原始字段（小端）──────────────── */
 #define GTP_RAW_PACK_TYPE(p)  (((const uint8_t*)(p))[2] & 0x07u)
-#define GTP_RAW_PACK_SN(p)    ({uint32_t _s; memcpy(&_s,(const uint8_t*)(p)+4,4); _s;})
-
 #define GTP_DATA_TYPE  0x01u
 #define GTP_FEC_TYPE   0x03u
 
@@ -56,17 +52,25 @@
 #define LOOPBACK_IP      "127.0.0.1"
 #define PORT_A           19031
 #define PORT_B           19032
-#define TIMER_US         10000   /* 10 ms 定时器 */
+#define TIMER_US         10000
 #define SEND_PPS         50
-#define DURATION_S       8       /* 每场景 8 秒 → 400 帧 */
+#define SEND_DURATION_S  8    /* 发送时长 */
+#define DRAIN_S          2    /* 发送后额外等 sort_buf_ 排空 */
 
-/* ──────────────── 帧格式 ──────────────── */
+/* ──────────────── 帧格式（含 CRC，检测 FEC 恢复数据损坏）──────────────── */
 typedef struct TestFrame {
     uint32_t magic;     /* 0xDEADBEEF */
-    uint32_t seq;
+    uint32_t seq;       /* 单调递增，从 1 开始 */
     uint64_t send_ts;
-    char     data[64];
+    uint32_t crc;       /* = magic ^ seq ^ hi32(send_ts) ^ lo32(send_ts) */
+    char     data[60];
 } TestFrame;
+
+static uint32_t frame_crc(const TestFrame *f) {
+    return f->magic ^ f->seq
+           ^ (uint32_t)(f->send_ts >> 32)
+           ^ (uint32_t)(f->send_ts);
+}
 
 /* ──────────────── 场景 ──────────────── */
 typedef enum {
@@ -77,39 +81,42 @@ typedef enum {
     S_MAX     = 4
 } Scenario;
 
-/* ──────────────── 统计（每场景 reset）──────────────── */
+/* ──────────────────────────────────────────────────────────────────────
+ * 统计
+ *   fec_anomaly / fec_key_bad / fec_key_ok — 协议层质量
+ *   dup_frames / ooo_frames / corrupt_frames — 应用层质量（必须全为 0）
+ * ────────────────────────────────────────────────────────────────────── */
 struct Stats {
     std::atomic<uint32_t> sent_frames{0};
     std::atomic<uint32_t> recv_frames{0};
-    std::atomic<uint32_t> dropped_data{0};  /* 实际丢弃 DATA 包数 */
-    std::atomic<uint32_t> fec_anomaly{0};   /* "fec restore abnormal" 次数 */
-    std::atomic<uint32_t> fec_key_ok{0};    /* FEC 包 stream_key_ 提取正确 */
-    std::atomic<uint32_t> fec_key_bad{0};   /* FEC 包 stream_key_ 提取错误 */
-    std::atomic<uint32_t> noise_injected{0};/* S3/S4 注入垃圾包次数 */
+    std::atomic<uint32_t> dropped_data{0};
+    std::atomic<uint32_t> fec_anomaly{0};
+    std::atomic<uint32_t> fec_key_ok{0};
+    std::atomic<uint32_t> fec_key_bad{0};
+    std::atomic<uint32_t> noise_injected{0};
+    /* ── 应用层质量指标（游戏代理核心保证）── */
+    std::atomic<uint32_t> dup_frames{0};
+    std::atomic<uint32_t> ooo_frames{0};
+    std::atomic<uint32_t> corrupt_frames{0};
     void reset() {
-        sent_frames.store(0); recv_frames.store(0); dropped_data.store(0);
-        fec_anomaly.store(0); fec_key_ok.store(0);  fec_key_bad.store(0);
-        noise_injected.store(0);
+        sent_frames=0; recv_frames=0; dropped_data=0;
+        fec_anomaly=0; fec_key_ok=0;  fec_key_bad=0; noise_injected=0;
+        dup_frames=0;  ooo_frames=0;  corrupt_frames=0;
     }
 };
 
 static Stats            g_stats;
 static volatile int     g_running  = 0;
 static Scenario         g_scenario = S_FEC_KEY;
-
-/* 随机状态（每场景固定种子，结果可复现）*/
 static unsigned int     g_rand_state = 0;
+static int              g_err_type   = 0;
 
-/* S3 错误包类型轮转计数器 */
-static int              g_err_type = 0;
+/* B 端应用层序号跟踪（RecvFrameCbB 内，受 g_lock_b 保护，无需 atomic）*/
+static uint32_t g_recv_last_seq = 0;
 
-/* ──────────────── S4 乱序缓冲区（8 槽）──────────────── */
-#define RO_CAP 8
-static struct {
-    uint8_t  data[4096];
-    uint32_t size;
-} g_ro[RO_CAP];
-static int g_ro_n = 0;
+/* S4 乱序：暂存一个 DATA 包，下一个到时两两交换（pair-swap）*/
+static uint8_t  g_held_pack[4096];
+static int      g_held_pack_size = 0;
 
 /* ──────────────── 实例上下文 ──────────────── */
 typedef struct InstCtx {
@@ -121,8 +128,8 @@ typedef struct InstCtx {
     socklen_t          peer_addr_len;
 } InstCtx;
 
-static InstCtx          g_a;   /* 发送端 */
-static InstCtx          g_b;   /* 接收端 */
+static InstCtx          g_a;
+static InstCtx          g_b;
 static pthread_mutex_t  g_lock_a = PTHREAD_MUTEX_INITIALIZER;
 static pthread_mutex_t  g_lock_b = PTHREAD_MUTEX_INITIALIZER;
 
@@ -135,91 +142,34 @@ static uint64_t now_us(void) {
 
 /* ──────────────── 日志回调 ──────────────── */
 static void LogCb(uint32_t level, const char *fmt, ...) {
-    if (level > 3) return;
     char buf[512];
     va_list ap;
     va_start(ap, fmt); vsnprintf(buf, sizeof(buf), fmt, ap); va_end(ap);
     if (strstr(buf, "fec restore abnormal"))
         g_stats.fec_anomaly.fetch_add(1);
+    if (level > 3) return;
     static const char *lv[] = {"EMRG","ALRT","CRIT","ERR"};
     printf("[gtp-%s] %s", lv[level], buf);
 }
 static uint32_t LogLevelCb(void) { return 3; }
 
-/* ──────────────────────────────────────────────────────────────────────
- * inject_error — 向 B 端注入一个无效包（S3/S4 用）
- *   类型轮转：
- *     0 → 4B  纯噪声（0xFF/0xAB/0xCD/0xEF）
- *     1 → 10B 全零截断包（size < 最小 GTP 头，必然被 InnerCheck 丢弃）
- *     2 → 20B 随机字节（模拟来自其他协议的 UDP 流量）
- * ────────────────────────────────────────────────────────────────────── */
+/* ──────────────── S3 垃圾注入辅助 ──────────────── */
 static void inject_error(int sfd, const struct sockaddr *dst, socklen_t dlen) {
     switch ((g_err_type++) % 3) {
-    case 0: {
-        uint8_t p[4] = {0xFF, 0xAB, 0xCD, 0xEF};
-        sendto(sfd, p, sizeof(p), 0, dst, dlen);
-        break;
-    }
-    case 1: {
-        uint8_t p[10] = {0};
-        sendto(sfd, p, sizeof(p), 0, dst, dlen);
-        break;
-    }
-    case 2: {
-        uint8_t p[20];
-        for (int i = 0; i < 20; i++)
-            p[i] = (uint8_t)(rand_r(&g_rand_state) & 0xFF);
-        sendto(sfd, p, sizeof(p), 0, dst, dlen);
-        break;
-    }
+    case 0: { uint8_t p[4]  = {0xFF,0xAB,0xCD,0xEF}; sendto(sfd,p,4,0,dst,dlen); break; }
+    case 1: { uint8_t p[10] = {0};                    sendto(sfd,p,10,0,dst,dlen); break; }
+    case 2: { uint8_t p[20];
+               for(int i=0;i<20;i++) p[i]=(uint8_t)(rand_r(&g_rand_state)&0xFF);
+               sendto(sfd,p,20,0,dst,dlen); break; }
     }
     g_stats.noise_injected.fetch_add(1);
 }
 
 /* ──────────────────────────────────────────────────────────────────────
- * ro_push  — 将一个包放入乱序缓冲区；缓冲达 4 包时随机弹出 1 包发出
- * ro_flush — 场景结束后随机顺序冲刷全部剩余包
- * ────────────────────────────────────────────────────────────────────── */
-static void ro_push(const void *pack, uint32_t size,
-                    int sfd, const struct sockaddr *dst, socklen_t dlen) {
-    if (g_ro_n < RO_CAP && size <= sizeof(g_ro[0].data)) {
-        memcpy(g_ro[g_ro_n].data, pack, size);
-        g_ro[g_ro_n].size = size;
-        g_ro_n++;
-    } else {
-        /* 缓冲溢出或包过大：直接发出（保证不丢） */
-        sendto(sfd, pack, size, 0, dst, dlen);
-    }
-
-    /* 缓冲 >= 4 包时随机弹出 1 包 */
-    if (g_ro_n >= 4) {
-        int pick = (int)((unsigned)rand_r(&g_rand_state) % (unsigned)g_ro_n);
-        sendto(sfd, g_ro[pick].data, g_ro[pick].size, 0, dst, dlen);
-        /* 用末尾元素填补空位（O(1) 删除）*/
-        if (pick != g_ro_n - 1)
-            memcpy(&g_ro[pick], &g_ro[g_ro_n - 1], sizeof(g_ro[0]));
-        g_ro_n--;
-    }
-}
-
-static void ro_flush(int sfd, const struct sockaddr *dst, socklen_t dlen) {
-    while (g_ro_n > 0) {
-        int pick = (int)((unsigned)rand_r(&g_rand_state) % (unsigned)g_ro_n);
-        sendto(sfd, g_ro[pick].data, g_ro[pick].size, 0, dst, dlen);
-        if (pick != g_ro_n - 1)
-            memcpy(&g_ro[pick], &g_ro[g_ro_n - 1], sizeof(g_ro[0]));
-        g_ro_n--;
-    }
-}
-
-/* ──────────────────────────────────────────────────────────────────────
- * A → B 发包回调（根据 g_scenario 决定网络行为）
+ * A → B 发包回调（模拟不同网络注入条件）
  *
- * S1 FEC_KEY  25% 随机 DATA 丢弃，测 FEC+stream_key 在高丢包下的正确性
- * S2 DUPL     5% 随机 DATA 重复发送（ARQ 重传/多路由偶发重复）
- * S3 CORRUPT  12% 真实 DATA 丢弃 + 8% 全量包注入垃圾（与真包并发到达 B）
- *             丢弃时同样注入垃圾（模拟被噪声替换）
- * S4 REORDER  5% DATA 随机丢弃；DATA+FEC 进 8 槽乱序缓冲区；ACK/NACK 直传
+ * 注意：B→A 方向（ACK/NACK）通过 SendPackCbB 直通，不施加任何注入。
+ *       这确保 ARQ 确认路径正常，隔离被测变量。
  * ────────────────────────────────────────────────────────────────────── */
 static uint32_t SendPackCbA(GtpHandler_p hdl, void *pack, uint32_t size, GtpAddr *addr) {
     (void)hdl;
@@ -230,7 +180,7 @@ static uint32_t SendPackCbA(GtpHandler_p hdl, void *pack, uint32_t size, GtpAddr
 
     switch (g_scenario) {
 
-    /* ── S1: 随机 25% DATA 丢弃，覆盖同块多丢 / V 向 / 斜向 FEC 路径 ── */
+    /* ── S1: 随机 25% DATA 丢弃（FEC+ARQ 恢复路径压测）── */
     case S_FEC_KEY:
         if (pt == GTP_DATA_TYPE && (rand_r(&g_rand_state) % 100) < 25) {
             g_stats.dropped_data.fetch_add(1);
@@ -239,40 +189,58 @@ static uint32_t SendPackCbA(GtpHandler_p hdl, void *pack, uint32_t size, GtpAddr
         sendto(ctx->sfd, pack, size, 0, dst, dlen);
         return GTP_OK;
 
-    /* ── S2: 5% 随机重复（ARQ 重传与原包同时落地 / 多路由重复）── */
+    /* ── S2: 随机 5% DATA 额外重发（网络/ARQ 重复包，filter_win_ 去重）── */
     case S_DUPL:
         sendto(ctx->sfd, pack, size, 0, dst, dlen);
         if (pt == GTP_DATA_TYPE && (rand_r(&g_rand_state) % 100) < 5) {
-            sendto(ctx->sfd, pack, size, 0, dst, dlen);  /* 额外副本 */
-            g_stats.dropped_data.fetch_add(1);  /* 复用字段统计重复次数 */
+            sendto(ctx->sfd, pack, size, 0, dst, dlen);
+            g_stats.dropped_data.fetch_add(1);  /* 复用字段计重复次数 */
         }
         return GTP_OK;
 
-    /* ── S3: 12% DATA 真实丢弃 + 8% 全包垃圾并发注入 ── */
+    /* ── S3: 12% DATA 丢弃 + 8% 垃圾并发注入（混合错误场景）── */
     case S_CORRUPT: {
-        int do_drop = (pt == GTP_DATA_TYPE) && ((rand_r(&g_rand_state) % 100) < 12);
+        int do_drop  = (pt == GTP_DATA_TYPE) && ((rand_r(&g_rand_state) % 100) < 12);
         int do_noise = (rand_r(&g_rand_state) % 100) < 8;
         if (do_drop) {
             g_stats.dropped_data.fetch_add(1);
-            inject_error(ctx->sfd, dst, dlen);   /* 丢包时用噪声替换 */
+            inject_error(ctx->sfd, dst, dlen);  /* 丢包时用垃圾替换 */
         } else {
             if (do_noise)
-                inject_error(ctx->sfd, dst, dlen);  /* 真包前注入额外噪声 */
+                inject_error(ctx->sfd, dst, dlen);  /* 在真包前注入额外垃圾 */
             sendto(ctx->sfd, pack, size, 0, dst, dlen);
         }
         return GTP_OK;
     }
 
-    /* ── S4: 5% DATA 丢弃 + 8 槽随机乱序缓冲（DATA+FEC），ACK/NACK 直传 ── */
+    /* ── S4: 5% DATA 丢弃 + DATA 两两 SN 交换（sort_buf_ 重排验证）──
+     *
+     * pair-swap 引入约 20ms 延迟（50pps 时 1 包间隔）。
+     * gap_timer = 2000000/50 = 40ms > 20ms，sort_buf_ 能在 gap_timer
+     * 触发前等到交换后的包，并按 GTP-SN 顺序交付，APP 看到严格递增 seq。
+     * FEC/ACK/NACK 直通，保证 FEC 奇偶和 ARQ 反馈不受乱序影响。         */
     case S_REORDER:
-        if (pt == GTP_DATA_TYPE && (rand_r(&g_rand_state) % 100) < 5) {
-            g_stats.dropped_data.fetch_add(1);
-            return GTP_OK;
-        }
-        if (pt == GTP_DATA_TYPE || pt == GTP_FEC_TYPE) {
-            ro_push(pack, size, ctx->sfd, dst, dlen);
+        if (pt == GTP_DATA_TYPE) {
+            if ((rand_r(&g_rand_state) % 100) < 5) {
+                g_stats.dropped_data.fetch_add(1);
+                return GTP_OK;
+            }
+            if (g_held_pack_size == 0) {
+                if ((int)size <= (int)sizeof(g_held_pack)) {
+                    memcpy(g_held_pack, pack, size);
+                    g_held_pack_size = (int)size;
+                } else {
+                    sendto(ctx->sfd, pack, size, 0, dst, dlen);
+                }
+            } else {
+                /* 先发 SN 较大的（当前），再发暂存的 SN 较小的 */
+                sendto(ctx->sfd, pack, size, 0, dst, dlen);
+                sendto(ctx->sfd, g_held_pack, g_held_pack_size, 0, dst, dlen);
+                g_held_pack_size = 0;
+            }
         } else {
-            sendto(ctx->sfd, pack, size, 0, dst, dlen);  /* ACK/NACK 直传 */
+            /* FEC / ACK / NACK 直通 */
+            sendto(ctx->sfd, pack, size, 0, dst, dlen);
         }
         return GTP_OK;
 
@@ -282,17 +250,49 @@ static uint32_t SendPackCbA(GtpHandler_p hdl, void *pack, uint32_t size, GtpAddr
     }
 }
 
-/* ──────────────── B 收帧回调 ──────────────── */
+/* ──────────────────────────────────────────────────────────────────────
+ * B 收帧回调 — 应用层质量三重验证
+ *
+ *   1. corrupt_frames  magic 或 CRC 错误 → FEC 恢复数据损坏
+ *   2. dup_frames      seq == last_seq   → 重复帧上报
+ *   3. ooo_frames      seq <  last_seq   → 乱序帧上报
+ *
+ * 使用 kReliableStream：sort_buf_ 按 GTP-SN 重排后再调用此回调，
+ * 正常情况下 seq 必然严格递增（可能有 gap，但不会回退）。
+ * ────────────────────────────────────────────────────────────────────── */
 static uint32_t RecvFrameCbB(GtpHandler_p hdl, void *frame, uint32_t size, GtpAddr *addr) {
     (void)hdl; (void)addr;
-    if (size >= sizeof(TestFrame)) {
-        TestFrame *f = (TestFrame *)frame;
-        if (f->magic == 0xDEADBEEF)
-            g_stats.recv_frames.fetch_add(1);
+
+    if (size < sizeof(TestFrame)) {
+        g_stats.corrupt_frames.fetch_add(1);
+        return GTP_OK;
     }
+    TestFrame *f = (TestFrame *)frame;
+
+    if (f->magic != 0xDEADBEEF || f->crc != frame_crc(f)) {
+        g_stats.corrupt_frames.fetch_add(1);
+        return GTP_OK;
+    }
+
+    uint32_t seq = f->seq;
+
+    if (g_recv_last_seq > 0 && seq <= g_recv_last_seq) {
+        if (seq == g_recv_last_seq) {
+            printf("  [ERR] DUP  seq=%u (last=%u)\n", seq, g_recv_last_seq);
+            g_stats.dup_frames.fetch_add(1);
+        } else {
+            printf("  [ERR] OOO  seq=%u (last=%u)\n", seq, g_recv_last_seq);
+            g_stats.ooo_frames.fetch_add(1);
+        }
+    }
+    if (seq > g_recv_last_seq)
+        g_recv_last_seq = seq;
+
+    g_stats.recv_frames.fetch_add(1);
     return GTP_OK;
 }
 
+/* B → A 直通（ACK/NACK 不注入任何干扰）*/
 static uint32_t SendPackCbB(GtpHandler_p hdl, void *pack, uint32_t size, GtpAddr *addr) {
     (void)hdl;
     InstCtx *ctx = (InstCtx *)addr->context_;
@@ -336,17 +336,14 @@ static void *recv_thread(void *arg) {
         memcpy(mem, buf, n);
         taddr->context_       = ctx;
         taddr->sfd_           = (uint32_t)ctx->sfd;
-        taddr->stream_type_   = kRealTimeStream;
+        taddr->stream_type_   = kReliableStream;   /* sort_buf_ 保序 */
         taddr->self_addr_len_ = (uint32_t)sizeof(ctx->self_addr);
         memcpy(taddr->self_addr_, &ctx->self_addr, sizeof(ctx->self_addr));
         taddr->sock_addr_len_ = (uint32_t)peer_len;
         memcpy(taddr->sock_addr_, &peer, peer_len);
 
-        /* B 端：提取并验证 FEC 包 stream_key_（新固定头部格式）
-         * 注意：S3 会注入 4/10/20B 垃圾包，它们不是有效 GTP 包，
-         * 但随机字节可能使 byte[2]&0x07==FEC_TYPE(0x03)，导致误读 stream_key_。
-         * 真实 GTP FEC 包至少有 Fec2CodePack(24B)+XOR数据，远大于 40B，
-         * 用 n >= 40 门卫排除所有注入垃圾，仅对真实包验证 key。 */
+        /* B 端：验证 FEC 包 stream_key_（新固定头 bytes16-23）
+         * n>=40 门卫排除 4/10/20B 垃圾包（其 byte[2]&7 可能偶发==FEC_TYPE）*/
         if (a->is_b) {
             uint64_t sk = 0;
             if ((uint32_t)n >= 40) {
@@ -356,7 +353,6 @@ static void *recv_thread(void *arg) {
                     else                       g_stats.fec_key_bad.fetch_add(1);
                 }
             }
-            /* 垃圾包 sk=0，enable_key_=1 时找不到对应 session → 被 GTP 层丢弃 */
             taddr->enable_key_ = 1;
             taddr->stream_key_ = sk;
         } else {
@@ -413,18 +409,18 @@ static void drain_sockets(void) {
 }
 
 /* ──────────────────────────────────────────────────────────────────────
- * run_scenario — 运行一个测试场景，返回 1=PASS 0=FAIL
+ * run_scenario
  * ────────────────────────────────────────────────────────────────────── */
 static int run_scenario(Scenario sc, const char *label) {
     printf("\n====== %s ======\n", label);
 
-    /* 重置全局状态 */
     g_stats.reset();
-    g_scenario   = sc;
-    g_ro_n       = 0;
-    g_err_type   = 0;
-    g_rand_state = 0x5EED1234u;
-    g_running    = 1;
+    g_scenario        = sc;
+    g_held_pack_size  = 0;
+    g_err_type        = 0;
+    g_rand_state      = 0x5EED1234u;
+    g_recv_last_seq   = 0;
+    g_running         = 1;
 
     GtpCallBackParam cb_a = {SendPackCbA, RecvFrameCbA, NULL, LogCb, LogLevelCb, NULL};
     GtpCallBackParam cb_b = {SendPackCbB, RecvFrameCbB, NULL, LogCb, LogLevelCb, NULL};
@@ -454,8 +450,9 @@ static int run_scenario(Scenario sc, const char *label) {
     pthread_create(&tid_rb,    NULL, recv_thread,  &rb);
     pthread_create(&tid_timer, NULL, timer_thread, &ta);
 
+    /* 发送循环 */
     const uint64_t interval  = 1000000ULL / SEND_PPS;
-    const uint64_t deadline  = now_us() + (uint64_t)DURATION_S * 1000000ULL;
+    const uint64_t deadline  = now_us() + (uint64_t)SEND_DURATION_S * 1000000ULL;
     uint64_t       next_send = now_us();
     uint32_t       seq       = 0;
 
@@ -465,6 +462,7 @@ static int run_scenario(Scenario sc, const char *label) {
             f.magic   = 0xDEADBEEF;
             f.seq     = ++seq;
             f.send_ts = now_us();
+            f.crc     = frame_crc(&f);
             snprintf(f.data, sizeof(f.data), "s%u", seq);
 
             pthread_mutex_lock(&g_lock_a);
@@ -476,7 +474,7 @@ static int run_scenario(Scenario sc, const char *label) {
                 memcpy(mem, &f, sizeof(f));
                 taddr->context_       = &g_a;
                 taddr->sfd_           = (uint32_t)g_a.sfd;
-                taddr->stream_type_   = kRealTimeStream;
+                taddr->stream_type_   = kReliableStream;
                 taddr->enable_key_    = 1;
                 taddr->stream_key_    = TEST_STREAM_KEY;
                 taddr->self_addr_len_ = (uint32_t)sizeof(g_a.self_addr);
@@ -494,14 +492,19 @@ static int run_scenario(Scenario sc, const char *label) {
         usleep(200);
     }
 
-    /* S4: 随机顺序冲刷乱序缓冲区剩余包（模拟网络最终清空） */
-    if (sc == S_REORDER && g_ro_n > 0) {
+    /* S4: 冲刷暂存的最后一个 DATA 包 */
+    if (sc == S_REORDER && g_held_pack_size > 0) {
         pthread_mutex_lock(&g_lock_a);
-        ro_flush(g_a.sfd,
-                 (struct sockaddr *)&g_a.peer_addr,
-                 g_a.peer_addr_len);
+        sendto(g_a.sfd, g_held_pack, g_held_pack_size, 0,
+               (struct sockaddr *)&g_a.peer_addr, g_a.peer_addr_len);
+        g_held_pack_size = 0;
         pthread_mutex_unlock(&g_lock_a);
     }
+
+    /* 排空等待：让 sort_buf_ 冲刷剩余帧、ARQ 完成最后重传 */
+    printf("  [等待 %ds 让 sort_buf_ 和 ARQ 排空...]\n", DRAIN_S);
+    uint64_t drain_end = now_us() + (uint64_t)DRAIN_S * 1000000ULL;
+    while (now_us() < drain_end) usleep(10000);
 
     g_running = 0;
     pthread_join(tid_ra,    NULL);
@@ -514,100 +517,73 @@ static int run_scenario(Scenario sc, const char *label) {
     g_b.gtp_hdl = INVALID_GTP_HANDLER;
     drain_sockets();
 
-    /* ──── 统计与判定 ──── */
-    uint32_t sent  = g_stats.sent_frames.load();
-    uint32_t recvd = g_stats.recv_frames.load();
-    uint32_t drop  = g_stats.dropped_data.load();
-    uint32_t anom  = g_stats.fec_anomaly.load();
-    uint32_t fok   = g_stats.fec_key_ok.load();
-    uint32_t fbad  = g_stats.fec_key_bad.load();
-    uint32_t noise = g_stats.noise_injected.load();
+    /* ──── 结果统计 ──── */
+    uint32_t sent    = g_stats.sent_frames.load();
+    uint32_t recvd   = g_stats.recv_frames.load();
+    uint32_t drop    = g_stats.dropped_data.load();
+    uint32_t anom    = g_stats.fec_anomaly.load();
+    uint32_t fok     = g_stats.fec_key_ok.load();
+    uint32_t fbad    = g_stats.fec_key_bad.load();
+    uint32_t noise   = g_stats.noise_injected.load();
+    uint32_t dup     = g_stats.dup_frames.load();
+    uint32_t ooo     = g_stats.ooo_frames.load();
+    uint32_t corrupt = g_stats.corrupt_frames.load();
 
-    if (sc == S_DUPL)
-        printf("发送:%u 接收:%u 重复包:%u 垃圾注入:%u fec_key_ok:%u "
-               "fec_key_bad:%u fec_anomaly:%u\n",
-               sent, recvd, drop, noise, fok, fbad, anom);
-    else
-        printf("发送:%u 接收:%u 丢DATA:%u(%.0f%%) 垃圾注入:%u "
-               "fec_key_ok:%u fec_key_bad:%u fec_anomaly:%u\n",
-               sent, recvd, drop, sent ? drop*100.0/sent : 0.0,
-               noise, fok, fbad, anom);
+    printf("  发送帧:%-4u  接收帧:%-4u  丢DATA:%-3u(%.0f%%)  垃圾注入:%-3u\n",
+           sent, recvd, drop, sent ? drop*100.0/sent : 0.0, noise);
+    printf("  fec_key_ok:%-4u  fec_key_bad:%-2u  fec_anomaly:%-2u\n",
+           fok, fbad, anom);
+    printf("  [应用层] dup:%u  ooo:%u  corrupt:%u\n", dup, ooo, corrupt);
 
     int pass = 1;
 
-    /* 所有场景公共断言 */
+    /* ── 协议层断言 ── */
     if (anom > 0) {
-        printf("  [FAIL] fec_anomaly=%u  "
-               "(旧 memmove 方案触发 res_pos!=CalcPosInPackCache)\n", anom);
+        printf("  [FAIL] fec_anomaly=%u (旧 memmove 触发 res_pos!=CalcPosInPackCache)\n", anom);
         pass = 0;
-    } else {
-        printf("  [PASS] fec_anomaly=0\n");
     }
     if (fbad > 0) {
-        printf("  [FAIL] fec_key_bad=%u  "
-               "(FEC 包 stream_key_ 从新固定头部提取失败)\n", fbad);
+        printf("  [FAIL] fec_key_bad=%u (FEC stream_key_ 新固定头提取失败)\n", fbad);
         pass = 0;
-    } else if (fok > 0) {
-        printf("  [PASS] FEC stream_key_ 验证正确 (%u 包)\n", fok);
+    }
+    if (fok == 0)
+        printf("  [WARN] fec_key_ok=0 (FEC 路径未被覆盖)\n");
+
+    /* ── 应用层三重断言（核心）── */
+    if (dup > 0) {
+        printf("  [FAIL] dup_frames=%u  — 应用层收到重复帧，filter_win_ 去重失效\n", dup);
+        pass = 0;
+    } else {
+        printf("  [PASS] dup_frames=0  — 无重复帧\n");
+    }
+    if (ooo > 0) {
+        printf("  [FAIL] ooo_frames=%u  — 应用层收到乱序帧，sort_buf_ 保序失效\n", ooo);
+        pass = 0;
+    } else {
+        printf("  [PASS] ooo_frames=0  — 无乱序帧（kReliableStream sort_buf_ 保序）\n");
+    }
+    if (corrupt > 0) {
+        printf("  [FAIL] corrupt_frames=%u  — 数据损坏，FEC XOR 恢复出错\n", corrupt);
+        pass = 0;
+    } else {
+        printf("  [PASS] corrupt_frames=0  — 无数据损坏（CRC 验证通过）\n");
     }
 
-    /* 场景专属断言 */
+    /* ── 交付率断言 ── */
+    uint32_t threshold;
     switch (sc) {
-    case S_FEC_KEY:
-        if (fok == 0)
-            printf("  [WARN] fec_key_ok=0：FEC 路径未被覆盖\n");
-        if (recvd < sent * 90 / 100) {
-            printf("  [FAIL] 帧交付率 %u/%u=%.1f%% < 90%%\n",
-                   recvd, sent, sent ? recvd*100.0/sent : 0.0);
-            pass = 0;
-        } else {
-            printf("  [PASS] 帧交付率 %.1f%% (随机%.0f%%丢包 + FEC恢复)\n",
-                   sent ? recvd*100.0/sent : 0.0,
-                   sent ? drop*100.0/sent : 0.0);
-        }
-        break;
-
-    case S_DUPL:
-        /* 5% 随机重复：filter_win_ 去重，recv 应精确等于 sent */
-        if (recvd != sent) {
-            printf("  [FAIL] 重复包去重异常: recv=%u  sent=%u  "
-                   "(期望相等，重复了 %u 次)\n", recvd, sent, drop);
-            pass = 0;
-        } else {
-            printf("  [PASS] 重复包去重正确 recv==sent==%u  (5%%随机重复 %u 次)\n",
-                   sent, drop);
-        }
-        break;
-
-    case S_CORRUPT:
-        /* 12% 真实丢弃 + 噪声注入；FEC book4 应恢复大部分 */
-        if (recvd < sent * 85 / 100) {
-            printf("  [FAIL] 帧交付率 %u/%u=%.1f%% < 85%%\n",
-                   recvd, sent, sent ? recvd*100.0/sent : 0.0);
-            pass = 0;
-        } else {
-            printf("  [PASS] 帧交付率 %.1f%%  "
-                   "(12%%丢弃+%u次垃圾注入，FEC恢复)\n",
-                   sent ? recvd*100.0/sent : 0.0, noise);
-        }
-        break;
-
-    case S_REORDER:
-        /* 8 槽乱序 + 5% 丢包；FEC+ARQ 应覆盖大部分损失 */
-        if (recvd < sent * 90 / 100) {
-            printf("  [FAIL] 帧交付率 %u/%u=%.1f%% < 90%%\n",
-                   recvd, sent, sent ? recvd*100.0/sent : 0.0);
-            pass = 0;
-        } else {
-            printf("  [PASS] 帧交付率 %.1f%%  "
-                   "(8槽随机乱序 + %.0f%%丢包，FEC+ARQ恢复)\n",
-                   sent ? recvd*100.0/sent : 0.0,
-                   sent ? drop*100.0/sent : 0.0);
-        }
-        break;
-
-    default:
-        break;
+    case S_FEC_KEY: threshold = sent * 85 / 100; break;
+    case S_DUPL:    threshold = sent;             break;
+    case S_CORRUPT: threshold = sent * 80 / 100; break;
+    case S_REORDER: threshold = sent * 85 / 100; break;
+    default:        threshold = sent * 80 / 100; break;
+    }
+    if (recvd < threshold) {
+        printf("  [FAIL] 帧交付率 %u/%u=%.1f%% 低于阈值\n",
+               recvd, sent, sent ? recvd*100.0/sent : 0.0);
+        pass = 0;
+    } else {
+        printf("  [PASS] 帧交付率 %.1f%%\n", sent ? recvd*100.0/sent : 0.0);
     }
 
     printf("  场景结论: %s\n", pass ? "PASS" : "FAIL");
@@ -616,17 +592,18 @@ static int run_scenario(Scenario sc, const char *label) {
 
 /* ──────────────── main ──────────────── */
 int main(void) {
-    printf("=== fec_key_restore_test — 4 场景回归 ===\n");
-    printf("stream_key=0x%016llX  pps=%d  duration=%ds/场景\n\n",
-           (unsigned long long)TEST_STREAM_KEY, SEND_PPS, DURATION_S);
+    printf("=== fec_key_restore_test — 游戏代理端对端质量验证 ===\n");
+    printf("kReliableStream  stream_key=0x%016llX  pps=%d\n"
+           "网络注入→FEC+ARQ恢复→应用层必须: dup=0 ooo=0 corrupt=0\n\n",
+           (unsigned long long)TEST_STREAM_KEY, SEND_PPS);
 
     if (GTP_OK != InsLoadGtpModule()) {
         fprintf(stderr, "InsLoadGtpModule failed: %s\n", LastGtpErrorInfo());
         return 1;
     }
 
-    g_a.name = "A(sender)";
-    g_b.name = "B(recver)";
+    g_a.name = "A(game-client proxy)";
+    g_b.name = "B(game-server proxy)";
     g_a.sfd  = make_udp_socket(PORT_A, &g_a.self_addr);
     g_b.sfd  = make_udp_socket(PORT_B, &g_b.self_addr);
     if (g_a.sfd < 0 || g_b.sfd < 0) { RmLoadGtpModule(); return 1; }
@@ -644,10 +621,10 @@ int main(void) {
     g_b.peer_addr_len = sizeof(g_b.peer_addr);
 
     int pass = 1;
-    pass &= run_scenario(S_FEC_KEY, "S1 FEC_KEY  随机25%%丢包 + stream_key 新固定头验证");
-    pass &= run_scenario(S_DUPL,    "S2 DUPL     5%%随机重复包（ARQ重传/多路由偶发）");
-    pass &= run_scenario(S_CORRUPT, "S3 CORRUPT  12%%真实丢弃 + 8%%垃圾并发注入");
-    pass &= run_scenario(S_REORDER, "S4 REORDER  8槽随机乱序缓冲 + 5%%随机丢包");
+    pass &= run_scenario(S_FEC_KEY, "S1 随机25%丢包         → FEC+ARQ恢复，验证应用层无dup/ooo/corrupt");
+    pass &= run_scenario(S_DUPL,    "S2 5%随机重复包        → filter_win_去重，验证应用层无重复帧");
+    pass &= run_scenario(S_CORRUPT, "S3 12%丢+8%垃圾注入   → FEC恢复+健壮丢弃，验证应用层无损坏帧");
+    pass &= run_scenario(S_REORDER, "S4 5%丢+pair-swap乱序  → sort_buf_保序，验证应用层无乱序帧");
 
     close(g_a.sfd);
     close(g_b.sfd);

@@ -1399,7 +1399,17 @@ u32 GtpSession::Fec2RestoreFrameReceive(void *session, GtpHandler gtp_hdl, GtpPa
 
     // Route through per-session reorder buffer so the application always receives packets in SN order.
     // ReorderEnqueue delivers immediately if in-order, or buffers until the gap is filled or times out.
-    s_obj->ReorderEnqueue(pack->pack_sn_, frame, size, tran_addr, s_obj->last_active_ts_us_);
+    //
+    // For FEC-recovered ARQ retransmits (repeat_counter_ > 0, has_chg_zone_ = 0), the packet's
+    // pack_sn_ is the RETRANSMIT's new (high) pack_sn_, not the original DATA's.  The sort buffer
+    // must place it at the ORIGINAL position (first_sn) so it doesn't land after frames that
+    // logically follow it.  Pass first_sn as the sort hint; ReorderEnqueue re-keys when hint != sn.
+    // For normal (non-retransmit) DATA recovered by FEC, pack_sn_ is already the correct sort key.
+    u32 sort_hint = UINT32_MAX;
+    if (0 != pack->repeat_counter_ && GTP_NO == pack->has_chg_zone_) {
+        sort_hint = first_sn;  // = original pack_sn_ stored immediately after GtpPacket header
+    }
+    s_obj->ReorderEnqueue(pack->pack_sn_, frame, size, tran_addr, s_obj->last_active_ts_us_, sort_hint);
 
     // Register the FEC-recovered SN in data_win_r_ so the next ACK bitmap includes it.
     // Without this, data_win_r_ has no record of the recovered packet, the ACK omits the SN,
@@ -1461,6 +1471,15 @@ void GtpSession::ReorderEnqueue(u32 sn, u8 *frame, u32 frame_size,
     if (0 == reorder_inited_) {
         reorder_next_sn_ = sn;
         reorder_inited_  = 1;
+    }
+
+    // ARQ retransmit: new pack_sn_ is higher than original but logical position is first_sn_hint.
+    // Re-key on first_sn_hint so the retransmit lands at its original sort position instead of a
+    // future slot.  Without this, the retransmit is delivered only after reorder_next_sn_ reaches
+    // the new (high) pack_sn_, by which point later frames have already been delivered → OOO.
+    // Only applies when frame != NULL (data, not placeholder) and hint differs from sn.
+    if (NULL != frame && UINT32_MAX != first_sn_hint && first_sn_hint != sn) {
+        sn = first_sn_hint;
     }
 
     i32 delta = (i32)(sn - reorder_next_sn_);
