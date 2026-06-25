@@ -17,6 +17,9 @@
  *   S4 REORDER  随机 5%  DATA 包丢弃       → FEC 恢复
  *               + 相邻 DATA 包两两 SN 交换 → sort_buf_ 重排保序
  *               （pair-swap 引入 ~20ms 延迟，< gap_timer=40ms，安全）
+ *   S5 BAD_FEC  注入 11B undersized FEC 包（pack_size < sizeof(Fec2CodePack)=24）
+ *               → session.cpp min-size 防护在 Decode() 前丢弃
+ *               覆盖生产日志 "Invalid fec code book id(80/99)" / "Unknown fec encode type(129)"
  *
  * 同时验证 FEC stream_key_ 新固定头格式（Fec2CodePack bytes16-23）
  *   旧 memmove 方案在 >10% 随机丢包时产生 res_pos!=CalcPosInPackCache
@@ -78,7 +81,8 @@ typedef enum {
     S_DUPL    = 1,
     S_CORRUPT = 2,
     S_REORDER = 3,
-    S_MAX     = 4
+    S_BAD_FEC = 4,  /* undersized FEC packet size-guard test */
+    S_MAX     = 5
 } Scenario;
 
 /* ──────────────────────────────────────────────────────────────────────
@@ -94,6 +98,7 @@ struct Stats {
     std::atomic<uint32_t> fec_key_ok{0};
     std::atomic<uint32_t> fec_key_bad{0};
     std::atomic<uint32_t> noise_injected{0};
+    std::atomic<uint32_t> bad_book_id{0};  /* "Invalid fec code book id" / "Unknown fec encode type" */
     /* ── 应用层质量指标（游戏代理核心保证）── */
     std::atomic<uint32_t> dup_frames{0};
     std::atomic<uint32_t> ooo_frames{0};
@@ -101,6 +106,7 @@ struct Stats {
     void reset() {
         sent_frames=0; recv_frames=0; dropped_data=0;
         fec_anomaly=0; fec_key_ok=0;  fec_key_bad=0; noise_injected=0;
+        bad_book_id=0;
         dup_frames=0;  ooo_frames=0;  corrupt_frames=0;
     }
 };
@@ -110,6 +116,7 @@ static volatile int     g_running  = 0;
 static Scenario         g_scenario = S_FEC_KEY;
 static unsigned int     g_rand_state = 0;
 static int              g_err_type   = 0;
+static int              g_use_stream_key = 1;  /* 0 for S5: use 5-tuple session routing */
 
 /* B 端应用层序号跟踪（RecvFrameCbB 内，受 g_lock_b 保护，无需 atomic）*/
 static uint32_t g_recv_last_seq = 0;
@@ -147,11 +154,38 @@ static void LogCb(uint32_t level, const char *fmt, ...) {
     va_start(ap, fmt); vsnprintf(buf, sizeof(buf), fmt, ap); va_end(ap);
     if (strstr(buf, "fec restore abnormal"))
         g_stats.fec_anomaly.fetch_add(1);
+    if (strstr(buf, "Invalid fec code book id") || strstr(buf, "Unknown fec encode type"))
+        g_stats.bad_book_id.fetch_add(1);
     if (level > 3) return;
     static const char *lv[] = {"EMRG","ALRT","CRIT","ERR"};
     printf("[gtp-%s] %s", lv[level], buf);
 }
 static uint32_t LogLevelCb(void) { return 3; }
+
+/* ──────────────── S5 undersized FEC 注入辅助 ──────────────── */
+/*
+ * 构造一个 11 字节的 FEC 包：通过 InnerCheckPacketInvalid（size=pack_size_=11≥sizeof(GtpPacket)=10）
+ * 但 pack_size_=11 < sizeof(Fec2CodePack)=24。
+ * byte 10（code_book_id_）= 0x50=80（无效），触发 "Invalid fec code book id(80)"。
+ *
+ * 小端位域布局（GTP_PACK_HEADER = u32 + u32 + u16）：
+ *   byte 0:   goodtp_ver_ = 0x02
+ *   byte 1:   header_offset_ = 10  (bits 8-13)
+ *   byte 2-3: pack_type_=3(bits16-18) pack_size_=11(bits19-31)
+ *             byte2 = 0b01011_011 = 0x5B
+ *   bytes4-7: pack_sn_ = 0
+ *   bytes8-9: flags   = 0
+ *   byte 10:  code_book_id_ = 0x50 (80, > MAX_VALID_FEC2_BOOK_ID=5)
+ */
+static void inject_bad_fec_size(int sfd, const struct sockaddr *dst, socklen_t dlen) {
+    static const uint8_t p[11] = {
+        0x02, 0x0A, 0x5B, 0x00,        /* ver=2, hdr=10, type=3, size=11 */
+        0x00, 0x00, 0x00, 0x00,         /* pack_sn_ = 0                   */
+        0x00, 0x00,                     /* flags = 0                       */
+        0x50                            /* code_book_id_ = 80 (INVALID)    */
+    };
+    sendto(sfd, p, sizeof(p), 0, dst, dlen);
+}
 
 /* ──────────────── S3 垃圾注入辅助 ──────────────── */
 static void inject_error(int sfd, const struct sockaddr *dst, socklen_t dlen) {
@@ -241,6 +275,15 @@ static uint32_t SendPackCbA(GtpHandler_p hdl, void *pack, uint32_t size, GtpAddr
         } else {
             /* FEC / ACK / NACK 直通 */
             sendto(ctx->sfd, pack, size, 0, dst, dlen);
+        }
+        return GTP_OK;
+
+    /* ── S5: 每 5 个 DATA 包额外注入 1 个 undersized FEC（触发 Bad code book id）── */
+    case S_BAD_FEC:
+        sendto(ctx->sfd, pack, size, 0, dst, dlen);
+        if (pt == GTP_DATA_TYPE && (rand_r(&g_rand_state) % 5) == 0) {
+            inject_bad_fec_size(ctx->sfd, dst, dlen);
+            g_stats.noise_injected.fetch_add(1);
         }
         return GTP_OK;
 
@@ -343,17 +386,19 @@ static void *recv_thread(void *arg) {
         memcpy(taddr->sock_addr_, &peer, peer_len);
 
         /* B 端：验证 FEC 包 stream_key_（新固定头 bytes16-23）
-         * n>=40 门卫排除 4/10/20B 垃圾包（其 byte[2]&7 可能偶发==FEC_TYPE）*/
+         * n>=40 门卫排除 4/10/20B 垃圾包（其 byte[2]&7 可能偶发==FEC_TYPE）
+         * S5(g_use_stream_key=0): 使用 5-tuple 路由，不提取 stream_key_，
+         * 这样 inject_bad_fec_size() 注入的 11B 包能按 5-tuple 找到已有 session。 */
         if (a->is_b) {
             uint64_t sk = 0;
-            if ((uint32_t)n >= 40) {
+            if (g_use_stream_key && (uint32_t)n >= 40) {
                 GtpCheckPacketInvalid(mem, (uint32_t)n, &sk);
                 if (GTP_FEC_TYPE == GTP_RAW_PACK_TYPE(mem)) {
                     if (sk == TEST_STREAM_KEY) g_stats.fec_key_ok.fetch_add(1);
                     else                       g_stats.fec_key_bad.fetch_add(1);
                 }
             }
-            taddr->enable_key_ = 1;
+            taddr->enable_key_ = g_use_stream_key ? 1 : 0;
             taddr->stream_key_ = sk;
         } else {
             taddr->enable_key_ = 0;
@@ -420,6 +465,7 @@ static int run_scenario(Scenario sc, const char *label) {
     g_err_type        = 0;
     g_rand_state      = 0x5EED1234u;
     g_recv_last_seq   = 0;
+    g_use_stream_key  = (sc != S_BAD_FEC) ? 1 : 0;
     g_running         = 1;
 
     GtpCallBackParam cb_a = {SendPackCbA, RecvFrameCbA, NULL, LogCb, LogLevelCb, NULL};
@@ -475,8 +521,8 @@ static int run_scenario(Scenario sc, const char *label) {
                 taddr->context_       = &g_a;
                 taddr->sfd_           = (uint32_t)g_a.sfd;
                 taddr->stream_type_   = kReliableStream;
-                taddr->enable_key_    = 1;
-                taddr->stream_key_    = TEST_STREAM_KEY;
+                taddr->enable_key_    = g_use_stream_key ? 1 : 0;
+                taddr->stream_key_    = g_use_stream_key ? TEST_STREAM_KEY : 0;
                 taddr->self_addr_len_ = (uint32_t)sizeof(g_a.self_addr);
                 memcpy(taddr->self_addr_, &g_a.self_addr, sizeof(g_a.self_addr));
                 taddr->sock_addr_len_ = (uint32_t)sizeof(g_a.peer_addr);
@@ -518,21 +564,22 @@ static int run_scenario(Scenario sc, const char *label) {
     drain_sockets();
 
     /* ──── 结果统计 ──── */
-    uint32_t sent    = g_stats.sent_frames.load();
-    uint32_t recvd   = g_stats.recv_frames.load();
-    uint32_t drop    = g_stats.dropped_data.load();
-    uint32_t anom    = g_stats.fec_anomaly.load();
-    uint32_t fok     = g_stats.fec_key_ok.load();
-    uint32_t fbad    = g_stats.fec_key_bad.load();
-    uint32_t noise   = g_stats.noise_injected.load();
-    uint32_t dup     = g_stats.dup_frames.load();
-    uint32_t ooo     = g_stats.ooo_frames.load();
-    uint32_t corrupt = g_stats.corrupt_frames.load();
+    uint32_t sent     = g_stats.sent_frames.load();
+    uint32_t recvd    = g_stats.recv_frames.load();
+    uint32_t drop     = g_stats.dropped_data.load();
+    uint32_t anom     = g_stats.fec_anomaly.load();
+    uint32_t fok      = g_stats.fec_key_ok.load();
+    uint32_t fbad     = g_stats.fec_key_bad.load();
+    uint32_t noise    = g_stats.noise_injected.load();
+    uint32_t bad_book = g_stats.bad_book_id.load();
+    uint32_t dup      = g_stats.dup_frames.load();
+    uint32_t ooo      = g_stats.ooo_frames.load();
+    uint32_t corrupt  = g_stats.corrupt_frames.load();
 
     printf("  发送帧:%-4u  接收帧:%-4u  丢DATA:%-3u(%.0f%%)  垃圾注入:%-3u\n",
            sent, recvd, drop, sent ? drop*100.0/sent : 0.0, noise);
-    printf("  fec_key_ok:%-4u  fec_key_bad:%-2u  fec_anomaly:%-2u\n",
-           fok, fbad, anom);
+    printf("  fec_key_ok:%-4u  fec_key_bad:%-2u  fec_anomaly:%-2u  bad_book_id:%-2u\n",
+           fok, fbad, anom, bad_book);
     printf("  [应用层] dup:%u  ooo:%u  corrupt:%u\n", dup, ooo, corrupt);
 
     int pass = 1;
@@ -546,8 +593,14 @@ static int run_scenario(Scenario sc, const char *label) {
         printf("  [FAIL] fec_key_bad=%u (FEC stream_key_ 新固定头提取失败)\n", fbad);
         pass = 0;
     }
-    if (fok == 0)
+    if (fok == 0 && sc != S_BAD_FEC)
         printf("  [WARN] fec_key_ok=0 (FEC 路径未被覆盖)\n");
+    if (bad_book > 0) {
+        printf("  [FAIL] bad_book_id=%u (undersized FEC 包进入 Decode()，min-size 防护缺失)\n", bad_book);
+        pass = 0;
+    } else {
+        printf("  [PASS] bad_book_id=0  — 无非法 FEC code book id 或 encode type 错误\n");
+    }
 
     /* ── 应用层三重断言（核心）── */
     if (dup > 0) {
@@ -576,6 +629,7 @@ static int run_scenario(Scenario sc, const char *label) {
     case S_DUPL:    threshold = sent;             break;
     case S_CORRUPT: threshold = sent * 80 / 100; break;
     case S_REORDER: threshold = sent * 85 / 100; break;
+    case S_BAD_FEC: threshold = sent * 95 / 100; break;  /* 无丢包，FEC注入不影响数据 */
     default:        threshold = sent * 80 / 100; break;
     }
     if (recvd < threshold) {
@@ -621,10 +675,11 @@ int main(void) {
     g_b.peer_addr_len = sizeof(g_b.peer_addr);
 
     int pass = 1;
-    pass &= run_scenario(S_FEC_KEY, "S1 随机25%丢包         → FEC+ARQ恢复，验证应用层无dup/ooo/corrupt");
-    pass &= run_scenario(S_DUPL,    "S2 5%随机重复包        → filter_win_去重，验证应用层无重复帧");
-    pass &= run_scenario(S_CORRUPT, "S3 12%丢+8%垃圾注入   → FEC恢复+健壮丢弃，验证应用层无损坏帧");
-    pass &= run_scenario(S_REORDER, "S4 5%丢+pair-swap乱序  → sort_buf_保序，验证应用层无乱序帧");
+    pass &= run_scenario(S_FEC_KEY, "S1 随机25%丢包            → FEC+ARQ恢复，验证应用层无dup/ooo/corrupt");
+    pass &= run_scenario(S_DUPL,    "S2 5%随机重复包           → filter_win_去重，验证应用层无重复帧");
+    pass &= run_scenario(S_CORRUPT, "S3 12%丢+8%垃圾注入      → FEC恢复+健壮丢弃，验证应用层无损坏帧");
+    pass &= run_scenario(S_REORDER, "S4 5%丢+pair-swap乱序     → sort_buf_保序，验证应用层无乱序帧");
+    pass &= run_scenario(S_BAD_FEC, "S5 undersized FEC注入(11B) → min-size防护，Decode()前必须丢弃");
 
     close(g_a.sfd);
     close(g_b.sfd);

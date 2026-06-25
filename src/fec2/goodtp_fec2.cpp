@@ -620,8 +620,10 @@ try_again_encode_pos_:
 
 u32 GtpFec2::Decode(Fec2CodePack *fec_code_pack, const u64 &ts_us) {
     if (MAX_VALID_FEC2_BOOK_ID < fec_code_pack->code_book_id_) {
-        GtpLog(write_log_cb_, kGtpFecMd, kGtpLogLevelError, "Invalid fec code book id(%u).\r\n",
-               (u32)(fec_code_pack->code_book_id_));
+        GtpLog(write_log_cb_, kGtpFecMd, kGtpLogLevelError,
+               "Invalid fec code book id(%u pack_sn=%u pack_size=%u).\r\n",
+               (u32)(fec_code_pack->code_book_id_), fec_code_pack->pack_sn_,
+               (u32)(fec_code_pack->pack_size_));
         return GTP_OK;
     }
 
@@ -754,8 +756,10 @@ fec2_decode_judge_book_chg_pos_:
     }
 
     default: {
-        GtpLog(write_log_cb_, kGtpFecMd, kGtpLogLevelError, "Unknown fec encode type(%u).\r\n",
-               (u32)(fec_code_pack->fec_encode_dir_));
+        GtpLog(write_log_cb_, kGtpFecMd, kGtpLogLevelError,
+               "Unknown fec encode type(%u pack_sn=%u code_book_id=%u).\r\n",
+               (u32)(fec_code_pack->fec_encode_dir_), fec_code_pack->pack_sn_,
+               (u32)(fec_code_pack->code_book_id_));
     }
     }
 
@@ -1452,7 +1456,8 @@ v_restore_next_pos_:
 
     if (res_pos != CalcPosInPackCache(pack->pack_sn_)) {
         GtpLog(write_log_cb_, kGtpFecMd, kGtpLogLevelError, "fec restore abnormal by vertical(pack_sn=%u "\
-               "res_pos=%u).\r\n", pack->pack_sn_, (u32)res_pos);
+               "res_pos=%u calc_res_pos=%u).\r\n", pack->pack_sn_, (u32)res_pos,
+               (u32)CalcPosInPackCache(pack->pack_sn_));
 
         pack_mem_pool_.FreeTranBuf((u8*)(fec_code_mgr.fec_pack_));
 
@@ -1703,7 +1708,8 @@ void GtpFec2::TryRecoveryPackByFecPack(const encode_pos &fec_encode_pos, const F
                                  decode_matrix.h_fec_code_[fec_encode_pos], decode_matrix);
         if (GTP_OK != nret) {
             GtpLog(write_log_cb_, kGtpFecMd, kGtpLogLevelError, "Call RestoreDataByHDir() failed(0x%08x) by "\
-                   "horizontal.\r\n", nret);
+                   "horizontal(encode_pos=%u start_sn=%u).\r\n", nret,
+                   (u32)fec_encode_pos, decode_matrix.start_pack_sn_);
         }
 
         if ((GTP_NO == decode_matrix.v_flag_) && (GTP_NO == decode_matrix.uh_flag_)
@@ -1753,7 +1759,8 @@ void GtpFec2::TryRecoveryPackByFecPack(const encode_pos &fec_encode_pos, const F
                                  decode_matrix.v_fec_code_[fec_encode_pos], decode_matrix);
         if (GTP_OK != nret) {
             GtpLog(write_log_cb_, kGtpFecMd, kGtpLogLevelError, "Call RestoreDataByVDir() failed(0x%08x) by "\
-                   "vertical.\r\n", nret);
+                   "vertical(encode_pos=%u start_sn=%u).\r\n", nret,
+                   (u32)fec_encode_pos, decode_matrix.start_pack_sn_);
             break;
         }
 
@@ -1907,7 +1914,8 @@ void GtpFec2::TryRecoveryPackByDataPack(const goodtp_pos &cache_pos, Fec2EnDeCod
                                  decode_matrix);
         if (GTP_OK != nret) {
             GtpLog(write_log_cb_, kGtpFecMd, kGtpLogLevelError, "Call RestoreDataByHDir() failed(0x%08x) by "\
-                   "horizontal.\r\n", nret);
+                   "horizontal(h_pos=%u start_sn=%u).\r\n", nret,
+                   (u32)h_pos, decode_matrix.start_pack_sn_);
         }
 
         if ((GTP_NO == decode_matrix.v_flag_) && (GTP_NO == decode_matrix.uh_flag_)

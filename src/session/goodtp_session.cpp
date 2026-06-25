@@ -2375,6 +2375,13 @@ u32 GtpSession::PackPostHandler(GtpPacket *pack, const u32 &size, GtpAddr *tran_
         case ((u8)(GtpPackType::kGtpFecPackType)): {
             #if (1 == ENABLE_FEC)
             if ((0x00 != pb_dt_.peer_version_) && ((u8)STREAM_QOS_WITH_FEC == GetStreamQos())) {
+                if ((u32)(pack->pack_size_) < (u32)sizeof(Fec2CodePack)) {
+                    GtpLog(cb_.write_log_cb_, kGtpSessionMd, kGtpLogLevelError,
+                           "fec pack too small, drop(size=%u min=%u pack_sn=%u).\r\n",
+                           (u32)(pack->pack_size_), (u32)sizeof(Fec2CodePack), pack->pack_sn_);
+                    pack_mem_pool_.FreeTranBuf((u8*)pack);
+                    break;
+                }
                 run_result = fec2_obj_.Decode((Fec2CodePack*)pack, last_active_ts_us_);
                 if (GTP_OK != run_result) {
                     GtpLog(cb_.write_log_cb_, kGtpSessionMd, kGtpLogLevelError,
