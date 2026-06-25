@@ -46,3 +46,7 @@ target_link_libraries(multi_session_test PRIVATE ${COMMON_LIBS})
 # ── 重连 + SN 跳变 FEC 状态清理回归测试 ──
 add_executable(reconnect_test reconnect_test.cpp)
 target_link_libraries(reconnect_test PRIVATE ${COMMON_LIBS})
+
+# ── FEC 恢复 + stream_key 新固定头部格式回归测试 ──
+add_executable(fec_key_restore_test fec_key_restore_test.cpp)
+target_link_libraries(fec_key_restore_test PRIVATE ${COMMON_LIBS})

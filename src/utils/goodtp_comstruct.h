@@ -553,6 +553,8 @@ typedef struct _Fec2CodePack {
 
     u16 code_len_;
 
+    u64 stream_key_;    // session stream key (0 when enable_key_=NO); replaces payload-prepend design
+
     u8 fec_code_[0];    // this position is align by 8 bytes.
 }Fec2CodePack;
 

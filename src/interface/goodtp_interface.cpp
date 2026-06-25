@@ -399,27 +399,26 @@ u32 GtpCheckPacketInvalid(void *pack, u32 pack_size, u64 *stream_key) {
         return nret;
     }
 
-    // when the sender embedded stream_key_ under has_check_flag_, recover it here without needing a
-    // session lookup.
-    // DATA/ACK/NACK/RTT: layout [GtpPacket][optional first_pack_sn u32][hash u32][user_id u32]...
-    // FEC: layout [Fec2CodePack header][hash u32][user_id u32][fec_code_...]
-    if ((NULL != stream_key) && (GTP_YES == gtp_pack->has_check_flag_)) {
-        u32 key_offset = (u32)sizeof(GtpPacket);
+    // Extract stream_key from the packet for session routing.
+    // FEC: stream_key_ is a fixed field in Fec2CodePack header (new wire format).
+    // DATA/ACK/NACK/RTT: stream_key is embedded in the payload after the fixed header when has_check_flag_=1.
+    if (NULL != stream_key) {
         if ((u8)(GtpPackType::kGtpFecPackType) == gtp_pack->pack_type_) {
-            key_offset = (u32)sizeof(Fec2CodePack);
-        } else if (0 != ((u8)(gtp_pack->repeat_counter_))) {
-            key_offset += (u32)sizeof(u32);
-        }
-
-        if ((key_offset + sizeof(u64)) <= pack_size) {
-            // wire layout: [HIGH32 of stream_key][LOW32 of stream_key] at key_offset.
-            // local names 'hash'/'user_id' are misleading relics — the math is correct.
-            u32 hash    = 0;
-            u32 user_id = 0;
-            memcpy(&hash,    ((u8*)gtp_pack) + key_offset,              sizeof(u32));
-            memcpy(&user_id, ((u8*)gtp_pack) + key_offset + sizeof(u32), sizeof(u32));
-
-            *stream_key = (((u64)hash) << 32) | ((u64)user_id);
+            if (pack_size >= (u32)sizeof(Fec2CodePack)) {
+                *stream_key = ((Fec2CodePack*)gtp_pack)->stream_key_;
+            }
+        } else if (GTP_YES == gtp_pack->has_check_flag_) {
+            u32 key_offset = (u32)sizeof(GtpPacket);
+            if (0 != ((u8)(gtp_pack->repeat_counter_))) {
+                key_offset += (u32)sizeof(u32);
+            }
+            if ((key_offset + (u32)sizeof(u64)) <= pack_size) {
+                u32 hash    = 0;
+                u32 user_id = 0;
+                memcpy(&hash,    ((u8*)gtp_pack) + key_offset,              sizeof(u32));
+                memcpy(&user_id, ((u8*)gtp_pack) + key_offset + sizeof(u32), sizeof(u32));
+                *stream_key = (((u64)hash) << 32) | ((u64)user_id);
+            }
         }
     }
 
@@ -597,22 +596,27 @@ u32 GtpPacketReceive(GtpHandler_p gtp_hdl, void *pack, u32 pack_sz, GtpAddr *tra
 
     // If caller did not pre-set enable_key_, extract stream_key from the packet so that
     // GetSession can find or create the session by key rather than by five-tuple.
-    if ((GTP_NO == tran_addr->enable_key_) && (GTP_YES == gtp_pack->has_check_flag_)) {
-        u32 key_offset = (u32)sizeof(GtpPacket);
+    if (GTP_NO == tran_addr->enable_key_) {
+        u64 embedded_key = 0;
         if ((u8)(GtpPackType::kGtpFecPackType) == gtp_pack->pack_type_) {
-            key_offset = (u32)sizeof(Fec2CodePack);
-        } else if (0 != ((u8)(gtp_pack->repeat_counter_))) {
-            key_offset += (u32)sizeof(u32);
-        }
-        if ((key_offset + (u32)sizeof(u64)) <= pack_sz) {
-            u32 hi = 0, lo = 0;
-            memcpy(&hi, ((u8*)gtp_pack) + key_offset,              sizeof(u32));
-            memcpy(&lo, ((u8*)gtp_pack) + key_offset + sizeof(u32), sizeof(u32));
-            u64 embedded_key = ((u64)hi << 32) | (u64)lo;
-            if (0 != embedded_key) {
-                tran_addr->enable_key_ = GTP_YES;
-                tran_addr->stream_key_ = embedded_key;
+            if (pack_sz >= (u32)sizeof(Fec2CodePack)) {
+                embedded_key = ((Fec2CodePack*)gtp_pack)->stream_key_;
             }
+        } else if (GTP_YES == gtp_pack->has_check_flag_) {
+            u32 key_offset = (u32)sizeof(GtpPacket);
+            if (0 != ((u8)(gtp_pack->repeat_counter_))) {
+                key_offset += (u32)sizeof(u32);
+            }
+            if ((key_offset + (u32)sizeof(u64)) <= pack_sz) {
+                u32 hi = 0, lo = 0;
+                memcpy(&hi, ((u8*)gtp_pack) + key_offset,              sizeof(u32));
+                memcpy(&lo, ((u8*)gtp_pack) + key_offset + sizeof(u32), sizeof(u32));
+                embedded_key = ((u64)hi << 32) | (u64)lo;
+            }
+        }
+        if (0 != embedded_key) {
+            tran_addr->enable_key_ = GTP_YES;
+            tran_addr->stream_key_ = embedded_key;
         }
     }
 
