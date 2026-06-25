@@ -3,9 +3,11 @@
  *
  * 4 场景回归测试（各 8 秒，50 pps，enable_key_=1）
  *
- * S1 FEC_KEY  确定性丢包(sn%4==1) + FEC stream_key_ 新固定头验证
- *             旧 memmove 方案在 >10% 丢包时触发 res_pos!=CalcPosInPackCache 错误；
- *             新方案（stream_key_ 位于 Fec2CodePack 固定 bytes16-23）不触发。
+ * S1 FEC_KEY  随机 25% 丢包 + FEC stream_key_ 新固定头验证
+ *             旧 memmove 方案在 >10% 随机丢包时触发 res_pos!=CalcPosInPackCache；
+ *             确定性 sn%4==1 只丢同块同位置，无法覆盖同块多丢/V向/斜向恢复路径。
+ *             随机 25% 使同一 2×2 块内偶发 2 丢，充分压测 FEC buffer offset 计算，
+ *             新方案（stream_key_ 位于 Fec2CodePack 固定 bytes16-23）不触发异常。
  *
  * S2 DUPL     每个 GTP 包（DATA/FEC/ACK/NACK）发送两次
  *             验证 filter_win_ 去重：recv_frames == sent_frames，
@@ -88,6 +90,9 @@ static Stats            g_stats;
 static volatile int     g_running  = 0;
 static Scenario         g_scenario = S_FEC_KEY;
 
+/* S1 随机丢包用：每场景 reset 为固定种子，结果可复现 */
+static unsigned int     g_rand_state = 0;
+
 /* S4 乱序缓冲区：暂存一个 DATA 包，下一个到时两两交换发出 */
 static uint8_t          g_held_pack[4096];
 static int              g_held_pack_size = 0;
@@ -143,9 +148,9 @@ static uint32_t SendPackCbA(GtpHandler_p hdl, void *pack, uint32_t size, GtpAddr
 
     switch (g_scenario) {
 
-    /* ── S1: 确定性 25% 丢包 ── */
+    /* ── S1: 随机 25% 丢包（独立概率，同块可能多丢，覆盖 V/斜向 FEC 恢复路径）── */
     case S_FEC_KEY:
-        if (pt == GTP_DATA_TYPE && (GTP_RAW_PACK_SN(pack) % 4u) == 1u) {
+        if (pt == GTP_DATA_TYPE && (rand_r(&g_rand_state) % 100) < 25) {
             g_stats.dropped_data.fetch_add(1);
             return GTP_OK;
         }
@@ -331,6 +336,7 @@ static int run_scenario(Scenario sc, const char *label) {
     g_stats.reset();
     g_scenario        = sc;
     g_held_pack_size  = 0;
+    g_rand_state      = 0x5EED1234u;   /* 固定种子，S1 丢包序列可复现 */
     g_running         = 1;
 
     /* GTP 回调 & 内存配置 */
@@ -467,8 +473,9 @@ static int run_scenario(Scenario sc, const char *label) {
                    recvd, sent, sent ? recvd*100.0/sent : 0.0);
             pass = 0;
         } else {
-            printf("  [PASS] 帧交付率 %.1f%% (sn%%4==1 丢包 + FEC 恢复)\n",
-                   sent ? recvd*100.0/sent : 0.0);
+            printf("  [PASS] 帧交付率 %.1f%% (随机25%%丢包 实际%.1f%% + FEC恢复)\n",
+                   sent ? recvd*100.0/sent : 0.0,
+                   sent ? drop*100.0/sent : 0.0);
         }
         break;
 
@@ -547,7 +554,7 @@ int main(void) {
 
     /* 4 场景顺序执行 */
     int pass = 1;
-    pass &= run_scenario(S_FEC_KEY, "S1 FEC_KEY — sn%4==1 确定性丢包 + stream_key 新头验证");
+    pass &= run_scenario(S_FEC_KEY, "S1 FEC_KEY — 随机25%%丢包 + stream_key 新固定头验证");
     pass &= run_scenario(S_DUPL,    "S2 DUPL    — 每包发两次（重复包去重）");
     pass &= run_scenario(S_CORRUPT, "S3 CORRUPT — 20%% DATA 替换垃圾（错误包鲁棒性）");
     pass &= run_scenario(S_REORDER, "S4 REORDER — 连续 DATA 两两 SN 交换（乱序包）");
