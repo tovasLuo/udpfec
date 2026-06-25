@@ -1379,8 +1379,9 @@ h_restore_next_pos_:
 
     if (res_pos != CalcPosInPackCache(pack->pack_sn_)) {
         GtpLog(write_log_cb_, kGtpFecMd, kGtpLogLevelError, "fec restore abnormal by horizontal(pack_sn=%u "\
-               "res_pos=%u calc_res_pos=%u).\r\n", pack->pack_sn_, (u32)res_pos,
-               (u32)CalcPosInPackCache(pack->pack_sn_));
+               "res_pos=%u calc_res_pos=%u start_sn=%u matrix_size=%u).\r\n", pack->pack_sn_, (u32)res_pos,
+               (u32)CalcPosInPackCache(pack->pack_sn_), decode_matrix.start_pack_sn_,
+               (u32)(decode_matrix.matrix_size_));
 
         pack_mem_pool_.FreeTranBuf((u8*)(fec_code_mgr.fec_pack_));
 
@@ -1456,8 +1457,9 @@ v_restore_next_pos_:
 
     if (res_pos != CalcPosInPackCache(pack->pack_sn_)) {
         GtpLog(write_log_cb_, kGtpFecMd, kGtpLogLevelError, "fec restore abnormal by vertical(pack_sn=%u "\
-               "res_pos=%u calc_res_pos=%u).\r\n", pack->pack_sn_, (u32)res_pos,
-               (u32)CalcPosInPackCache(pack->pack_sn_));
+               "res_pos=%u calc_res_pos=%u start_sn=%u matrix_size=%u).\r\n", pack->pack_sn_, (u32)res_pos,
+               (u32)CalcPosInPackCache(pack->pack_sn_), decode_matrix.start_pack_sn_,
+               (u32)(decode_matrix.matrix_size_));
 
         pack_mem_pool_.FreeTranBuf((u8*)(fec_code_mgr.fec_pack_));
 
@@ -1531,8 +1533,9 @@ uh_restore_next_pos_:
 
     if (res_pos != CalcPosInPackCache(pack->pack_sn_)) {
         GtpLog(write_log_cb_, kGtpFecMd, kGtpLogLevelError,
-               "fec restore abnormal by uphill(pack_sn=%u res_pos=%u calc_res_pos=%u).\r\n",
-               pack->pack_sn_, (u32)res_pos, (u32)CalcPosInPackCache(pack->pack_sn_));
+               "fec restore abnormal by uphill(pack_sn=%u res_pos=%u calc_res_pos=%u start_sn=%u matrix_size=%u).\r\n",
+               pack->pack_sn_, (u32)res_pos, (u32)CalcPosInPackCache(pack->pack_sn_),
+               decode_matrix.start_pack_sn_, (u32)(decode_matrix.matrix_size_));
 
         pack_mem_pool_.FreeTranBuf((u8*)(fec_code_mgr.fec_pack_));
         fec_code_mgr.fec_pack_  = NULL;
@@ -1606,8 +1609,9 @@ dh_restore_next_pos_:
 
     if (res_pos != CalcPosInPackCache(pack->pack_sn_)) {
         GtpLog(write_log_cb_, kGtpFecMd, kGtpLogLevelError,
-               "fec restore abnormal by downhill(pack_sn=%u res_pos=%u calc_res_pos=%u).\r\n",
-               pack->pack_sn_, (u32)res_pos, (u32)CalcPosInPackCache(pack->pack_sn_));
+               "fec restore abnormal by downhill(pack_sn=%u res_pos=%u calc_res_pos=%u start_sn=%u matrix_size=%u).\r\n",
+               pack->pack_sn_, (u32)res_pos, (u32)CalcPosInPackCache(pack->pack_sn_),
+               decode_matrix.start_pack_sn_, (u32)(decode_matrix.matrix_size_));
 
         pack_mem_pool_.FreeTranBuf((u8*)(fec_code_mgr.fec_pack_));
         fec_code_mgr.fec_pack_  = NULL;
