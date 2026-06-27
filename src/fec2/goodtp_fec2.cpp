@@ -25,6 +25,12 @@
 #include <memory.h>
 #include <string.h>
 
+#if defined(__SSE2__)
+#include <emmintrin.h>
+#elif defined(__ARM_NEON__)
+#include <arm_neon.h>
+#endif
+
 using namespace std;
 
 #ifdef __cplusplus
@@ -261,37 +267,43 @@ void XorEncode(u8 *data, const u32 &data_size, u8 *code, const u32 &code_size, u
     result_size = data_size;
 
 xor_code_start_pos_:
-    if (8 == sizeof(void*)) {
-        u64 *data_ptr = (u64*)data;
-        u64 *code_ptr = (u64*)code;
+#if defined(__SSE2__)
+    xor_num     = (data_size >> 4);
+    encoded_num = (xor_num << 4);
 
-        xor_num     = (data_size >> 3);
-        encoded_num = (xor_num << 3);
-
-        nloop = 0;
-        while (xor_num > nloop) {
-            code_ptr[nloop] ^= data_ptr[nloop];
-            nloop += 1;
-        }
-
-        goto xor_code_byte_pos_;
+    for (nloop = 0; xor_num > nloop; ++nloop) {
+        const u32 offset = (nloop << 4);
+        __m128i data_vec = _mm_loadu_si128((const __m128i*)(data + offset));
+        __m128i code_vec = _mm_loadu_si128((const __m128i*)(code + offset));
+        code_vec = _mm_xor_si128(code_vec, data_vec);
+        _mm_storeu_si128((__m128i*)(code + offset), code_vec);
     }
+#elif defined(__ARM_NEON__)
+    xor_num     = (data_size >> 4);
+    encoded_num = (xor_num << 4);
 
-    if (4 == sizeof(void*)) {
-        u32 *data_ptr = (u32*)data;
-        u32 *code_ptr = (u32*)code;
-
-        xor_num     = (data_size >> 2);
-        encoded_num = (xor_num << 2);
-
-        nloop = 0;
-        while (xor_num > nloop) {
-            code_ptr[nloop] ^= data_ptr[nloop];
-            nloop += 1;
-        }
+    for (nloop = 0; xor_num > nloop; ++nloop) {
+        const u32 offset = (nloop << 4);
+        uint8x16_t data_vec = vld1q_u8(data + offset);
+        uint8x16_t code_vec = vld1q_u8(code + offset);
+        code_vec = veorq_u8(code_vec, data_vec);
+        vst1q_u8(code + offset, code_vec);
     }
+#else
+    xor_num     = (data_size >> 3);
+    encoded_num = (xor_num << 3);
 
-xor_code_byte_pos_:
+    for (nloop = 0; xor_num > nloop; ++nloop) {
+        const u32 offset = (nloop << 3);
+        u64 data_value = 0;
+        u64 code_value = 0;
+        memcpy(&data_value, data + offset, sizeof(data_value));
+        memcpy(&code_value, code + offset, sizeof(code_value));
+        code_value ^= data_value;
+        memcpy(code + offset, &code_value, sizeof(code_value));
+    }
+#endif
+
     while (data_size > encoded_num) {
         code[encoded_num] ^= data[encoded_num];
         encoded_num += 1;
@@ -338,6 +350,18 @@ inline goodtp_pos CalcFirstVerticalPosInCache(const goodtp_pos &cache_pos, const
     }
 
     return ((cache_pos + MAX_FEC2_CACHE_CAPACITY) - offset);
+}
+
+inline u32 CheckVerticalEncodeEnabled(const Fec2EnDeCodeMatrix &matrix, const encode_pos &v_pos) {
+    if (GTP_NO == matrix.v_flag_) {
+        return GTP_NO;
+    }
+
+    if ((6 == matrix.code_book_id_) && (1 != v_pos)) {
+        return GTP_NO;
+    }
+
+    return GTP_YES;
 }
 
 inline encode_pos CalcHillEncodePos(const Fec2EnDeCodeMatrix &matrix, const encode_pos &h_pos,
@@ -491,6 +515,7 @@ SendFec2CodeMatrix::SendFec2CodeMatrix(const GtpFec2Mode *code_book, const u32 &
     write_log_cb_(write_log_cb),
     code_book_(code_book),
     fec_buf_(pack_mem_pool, write_log_cb) {
+    ClearEncodeCapacity();
 }
 
 SendFec2CodeMatrix::~SendFec2CodeMatrix() {
@@ -499,6 +524,16 @@ SendFec2CodeMatrix::~SendFec2CodeMatrix() {
 void SendFec2CodeMatrix::Init(void) {
     fec_buf_.Init();
     encode_matrix_.Init(code_book_, (u32)(encode_matrix_.code_book_id_), pack_mem_pool_);
+    ClearEncodeCapacity();
+
+    return;
+}
+
+void SendFec2CodeMatrix::ClearEncodeCapacity(void) {
+    memset(h_capacity_, 0x00, sizeof(h_capacity_));
+    memset(v_capacity_, 0x00, sizeof(v_capacity_));
+    memset(uh_capacity_, 0x00, sizeof(uh_capacity_));
+    memset(dh_capacity_, 0x00, sizeof(dh_capacity_));
 
     return;
 }
@@ -693,8 +728,6 @@ GtpFec2::GtpFec2(pSendPackCallBack send_pack_cb, pLogCallBack write_log_cb, Tran
     restorePackRecv_cb_(receive_frame_cb),
     pb_dt_(NULL),
     using_fec_book_id_(DEFAULT_FEC2_BOOK_ID),
-    force_fec_book_flag_(GTP_NO),
-    force_fec_book_id_(DEFAULT_FEC2_BOOK_ID),
     next_pack_sn_(0),
     encode_(fec_code_book, DEFAULT_FEC2_BOOK_ID, pack_mem_pool, write_log_cb),
     decode_(fec_code_book, DEFAULT_FEC2_BOOK_ID, pack_mem_pool, write_log_cb) {
@@ -706,20 +739,6 @@ GtpFec2::~GtpFec2() {
 
 u32 GtpFec2::Init( SessionPublicData *pb_dt) {
     pb_dt_ = pb_dt;
-    const char *force_book = getenv("GOODTP_FORCE_FEC2_BOOK_ID");
-    if ((NULL != force_book) && ('\0' != force_book[0])) {
-        u32 book_id = (u32)strtoul(force_book, NULL, 0);
-        if (MAX_VALID_FEC2_BOOK_ID < book_id) {
-            GtpLog(write_log_cb_, kGtpFecMd, kGtpLogLevelError,
-                   "Invalid GOODTP_FORCE_FEC2_BOOK_ID=%u max=%u.\r\n", book_id, MAX_VALID_FEC2_BOOK_ID);
-            RETURN_ERR(kGtpFecMd, kInvalidFecCodeBookId);
-        }
-
-        force_fec_book_flag_ = GTP_YES;
-        force_fec_book_id_ = (u8)book_id;
-        using_fec_book_id_ = (u8)book_id;
-        encode_.ChangeFecMode(book_id);
-    }
 
     return GTP_OK;
 }
@@ -988,14 +1007,6 @@ cache_data_pack_exit_pos_:
 }
 
 void GtpFec2::ChangeFecMode(const u32 &new_code_book_id) {
-    if (GTP_YES == force_fec_book_flag_) {
-        if (((u32)force_fec_book_id_) != ((u32)(encode_.encode_matrix_.code_book_id_))) {
-            encode_.ChangeFecMode((u32)force_fec_book_id_);
-        }
-        using_fec_book_id_ = force_fec_book_id_;
-        return;
-    }
-
     if (MAX_VALID_FEC2_BOOK_ID < new_code_book_id) {
         GtpLog(write_log_cb_, kGtpFecMd, kGtpLogLevelWarning,
                "Invalid code_book_id(max_id=%u now_id=%u).\r\n", MAX_VALID_FEC2_BOOK_ID, new_code_book_id);
@@ -1004,6 +1015,10 @@ void GtpFec2::ChangeFecMode(const u32 &new_code_book_id) {
 
     using_fec_book_id_ = new_code_book_id;
     return;
+}
+
+u8 GtpFec2::RecvFecBookId(void) const {
+    return decode_.code_book_id_;
 }
 
 void GtpFec2::SetEmptyFecEnCode(const u32 &send_fec_pack_flag) {
@@ -1017,7 +1032,7 @@ void GtpFec2::SetEmptyFecEnCode(const u32 &send_fec_pack_flag) {
         for (i = 0; ((u32)(encode_.encode_matrix_.h_size_)) > i; ++i) {
             if ((NULL != encode_.encode_matrix_.h_fec_code_[i].fec_pack_)
              && (0 != encode_.encode_matrix_.h_fec_code_[i].fec_pack_->encode_bit_map_)) {
-                SendFecCodePacket(encode_.encode_matrix_.h_fec_code_[i]);
+                SendFecCodePacket(encode_.encode_matrix_.h_fec_code_[i], &(encode_.h_capacity_[i]));
             }
         }
     }
@@ -1026,7 +1041,7 @@ void GtpFec2::SetEmptyFecEnCode(const u32 &send_fec_pack_flag) {
         for (i = 0; ((u32)(encode_.encode_matrix_.v_size_)) > i; ++i) {
             if ((NULL != encode_.encode_matrix_.v_fec_code_[i].fec_pack_)
              && (0 != encode_.encode_matrix_.v_fec_code_[i].fec_pack_->encode_bit_map_)) {
-                SendFecCodePacket(encode_.encode_matrix_.v_fec_code_[i]);
+                SendFecCodePacket(encode_.encode_matrix_.v_fec_code_[i], &(encode_.v_capacity_[i]));
             }
         }
     }
@@ -1035,7 +1050,7 @@ void GtpFec2::SetEmptyFecEnCode(const u32 &send_fec_pack_flag) {
         for (i = 0; MAX_FEC2_HILL_SIZE > i; ++i) {
             if ((NULL != encode_.encode_matrix_.uh_fec_code_[i].fec_pack_)
              && (0 != encode_.encode_matrix_.uh_fec_code_[i].fec_pack_->encode_bit_map_)) {
-                SendFecCodePacket(encode_.encode_matrix_.uh_fec_code_[i]);
+                SendFecCodePacket(encode_.encode_matrix_.uh_fec_code_[i], &(encode_.uh_capacity_[i]));
             }
         }
     }
@@ -1044,7 +1059,7 @@ void GtpFec2::SetEmptyFecEnCode(const u32 &send_fec_pack_flag) {
         for (i = 0; MAX_FEC2_HILL_SIZE > i; ++i) {
             if ((NULL != encode_.encode_matrix_.dh_fec_code_[i].fec_pack_)
              && (0 != encode_.encode_matrix_.dh_fec_code_[i].fec_pack_->encode_bit_map_)) {
-                SendFecCodePacket(encode_.encode_matrix_.dh_fec_code_[i]);
+                SendFecCodePacket(encode_.encode_matrix_.dh_fec_code_[i], &(encode_.dh_capacity_[i]));
             }
         }
     }
@@ -1121,7 +1136,7 @@ block_encode_start_pos_:
         HorizontalEncode(h_pos, v_pos, (u8*)pack, (u32)(pack->pack_size_));
     }
 
-    if (GTP_YES == encode_.encode_matrix_.v_flag_) {
+    if (GTP_YES == CheckVerticalEncodeEnabled(encode_.encode_matrix_, v_pos)) {
         VerticalEncode(h_pos, v_pos, (u8*)pack, (u32)(pack->pack_size_));
     }
 
@@ -1135,8 +1150,9 @@ block_encode_start_pos_:
             encode_pos bit_num = BuildHillPosVec(encode_.encode_matrix_, Fec2CodeDir::kUpHill, fec_encode_pos,
                                                  pos_vec, MAX_FEC2_HILL_SIZE, write_log_cb_);
             if ((INVALID_ENCODE_POS != bit_pos) && (0 != bit_num)) {
-                HillEncode(encode_.encode_matrix_.uh_fec_code_, Fec2CodeDir::kUpHill, fec_encode_pos,
-                           bit_pos, bit_num, (u8*)pack, (u32)(pack->pack_size_));
+                HillEncode(encode_.encode_matrix_.uh_fec_code_, encode_.uh_capacity_,
+                           Fec2CodeDir::kUpHill, fec_encode_pos, bit_pos, bit_num,
+                           (u8*)pack, (u32)(pack->pack_size_));
             }
         }
     }
@@ -1151,8 +1167,9 @@ block_encode_start_pos_:
             encode_pos bit_num = BuildHillPosVec(encode_.encode_matrix_, Fec2CodeDir::kDownHill, fec_encode_pos,
                                                  pos_vec, MAX_FEC2_HILL_SIZE, write_log_cb_);
             if ((INVALID_ENCODE_POS != bit_pos) && (0 != bit_num)) {
-                HillEncode(encode_.encode_matrix_.dh_fec_code_, Fec2CodeDir::kDownHill, fec_encode_pos,
-                           bit_pos, bit_num, (u8*)pack, (u32)(pack->pack_size_));
+                HillEncode(encode_.encode_matrix_.dh_fec_code_, encode_.dh_capacity_,
+                           Fec2CodeDir::kDownHill, fec_encode_pos, bit_pos, bit_num,
+                           (u8*)pack, (u32)(pack->pack_size_));
             }
         }
     }
@@ -1191,9 +1208,7 @@ h_first_fec_encode_pos_:
         encode_.encode_matrix_.h_fec_code_[h_pos].fec_pack_->pack_sn_        = encode_.encode_matrix_.start_pack_sn_;
         encode_.encode_matrix_.h_fec_code_[h_pos].fec_pack_->fec_encode_dir_ = (u8)(Fec2CodeDir::kHorizontal);
         encode_.encode_matrix_.h_fec_code_[h_pos].fec_pack_->fec_encode_pos_ = (u8)h_pos;
-
-        // temporary cache in the stream_key_ memory.
-        encode_.encode_matrix_.h_fec_code_[h_pos].tran_addr_->stream_key_    = (u64)com_var;  // temp cache.
+        encode_.h_capacity_[h_pos] = com_var;
 
         goto h_fec_encode_exit_pos_;
     }
@@ -1202,11 +1217,13 @@ h_first_fec_encode_pos_:
         pack_mem_pool_.FreeTranBuf((u8*)(encode_.encode_matrix_.h_fec_code_[h_pos].fec_pack_));
         encode_.encode_matrix_.h_fec_code_[h_pos].fec_pack_  = NULL;
         encode_.encode_matrix_.h_fec_code_[h_pos].tran_addr_ = NULL;
+        encode_.h_capacity_[h_pos] = 0;
         goto h_first_fec_encode_pos_;
     }
 
-    if (data_size > ((u32)(encode_.encode_matrix_.h_fec_code_[h_pos].tran_addr_->stream_key_))) {
-        com_var = ReAllocateEncodeMem(data_size, encode_.encode_matrix_.h_fec_code_[h_pos]);
+    if (data_size > encode_.h_capacity_[h_pos]) {
+        com_var = ReAllocateEncodeMem(data_size, encode_.encode_matrix_.h_fec_code_[h_pos],
+                                      &(encode_.h_capacity_[h_pos]));
         if (GTP_OK != com_var) {
             GtpLog(write_log_cb_, kGtpFecMd, kGtpLogLevelError,
                    "Call ReAllocateEncodeMem() failed(0x%08x) when horizontal encode.\r\n", com_var);
@@ -1224,7 +1241,7 @@ h_first_fec_encode_pos_:
 h_fec_encode_exit_pos_:
     // current sn is the last of horizontal.
     if (((encode_pos)(encode_.encode_matrix_.h_size_)) <= (v_pos + 1)) {
-        SendFecCodePacket(encode_.encode_matrix_.h_fec_code_[h_pos]);
+        SendFecCodePacket(encode_.encode_matrix_.h_fec_code_[h_pos], &(encode_.h_capacity_[h_pos]));
     }
 
     return;
@@ -1261,9 +1278,7 @@ v_first_fec_encode_pos_:
         encode_.encode_matrix_.v_fec_code_[v_pos].fec_pack_->pack_sn_        = encode_.encode_matrix_.start_pack_sn_;
         encode_.encode_matrix_.v_fec_code_[v_pos].fec_pack_->fec_encode_dir_ = (u8)(Fec2CodeDir::kVertical);
         encode_.encode_matrix_.v_fec_code_[v_pos].fec_pack_->fec_encode_pos_ = (u8)v_pos;
-
-        // temporary in the stream_key_ memory.
-        encode_.encode_matrix_.v_fec_code_[v_pos].tran_addr_->stream_key_   = (u64)com_var;  // temp cache.
+        encode_.v_capacity_[v_pos] = com_var;
 
         goto v_fec_encode_exit_pos_;
     }
@@ -1272,12 +1287,14 @@ v_first_fec_encode_pos_:
         pack_mem_pool_.FreeTranBuf((u8*)(encode_.encode_matrix_.v_fec_code_[v_pos].fec_pack_));
         encode_.encode_matrix_.v_fec_code_[v_pos].fec_pack_  = NULL;
         encode_.encode_matrix_.v_fec_code_[v_pos].tran_addr_ = NULL;
+        encode_.v_capacity_[v_pos] = 0;
 
         goto v_first_fec_encode_pos_;
     }
 
-    if (data_size > ((u32)(encode_.encode_matrix_.v_fec_code_[v_pos].tran_addr_->stream_key_))) {
-        com_var = ReAllocateEncodeMem(data_size, encode_.encode_matrix_.v_fec_code_[v_pos]);
+    if (data_size > encode_.v_capacity_[v_pos]) {
+        com_var = ReAllocateEncodeMem(data_size, encode_.encode_matrix_.v_fec_code_[v_pos],
+                                      &(encode_.v_capacity_[v_pos]));
         if (GTP_OK != com_var) {
             GtpLog(write_log_cb_, kGtpFecMd, kGtpLogLevelError,
                    "Call ReAllocateEncodeMem failed(0x%08x) when vertical encode.\r\n", com_var);
@@ -1295,13 +1312,13 @@ v_first_fec_encode_pos_:
 v_fec_encode_exit_pos_:
     // current sn is the last of vertical.
     if (((encode_pos)(encode_.encode_matrix_.v_size_)) <= (h_pos + 1)) {
-        SendFecCodePacket(encode_.encode_matrix_.v_fec_code_[v_pos]);
+        SendFecCodePacket(encode_.encode_matrix_.v_fec_code_[v_pos], &(encode_.v_capacity_[v_pos]));
     }
 
     return;
 }
 
-void GtpFec2::HillEncode(Fec2CodePackMgr fec_code_mgr[], const Fec2CodeDir &fec_encode_dir,
+void GtpFec2::HillEncode(Fec2CodePackMgr fec_code_mgr[], u32 capacity[], const Fec2CodeDir &fec_encode_dir,
                          const encode_pos &fec_encode_pos, const encode_pos &bit_pos,
                          const encode_pos &bit_num, u8 *data, const u32 &data_size) {
     if ((MAX_FEC2_HILL_SIZE <= fec_encode_pos) || (8 <= bit_pos) || (8 < bit_num) || (0 == bit_num)) {
@@ -1342,8 +1359,7 @@ hill_first_fec_encode_pos_:
         code_mgr.fec_pack_->pack_sn_        = encode_.encode_matrix_.start_pack_sn_;
         code_mgr.fec_pack_->fec_encode_dir_ = (u8)fec_encode_dir;
         code_mgr.fec_pack_->fec_encode_pos_ = (u8)fec_encode_pos;
-
-        code_mgr.tran_addr_->stream_key_ = (u64)com_var;
+        capacity[fec_encode_pos] = com_var;
 
         goto hill_fec_encode_exit_pos_;
     }
@@ -1352,11 +1368,12 @@ hill_first_fec_encode_pos_:
         pack_mem_pool_.FreeTranBuf((u8*)(code_mgr.fec_pack_));
         code_mgr.fec_pack_  = NULL;
         code_mgr.tran_addr_ = NULL;
+        capacity[fec_encode_pos] = 0;
         goto hill_first_fec_encode_pos_;
     }
 
-    if (data_size > ((u32)(code_mgr.tran_addr_->stream_key_))) {
-        com_var = ReAllocateEncodeMem(data_size, code_mgr);
+    if (data_size > capacity[fec_encode_pos]) {
+        com_var = ReAllocateEncodeMem(data_size, code_mgr, &(capacity[fec_encode_pos]));
         if (GTP_OK != com_var) {
             GtpLog(write_log_cb_, kGtpFecMd, kGtpLogLevelError,
                    "Call ReAllocateEncodeMem() failed(0x%08x) when %s encode.\r\n", com_var,
@@ -1374,13 +1391,13 @@ hill_first_fec_encode_pos_:
 
 hill_fec_encode_exit_pos_:
     if (bit_num <= (bit_pos + 1)) {
-        SendFecCodePacket(code_mgr);
+        SendFecCodePacket(code_mgr, &(capacity[fec_encode_pos]));
     }
 
     return;
 }
 
-void GtpFec2::SendFecCodePacket(Fec2CodePackMgr &fec_code_mgr) {
+void GtpFec2::SendFecCodePacket(Fec2CodePackMgr &fec_code_mgr, u32 *capacity) {
     fec_code_mgr.fec_pack_->goodtp_ver_     = CalcRightGtpVer(GTP_VERSION, pb_dt_->peer_version_);
     fec_code_mgr.fec_pack_->header_offset_  = (u8)sizeof(GtpPacket);
     fec_code_mgr.fec_pack_->cache_us_flag_  = GTP_NO;
@@ -1427,6 +1444,9 @@ void GtpFec2::SendFecCodePacket(Fec2CodePackMgr &fec_code_mgr) {
 
     fec_code_mgr.fec_pack_  = NULL;
     fec_code_mgr.tran_addr_ = NULL;
+    if (NULL != capacity) {
+        *capacity = 0;
+    }
 
     return;
 }
@@ -1736,7 +1756,7 @@ hill_restore_next_pos_:
     return GTP_OK;
 }
 
-u32 GtpFec2::ReAllocateEncodeMem(const u32 &new_size, Fec2CodePackMgr &fec_code_mgr) {
+u32 GtpFec2::ReAllocateEncodeMem(const u32 &new_size, Fec2CodePackMgr &fec_code_mgr, u32 *capacity) {
     u32 mem_spec = 0;
     u32 mem_size = 0;
     u8 *new_mem  = NULL;
@@ -1762,8 +1782,9 @@ u32 GtpFec2::ReAllocateEncodeMem(const u32 &new_size, Fec2CodePackMgr &fec_code_
 
     fec_code_mgr.fec_pack_  = (Fec2CodePack*)new_mem;
     fec_code_mgr.tran_addr_ = tran_addr;
-
-    fec_code_mgr.tran_addr_->stream_key_ = (u64)mem_size;
+    if (NULL != capacity) {
+        *capacity = mem_size;
+    }
 
     return GTP_OK;
 }
@@ -2023,7 +2044,7 @@ try_restore_v_pack_pos_:
         goto try_restore_uh_pack_pos_;
     }
 
-    if (GTP_YES == decode_matrix.v_flag_) {
+    if (GTP_YES == CheckVerticalEncodeEnabled(decode_matrix, v_pos)) {
         if (NULL == decode_matrix.v_fec_code_[v_pos].fec_pack_) {
             goto try_restore_uh_pack_pos_;
         }
@@ -2444,26 +2465,58 @@ hill_calc_restore_next_pos_:
 }
 
 void GtpFec2::ClearReceiveUnUsedResource(const goodtp_pos &current_pos_in_cache) {
-    goodtp_pos keep_start = 0;
-    goodtp_pos clear_pos = 0;
-
-    if (((goodtp_pos)MAX_CLEAR_FEC_RECV_STEP) <= current_pos_in_cache) {
-        keep_start = current_pos_in_cache - ((goodtp_pos)MAX_CLEAR_FEC_RECV_STEP);
-    } else {
-        keep_start = (current_pos_in_cache + MAX_FEC2_CACHE_CAPACITY) - ((goodtp_pos)MAX_CLEAR_FEC_RECV_STEP);
+    if (NULL == decode_.fec_buf_.pack_cache_[current_pos_in_cache]) {
+        return;
     }
-    keep_start &= FEC2_CACHE_CAPACITY_MASK;
 
-    clear_pos = current_pos_in_cache + 1;
-    clear_pos &= FEC2_CACHE_CAPACITY_MASK;
+    GtpPacket *cur_pack = (GtpPacket*)(decode_.fec_buf_.pack_cache_[current_pos_in_cache]->payload_);
+    u32 cur_sn = cur_pack->pack_sn_;
 
-    while (keep_start != clear_pos) {
-        if (NULL != decode_.fec_buf_.pack_cache_[clear_pos]) {
-            decode_.fec_buf_.PopPack(clear_pos);
+    u16 m_id = 0;
+    while (MAX_RECV_FEC2_MATRIX_NUM > m_id) {
+        Fec2EnDeCodeMatrix &dm = decode_.decode_matrix_[m_id];
+
+        if (GTP_NO == dm.using_flag_) {
+            m_id += 1;
+            continue;
         }
 
-        clear_pos += 1;
-        clear_pos &= FEC2_CACHE_CAPACITY_MASK;
+        goodtp_pos block_offset = (current_pos_in_cache + MAX_FEC2_CACHE_CAPACITY - dm.start_pos_)
+                                & ((goodtp_pos)FEC2_CACHE_CAPACITY_MASK);
+
+        if (block_offset >= (goodtp_pos)(dm.matrix_size_)) {
+            m_id += 1;
+            continue;
+        }
+
+        u32 matrix_end_sn = dm.start_pack_sn_ + dm.matrix_size_;
+        if (GTP_YES == CheckPackSnInBlock(cur_sn, dm.start_pack_sn_, matrix_end_sn)) {
+            m_id += 1;
+            continue;
+        }
+
+        goodtp_pos clear_pos = dm.start_pos_;
+        u8 steps = 0;
+        while (steps < dm.matrix_size_) {
+            if ((clear_pos != current_pos_in_cache) && (NULL != decode_.fec_buf_.pack_cache_[clear_pos])) {
+                decode_.fec_buf_.PopPack(clear_pos);
+            }
+
+            steps    += 1;
+            clear_pos = (clear_pos + 1) & ((goodtp_pos)FEC2_CACHE_CAPACITY_MASK);
+        }
+
+        dm.Clear(pack_mem_pool_);
+
+        #ifdef _SELFDEBUG
+        GtpLog(write_log_cb_, kGtpFecMd, kGtpLogLevelDebug,
+               "ClearReceiveUnUsedResource: clear stale matrix(m_id=%u start_sn=%u end_sn=%u "
+               "new_sn=%u start_pos=%u cur_pos=%u).\r\n",
+               (u32)m_id, dm.start_pack_sn_, matrix_end_sn, cur_sn,
+               (u32)(dm.start_pos_), (u32)current_pos_in_cache);
+        #endif
+
+        m_id += 1;
     }
 }
 
@@ -2584,6 +2637,10 @@ u32 GtpFec2::PrintFec2Param(u8 *out_str, const u32 &mem_size) {
 }
 
 void GtpFec2::ClearResource(const f32 &loss, const u64 &ts_us) {
+    if (0 == decode_.fec_buf_.pack_num_in_cache_) {
+        return;
+    }
+
     u16 m_id     = 0;
     u16 pack_num = 0;
     goodtp_pos mv_pos  = 0;

@@ -26,14 +26,25 @@
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+u32 GtpMemPool::AlignSize(const u32 &size) {
+    const u32 align_size = (u32)(sizeof(void*));
+    return (size + align_size - 1) & (~(align_size - 1));
+}
+
+u32 GtpMemPool::NodePayloadOffset(void) {
+    return AlignSize((u32)(sizeof(PoolNode) - 1));
+}
+
+u8* GtpMemPool::NodePayload(PoolNode *node) {
+    return ((u8*)node) + NodePayloadOffset();
+}
+
 GtpMemPool::GtpMemPool(const u32 &block_size, const u32 &block_num):
-    block_size_(sizeof(PoolNode) - 1 + ((block_size & 0xFFFFFFFC) + 4)),
+    block_size_(NodePayloadOffset() + AlignSize(block_size)),
     block_num_((block_num & 0xFFFFFFC0) + 64),
     pool_mgr_(NULL) {
     memset(buffer_, 0x00, 256);
-    if (0 == (block_size & 0xFFFFFFFC)) {
-        block_size_ = sizeof(PoolNode) - 1 + block_size;
-    }
 
     if (0 == (block_num & 0xFFFFFFC0)) {
         block_num_ = block_num;
@@ -113,7 +124,7 @@ u8* GtpMemPool::MallocItem(void *node_payload) {
             node->quote_counter_       += 1;
             pool_mgr_->malloc_counter_ += 1;
 
-            return &(node->memory_[0]);
+            return NodePayload(node);
         }
     }
 
@@ -132,7 +143,7 @@ u8* GtpMemPool::MallocItem(void *node_payload) {
     if (GTP_NO == pool_mgr_->mem_pool_[pool_mgr_->last_free_pos_]->used_flag_) {
 directly_distribute_pos_:
         bit_mask = 1;
-        new_item = &(pool_mgr_->mem_pool_[pool_mgr_->last_free_pos_]->memory_[0]);
+        new_item = NodePayload(pool_mgr_->mem_pool_[pool_mgr_->last_free_pos_]);
 
         pool_mgr_->mem_pool_[pool_mgr_->last_free_pos_]->used_flag_     = GTP_YES;
         pool_mgr_->mem_pool_[pool_mgr_->last_free_pos_]->quote_counter_ = 1;
@@ -281,4 +292,3 @@ const u8* GtpMemPool::GetMemPoolStatus(void) {
 #ifdef __cplusplus
 }
 #endif
-

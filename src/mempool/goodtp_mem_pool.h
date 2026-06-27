@@ -74,6 +74,10 @@ PRIVATE:
     const u8* GetMemPoolStatus(void);
 
 PRIVATE:
+    static u32 AlignSize(const u32 &size);
+    static u32 NodePayloadOffset(void);
+    static u8* NodePayload(PoolNode *node);
+
     void* MemAddrToElementAddr(void *mem_addr, u32 *out_node_pos = NULL);
 
 PRIVATE:
@@ -92,4 +96,3 @@ PRIVATE:
 #endif
 
 #endif
-

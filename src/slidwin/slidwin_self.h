@@ -39,6 +39,7 @@
 #define MIN_LEARN_THRESHOLD         (10)
 
 #define MAX_RESET_RECV_WIN_THRSHLD  (8)
+#define RESET_RECV_WIN_SN_MASK      (0xFFFFFF80)
 
 #define DEFAULT_DISORDER_NUM        (3)
 
@@ -55,6 +56,7 @@
 #define MIN_LEARN_THRESHOLD         (3)
 
 #define MAX_RESET_RECV_WIN_THRSHLD  (4)
+#define RESET_RECV_WIN_SN_MASK      (0xFFFFFFC0)
 
 #define DEFAULT_DISORDER_NUM        (2)
 
@@ -96,6 +98,9 @@
 #define MIN_RTO_TS_US               (25000)
 #define MAX_DISORDER_BUF_US         (10000)
 #define MIN_DISORDER_BUF_US         (1000)
+#define LOW_PPS_DISORDER_THRESHOLD  (80)
+#define MAX_LOW_PPS_DISORDER_BUF_US (15000)
+#define MIN_LOW_PPS_DISORDER_BUF_US (2000)
 
 #define MIN_FEEDBACK_FACTOR         (0.1)
 #define MAX_FEEDBACK_FACTOR         (1.0)

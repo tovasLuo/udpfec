@@ -18,6 +18,7 @@
 #include "goodtp_arq.h"
 #include "goodtp_fec2.h"
 #include "goodtp_factorcalulation.h"
+#include "goodtp_reorder_window.h"
 #include "goodtp_mem_pool.h"
 #include "goodtp_comstruct.h"
 #include "goodtp_macrodefine.h"
@@ -25,9 +26,6 @@
 #include "slidwin.h"
 
 #include "tranmempool.h"
-
-#include <map>
-#include <vector>
 
 #ifdef __cplusplus
 extern "C" {
@@ -51,7 +49,8 @@ class GtpSession {
 
     ~GtpSession();
 
-    u32 Init(const u64 &ts_us, u8 *win_cache, const u32 &pack_sn = 0, const u32 &sort_sn = 0);
+    u32 Init(const u64 &ts_us, u8 *win_cache, const u32 &pack_sn = 0, const u32 &sort_sn = 0,
+             const u32 &sort_sn_valid = GTP_NO);
 
     static void* operator new(size_t n, void *psp_mem);
     static void operator delete(void *psp_mem, void *placement_mem);
@@ -76,8 +75,13 @@ class GtpSession {
     u32 FramePrepHandlerWith01(void *frame, const u32 &frame_size, GtpPacket **out_pack, u32 *out_pack_size,
                     const u32 &hash, const u32 &user_id, const u32 &first_pack_sn = 0, const u32 &resend_num = 0);
 
+    u32 FilterRealtimeNackOffsets(const NackData *nack_data, u16 *out_nack, const u32 &max_nack_num,
+                                  const u64 &ts_us) const;
+
     u32 FramePostHandler(GtpAddr *tran_addr, GtpPacket *pack, const u32 &pack_size, const u32 &payload_size,
-                       const u32 &entry_arq_flag, const u32 &first_pack_sn = 0, const u32 &edge_pack_flag = GTP_YES);
+                       const u32 &entry_arq_flag, const u32 &first_pack_sn = 0,
+                       const u32 &edge_pack_flag = GTP_YES, const u32 &fec_encoded_flag = GTP_NO);
+    u32 FrameFecEncodeHandler(GtpPacket *pack);
 
     u32 PackPrepHandler(GtpPacket *pack, const u32 &size, u8 **out_frame, u32 *out_frame_size);
     u32 PackPostHandler(GtpPacket *pack, const u32 &size, GtpAddr *tran_addr,
@@ -104,18 +108,15 @@ class GtpSession {
         return ((NetQuality)(net_quality_));
     }
 
-    inline u8 GetStreamQos(const GtpNetQualityPosEnU32 &pos = kReceiverQuality) {
-        const char *force_fec_off = getenv("GOODTP_FORCE_FEC_OFF");
-        if ((NULL != force_fec_off) && ('\0' != force_fec_off[0]) && ('0' != force_fec_off[0])) {
-            return TURN_OFF_FEC;
-        }
+    inline u32 GetSendBusinessPps(void) const {
+        return (0 != pb_dt_.send_stat_.first_frame_pps_)
+            ? pb_dt_.send_stat_.first_frame_pps_
+            : pb_dt_.send_stat_.data_pack_pps_;
+    }
 
+    inline u8 GetStreamQos(const GtpNetQualityPosEnU32 &pos = kReceiverQuality) {
         #if (1 == AUTO_FEC_MACRO)
         if (kReceiverQuality == pos) {
-            return STREAM_QOS_WITH_FEC;
-        }
-
-        if (GTP_NO == rpt_snd_qualit_) {
             return STREAM_QOS_WITH_FEC;
         }
 
@@ -126,18 +127,13 @@ class GtpSession {
         return STREAM_QOS_WITH_FEC;
         #endif
 
+        if (GTP_NO == rpt_snd_qualit_) {
+            return STREAM_QOS_WITH_FEC;
+        }
+
         #if ((0 == APPLICATION_TYPE) || (1 == APPLICATION_TYPE))
         if (500 > pb_dt_.send_stat_.data_pack_pps_) {
             return STREAM_QOS_WITH_FEC;  // SD vedio.
-        }
-        #endif
-
-        #if (2 == APPLICATION_TYPE)
-        if (50 > pb_dt_.send_stat_.data_pack_pps_) {
-            if (((u8)(NetQuality::kNetQualityGood)) == net_quality_) {
-                return TURN_OFF_FEC;
-            }
-            return STREAM_QOS_WITH_FEC;  // phone game.
         }
         #endif
 
@@ -156,7 +152,6 @@ class GtpSession {
     u32 CalcLossStd(const u32 &loss, u32 *out_avg_loss);
     u8  CalcGameFecPolicy(void) const;
     u8  CalcGameFecBookId(void) const;
-    u8  CalcGameFecUpshiftBookId(const u8 &book_id) const;
     u8  CalcGameFecQos(void) const;
 
     void UpdateSelfIp(const goodtp_sock &sfd);
@@ -166,24 +161,18 @@ class GtpSession {
 PRIVATE:
     void SendSetRecvRttPacket(void);
     void SendRttTestResPacket(const u64 &ts_us);
-    void ResetSession(const u32 &cur_sn, const u32 &sort_sn, const u32 &chg_status_flag);
+    void ResetSession(const u32 &cur_sn, const u32 &sort_sn, const u32 &sort_sn_valid,
+                      const u32 &chg_status_flag);
     void RttHandler(const u32 &rtt_us);
     u32  CalcHeaderSize(const u32 &hash, const u32 &user_id, const u32 &resend_num);
     u32  CalcHeaderSizeVersion01(const u32 &hash, const u32 &user_id, const u32 &resend_num);
     u32  PrintHarqParam(u8 *out_str, const u32 &mem_size);
     u32  DeliverFrameNow(GtpHandler_p gtp_hdl, const u8 *frame, const u32 &frame_size, GtpAddr *tran_addr);
+    u32  CalcRealtimeReorderBaseIntervalUs() const;
+    u32  CalcRealtimeReorderDeliverIntervalUs(const u64 &ts_us, const u32 &cache_count,
+                                              const u32 &wait_us) const;
     u32  CalcRealtimeReorderWaitUs() const;
     u32  CalcRealtimeReorderMaxCacheNum() const;
-    void UpdateRealtimeReorderInterval(const u32 &first_sn, const u64 &ts_us);
-    bool RealtimeSnBefore(const u32 &left, const u32 &right) const;
-    u32  RealtimeSnDistance(const u32 &from, const u32 &to) const;
-
-    struct RealtimeReorderFrame {
-        std::vector<u8> frame_;
-        GtpAddr tran_addr_;
-        u64 arrival_ts_us_;
-    };
-
  public:
     const GtpCallBackParam &cb_;
 
@@ -200,8 +189,14 @@ PRIVATE:
     u64 last_gen_loss_ts_us_;
     u64 last_feedback_nack_ts_us_;
     u64 last_recv_data_pack_ts_us_;
+    u32 recv_max_data_sn_;
     u32 rmv_close_alg_ts_us_;
     u32 rmv_close_alg_period_us_;
+    u8 nack_burst_detected_;
+    u8 new_gap_detected_;
+    #ifdef _SELFDEBUG
+    u8 debug_feedback_reason_;
+    #endif
 
     slid_win_hdl data_win_s_;
     slid_win_hdl data_win_r_;
@@ -258,16 +253,8 @@ PRIVATE:
 
     u32 pack_sn_;
 
-    std::map<u32, RealtimeReorderFrame> realtime_reorder_cache_;
-    u64 realtime_reorder_last_arrival_ts_us_;
-    u32 realtime_reorder_next_sn_;
-    u32 realtime_reorder_last_arrival_sn_;
-    u32 realtime_reorder_avg_interval_us_;
-    u32 realtime_reorder_buffered_num_;
-    u32 realtime_reorder_late_drop_num_;
-    u32 realtime_reorder_timeout_skip_num_;
-    u32 realtime_reorder_direct_num_;
-    u8  realtime_reorder_inited_;
+    RealtimeReorderWindow realtime_reorder_win_;
+    u64 realtime_reorder_next_deliver_ts_us_;
 
 PRIVATE:
     u32 rtt_us_;

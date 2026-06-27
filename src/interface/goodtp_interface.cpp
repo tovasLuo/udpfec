@@ -263,7 +263,7 @@ u32 GtpFrameSend(GtpHandler_p gtp_hdl, void *frame, u32 size, GtpAddr *tran_addr
     // step1: do packet header.
     GtpPacket *pack = NULL;
     u32 pack_size   = 0;
-    u32 first_sn    = session->pack_sn_;
+    u32 first_sn    = 0;
 
     if ((GTP_YES == tran_addr->enable_key_) && (0 != tran_addr->stream_key_)) {
         GtpSplitStreamKey(tran_addr->stream_key_, &token, &token_id);
@@ -276,6 +276,14 @@ u32 GtpFrameSend(GtpHandler_p gtp_hdl, void *frame, u32 size, GtpAddr *tran_addr
                (u32)(session->pb_dt_.self_port_), session->pb_dt_.peer_ip_,
                (u32)(session->pb_dt_.peer_port_), nret);
         return nret;
+    }
+
+    first_sn = pack->pack_sn_;
+    if ((0x02 <= pack->goodtp_ver_) && (GTP_YES == pack->has_chg_zone_)) {
+        const ChangeZone *chg_zone = GtpGetPacketChangeZone(pack);
+        if (NULL != chg_zone) {
+            first_sn = chg_zone->sort_sn_;
+        }
     }
 
     GtpHeaderNewToOld(pack, session->pb_dt_.peer_version_);
@@ -306,7 +314,7 @@ u32 GtpFrameSend(GtpHandler_p gtp_hdl, void *frame, u32 size, GtpAddr *tran_addr
     }
 
     // step3: post handle after sending packet.
-    nret = session->FramePostHandler(tran_addr, pack, pack_size, size, GTP_YES, first_sn);
+    nret = session->FramePostHandler(tran_addr, pack, pack_size, size, GTP_YES, first_sn, GTP_YES, GTP_NO);
     if (GTP_OK != nret) {
         GtpLog(gtp_obj->cb_.write_log_cb_, kGtpInterfaceMd, kGtpLogLevelError, "%s:%u<-->%s:%u calling session's "\
                "FramePostHandler() failed(0x%08x)\r\n", session->pb_dt_.self_ip_,
@@ -314,9 +322,6 @@ u32 GtpFrameSend(GtpHandler_p gtp_hdl, void *frame, u32 size, GtpAddr *tran_addr
                (u32)(session->pb_dt_.peer_port_), nret);
         return nret;
     }
-
-    session->pb_dt_.send_stat_.data_pack_sum_    += 1;
-    session->pb_dt_.send_stat_.data_bitrate_sum_ += pack_size;
 
     #if (1 == ENABLE_MD_PERF_CHECK)
     u64 temp_ts_us = GtpSysTimestampUs();
@@ -391,7 +396,7 @@ inline u32 CheckPacketTypePayloadInvalid(const GtpPacket *pack, const u32 &size)
         }
 
         const u8 *fec_head = ((const u8*)pack) + header_offset;
-        const u16 code_len = *((const u16*)(fec_head + sizeof(u8) + sizeof(u8) + sizeof(u8) + sizeof(u8)));
+        const u16 code_len = GtpReadU16Unaligned(fec_head + sizeof(u8) + sizeof(u8) + sizeof(u8) + sizeof(u8));
         if (payload_size != (fec_head_size + ((u32)code_len))) {
             RETURN_ERR(kGtpInterfaceMd, kGtpPackLengthErr);
         }
@@ -517,7 +522,7 @@ u32 GtpCheckPacketInvalid(void *pack, u32 pack_size, u64 *stream_key) {
         RETURN_ERR(kGtpInterfaceMd, kGtpPackLengthErr);
     }
 
-    u32 org_value  = *((u32*)pack);
+    u32 org_value  = GtpReadU32Unaligned(pack);
     u32 check_rslt = GTP_OK;
 
     GtpHeaderOldToNew(pack);
@@ -527,7 +532,7 @@ u32 GtpCheckPacketInvalid(void *pack, u32 pack_size, u64 *stream_key) {
         *stream_key = GtpReadPacketStreamKey((GtpPacket*)pack);
     }
 
-    *((u32*)pack) = org_value;
+    GtpWriteU32Unaligned(pack, org_value);
 
     return check_rslt;
 }
@@ -640,7 +645,7 @@ u32 GtpPacketReceive(GtpHandler_p gtp_hdl, void *pack, u32 pack_sz, GtpAddr *tra
     #endif
 
     #if (1 == ENABLE_INNER_VALID_CHCK)
-    u32 org_value = *((u32*)pack);
+    u32 org_value = GtpReadU32Unaligned(pack);
     #endif
 
     GtpHeaderOldToNew(pack);
@@ -661,7 +666,7 @@ u32 GtpPacketReceive(GtpHandler_p gtp_hdl, void *pack, u32 pack_sz, GtpAddr *tra
         if (0 == gtp_pack->repeat_counter_) {
             first_sn = gtp_pack->pack_sn_;
         } else {
-            first_sn = *((u32*)(((u8*)gtp_pack) + sizeof(GtpPacket)));
+            first_sn = GtpReadU32Unaligned(((u8*)gtp_pack) + sizeof(GtpPacket));
         }
     }
 
@@ -703,7 +708,7 @@ u32 GtpPacketReceive(GtpHandler_p gtp_hdl, void *pack, u32 pack_sz, GtpAddr *tra
                (i32)GtpGetProcessId(), (i32)GtpGetThreadId());
 
         if (0x00 == gtp_pack->goodtp_ver_) {
-            *((u32*)pack) = org_value;  // restore original value.
+            GtpWriteU32Unaligned(pack, org_value);  // restore original value.
         }
 
         return nret;
@@ -728,13 +733,23 @@ u32 GtpPacketReceive(GtpHandler_p gtp_hdl, void *pack, u32 pack_sz, GtpAddr *tra
     gtp_obj->current_ts_us_ = GtpSysTimestampUs();
 
     u32 sort_sn = 0;
+    u32 sort_sn_valid = GTP_NO;
     if ((0x01 < gtp_pack->goodtp_ver_) && (GTP_YES == gtp_pack->has_chg_zone_)) {
-        sort_sn = ((ChangeZone*)(((u8*)gtp_pack) + gtp_pack->header_offset_))->sort_sn_;
+        const ChangeZone *chg_zone = GtpGetPacketChangeZone(gtp_pack);
+        if (NULL != chg_zone) {
+            sort_sn = chg_zone->sort_sn_;
+            sort_sn_valid = GTP_YES;
+        }
     }
 
+    const u32 create_session = (((u8)(GtpPackType::kGtpDataPackType)) == gtp_pack->pack_type_) ? GTP_YES : GTP_NO;
     GtpSession *session = gtp_obj->GetSession(tran_addr, gtp_hdl, (u32)(GtpSessionMode::kReceiver),
-                                              gtp_pack->pack_sn_, sort_sn);
+                                              gtp_pack->pack_sn_, sort_sn, sort_sn_valid, create_session);
     if (NULL == session) {
+        if (GTP_YES != create_session) {
+            return GTP_OK;
+        }
+
         #if (0 == ENABLE_INTERFACE_LOG)
         u8 self_ip[GTP_MAX_STR_IP_SZ] = {0};
         u8 peer_ip[GTP_MAX_STR_IP_SZ] = {0};
@@ -781,9 +796,7 @@ u32 GtpPacketReceive(GtpHandler_p gtp_hdl, void *pack, u32 pack_sz, GtpAddr *tra
         session->pb_dt_.tran_addr_.stream_type_ = gtp_pack->stream_type_;
     }
 
-    if (((u8)(GtpPackType::kGtpDataPackType)) == gtp_pack->pack_type_) {
-        session->last_active_ts_us_ = gtp_obj->current_ts_us_;
-    }
+    session->last_active_ts_us_ = gtp_obj->current_ts_us_;
 
     if ((((u8)(GtpPackType::kGtpFecPackType)) == gtp_pack->pack_type_) && (0 != stream_key)) {
         GtpRemoveStreamKeyHeader(gtp_pack);
@@ -840,7 +853,8 @@ u32 GtpPacketReceive(GtpHandler_p gtp_hdl, void *pack, u32 pack_sz, GtpAddr *tra
                "ver=0x%02x type=0x%02x pack_sn=%u first_sn=%u don't repeat but prep process failed(0x%08x)\r\n ",
                session->pb_dt_.self_ip_, (u32)(session->pb_dt_.self_port_), session->pb_dt_.peer_ip_,
                (u32)(session->pb_dt_.peer_port_), gtp_obj, gtp_hdl, (u32)(gtp_pack->goodtp_ver_),
-               (u32)(gtp_pack->pack_type_), gtp_pack->pack_sn_, *((u32*)(((u8*)gtp_pack) + gtp_pack->header_offset_)),
+               (u32)(gtp_pack->pack_type_), gtp_pack->pack_sn_,
+               GtpReadU32Unaligned(((u8*)gtp_pack) + gtp_pack->header_offset_),
                nret);
         goto pack_receive_exit_pos_;
     }
@@ -851,7 +865,8 @@ u32 GtpPacketReceive(GtpHandler_p gtp_hdl, void *pack, u32 pack_sz, GtpAddr *tra
                "ver=0x%02x type=0x%02x pack_sn=%u first_sn=%u Call PackPostHandler() failed(0x%08x)\r\n ",
                session->pb_dt_.self_ip_, (u32)(session->pb_dt_.self_port_), session->pb_dt_.peer_ip_,
                (u32)(session->pb_dt_.peer_port_), gtp_obj, gtp_hdl, (u32)(gtp_pack->goodtp_ver_),
-               (u32)(gtp_pack->pack_type_), gtp_pack->pack_sn_, *((u32*)(((u8*)gtp_pack) + gtp_pack->header_offset_)),
+               (u32)(gtp_pack->pack_type_), gtp_pack->pack_sn_,
+               GtpReadU32Unaligned(((u8*)gtp_pack) + gtp_pack->header_offset_),
                nret);
         goto pack_receive_exit_pos_;
     }
@@ -905,15 +920,17 @@ u32 GtpPacketReceive(GtpHandler_p gtp_hdl, void *pack, u32 pack_sz, GtpAddr *tra
            pack_sn, first_sn);
     #endif
 
-    if ((kRealTimeStream == session->pb_dt_.tran_addr_.stream_type_) || (0x02 > gtp_pack->goodtp_ver_)
-     || (GTP_NO == gtp_pack->has_chg_zone_)) {
+    if ((0x02 <= gtp_pack->goodtp_ver_) && (GTP_YES == gtp_pack->has_chg_zone_)) {
+        const ChangeZone *chg_zone = GtpGetPacketChangeZone(gtp_pack);
+        if (NULL != chg_zone) {
+            deliver_first_sn = chg_zone->sort_sn_;
+        }
+    } else {
         if (0 == gtp_pack->repeat_counter_) {
             deliver_first_sn = gtp_pack->pack_sn_;
         } else {
-            deliver_first_sn = *((u32*)(((u8*)gtp_pack) + sizeof(GtpPacket)));
+            deliver_first_sn = GtpReadU32Unaligned(((u8*)gtp_pack) + sizeof(GtpPacket));
         }
-    } else {
-        deliver_first_sn = ((ChangeZone*)(((u8*)gtp_pack) + gtp_pack->header_offset_))->sort_sn_;
     }
 
     nret = session->DeliverFrameInOrder(gtp_hdl, deliver_first_sn, frame, frame_size, tran_addr);
@@ -1053,6 +1070,61 @@ u32 GetLinkerQuality(GtpHandler_p gtp_hdl, GtpLinkerKey *linker_key, GtpLinkQual
     return session->GetQuality((u32)kReceiverQuality, out_quality);
 }
 
+static u32 GetSessionByAddrForQuery(GtpHandler_p gtp_hdl, GtpAddr *tran_addr, GoodTp **out_gtp_obj,
+                                    GtpSession **out_session) {
+    if ((NULL == tran_addr) || (NULL == out_gtp_obj) || (NULL == out_session)) {
+        RETURN_ERR(kGtpMgrMd, kInvalidInPutParam);
+    }
+
+    GoodTp *gtp_obj = GtpHandlerToObj(GtpHdlPointerToInt(gtp_hdl));
+    if (NULL == gtp_obj) {
+        RETURN_ERR(kGtpMgrMd, kInvalidGtpHandler);
+    }
+
+    if (GTP_OK != gtp_obj->CheckSingleThreadCalling()) {
+        GtpLog(gtp_obj->cb_.write_log_cb_, kGtpInterfaceMd, kGtpLogLevelWarning, "The same goodtp instance used by "\
+               "the diffrent thread.\r\n");
+    }
+
+    u32 nret = GtpTranAddrSockInputIsValid(tran_addr);
+    if (GTP_OK != nret) {
+        GtpLog(gtp_obj->cb_.write_log_cb_, kGtpInterfaceMd, kGtpLogLevelError,
+               "Goodtp transport address socket input is invalid(0x%08x dst_addr_len=%u src_addr_len=%u).\r\n",
+               nret, tran_addr->sock_addr_len_, tran_addr->self_addr_len_);
+        return nret;
+    }
+
+    GtpSession *session = gtp_obj->GetSessionByAddr(tran_addr);
+    if (NULL == session) {
+        RETURN_ERR(kGtpMgrMd, kLinkerNoExistErr);
+    }
+
+    *out_gtp_obj = gtp_obj;
+    *out_session = session;
+
+    return GTP_OK;
+}
+
+u32 GetLinkerQualityByAddr(GtpHandler_p gtp_hdl, GtpAddr *tran_addr, u32 direction, GtpLinkQuality *out_quality) {
+    if (NULL == out_quality) {
+        RETURN_ERR(kGtpMgrMd, kInvalidInPutParam);
+    }
+
+    GoodTp *gtp_obj = NULL;
+    GtpSession *session = NULL;
+    u32 nret = GetSessionByAddrForQuery(gtp_hdl, tran_addr, &gtp_obj, &session);
+    if (GTP_OK != nret) {
+        return nret;
+    }
+
+    (void)gtp_obj;
+    if (1 == direction) {
+        return session->GetQuality((u32)kSenderQuality, out_quality);
+    }
+
+    return session->GetQuality((u32)kReceiverQuality, out_quality);
+}
+
 /*****************************************************************************************************************
 Name     : DelGtpLinker
 Function : Delete goodtp linker before not using.
@@ -1135,6 +1207,23 @@ u32 PrintSessionWinBitMap(GtpHandler_p gtp_hdl, const u8 *src_ip, const u8 *dst_
     return gtp_obj->ShowBitMap(src_ip, dst_ip, out_str, mem_size);
 }
 
+u32 PrintSessionWinBitMapByAddr(GtpHandler_p gtp_hdl, GtpAddr *tran_addr, u8 *out_str, u32 mem_size) {
+    if ((NULL == out_str) || (0 == mem_size)) {
+        RETURN_ERR(kGtpMgrMd, kInvalidInPutParam);
+    }
+
+    GoodTp *gtp_obj = NULL;
+    GtpSession *session = NULL;
+    u32 nret = GetSessionByAddrForQuery(gtp_hdl, tran_addr, &gtp_obj, &session);
+    if (GTP_OK != nret) {
+        return nret;
+    }
+
+    (void)gtp_obj;
+    u32 str_sz = 0;
+    return session->WinBitMap(out_str, mem_size, &str_sz);
+}
+
 /*****************************************************************************************************************
 Name     : GetAlgorithmParam
 Function : Get the goodtp algorithm parameters.
@@ -1170,6 +1259,27 @@ u32 GetAlgorithmParam(GtpHandler_p gtp_hdl, const u8 *src_ip, const u8 *dst_ip, 
     u32 str_len = gtp_obj->ShowAlgorithmParam(src_ip, dst_ip, out_str, mem_size);
     if (0 == str_len) {
         RETURN_ERR(kGtpMgrMd, kGtpMgrMd);
+    }
+
+    return GTP_OK;
+}
+
+u32 GetAlgorithmParamByAddr(GtpHandler_p gtp_hdl, GtpAddr *tran_addr, u8 *out_str, u32 mem_size) {
+    if ((NULL == out_str) || (0 == mem_size)) {
+        RETURN_ERR(kGtpMgrMd, kInvalidInPutParam);
+    }
+
+    GoodTp *gtp_obj = NULL;
+    GtpSession *session = NULL;
+    u32 nret = GetSessionByAddrForQuery(gtp_hdl, tran_addr, &gtp_obj, &session);
+    if (GTP_OK != nret) {
+        return nret;
+    }
+
+    (void)gtp_obj;
+    u32 str_len = session->PrintAlgorithmParam(out_str, mem_size);
+    if (0 == str_len) {
+        RETURN_ERR(kGtpMgrMd, kMemNotEnoughErr);
     }
 
     return GTP_OK;
@@ -1279,6 +1389,28 @@ u32 GetSlidWinBitMapInfo(GtpHandler_p gtp_hdl, GtpLinkerKey *linker_key, u8 *out
         RETURN_ERR(kGtpMgrMd, kLinkerNoExistErr);
     }
 
+    u32 str_sz = 0;
+    nret = session->WinBitMap(out_str, mem_size, &str_sz);
+    if (GTP_OK != nret) {
+        return nret;
+    }
+
+    return GTP_OK;
+}
+
+u32 GetSlidWinBitMapInfoByAddr(GtpHandler_p gtp_hdl, GtpAddr *tran_addr, u8 *out_str, u32 mem_size) {
+    if ((NULL == out_str) || (0 == mem_size)) {
+        RETURN_ERR(kGtpMgrMd, kInvalidInPutParam);
+    }
+
+    GoodTp *gtp_obj = NULL;
+    GtpSession *session = NULL;
+    u32 nret = GetSessionByAddrForQuery(gtp_hdl, tran_addr, &gtp_obj, &session);
+    if (GTP_OK != nret) {
+        return nret;
+    }
+
+    (void)gtp_obj;
     u32 str_sz = 0;
     nret = session->WinBitMap(out_str, mem_size, &str_sz);
     if (GTP_OK != nret) {

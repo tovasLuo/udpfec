@@ -94,13 +94,6 @@
 
 #define MAX_RSV_WIN_SIZE           (2176)
 
-#ifdef _UTTEST
-#define MAX_SORT_BUF_SIZE          (32)
-#else
-#define MAX_SORT_BUF_SIZE          (16384)
-#endif
-#define MAX_SORT_BUF_SIZE_BITMASK  ((MAX_SORT_BUF_SIZE - 1))
-
 #if (_WIN32 || _WIN64 || _SELFANDROID || __APPLE__)
 // client
 #define ARQ_SPECS                  (7)
@@ -120,7 +113,7 @@
 #define MIN_SESSION_TTL_US         (4000000)
 #define SLID_WIN_SIZE              (2048)
 
-#define DEFAULT_FEC2_BOOK_ID       (2)
+#define DEFAULT_FEC2_BOOK_ID       (5)
 
 #define DEFAULT_BOOST_TIMES        (3)
 #define INIT_BOOST_TIMES           (0)
@@ -141,13 +134,6 @@
 #define MAX_CLEAR_FEC_RECV_STEP    (28)
 
 #define MAX_RSV_WIN_SIZE           (640)
-
-#ifdef _UTTEST
-#define MAX_SORT_BUF_SIZE          (32)
-#else
-#define MAX_SORT_BUF_SIZE          (8192)
-#endif
-#define MAX_SORT_BUF_SIZE_BITMASK  ((MAX_SORT_BUF_SIZE - 1))
 
 #if (_WIN32 || _WIN64 || _SELFANDROID || __APPLE__)
 // client
@@ -177,7 +163,7 @@
 #define MAX_ARQ_NODE_NUM        (((MAX_PPS_PER_SESSION << (ARQ_SPECS)) + (MAX_PPS_PER_SESSION << (ARQ_SPECS - 1))))
 
 #define MAX_RETRAN_PACKET_TIMES (3)
-#define DEFAULT_RTO_TIMEOUT_US  (500000)
+#define DEFAULT_RTO_TIMEOUT_US  (100000)
 
 #define MAX_KEEPALIVE_TIME_LEN_US (800000)
 
@@ -188,7 +174,11 @@
 
 #define DEFAULT_MAX_FRAME_PERIOD_US    (50000)
 
+#if (2 == APPLICATION_TYPE)
+#define MAX_FEEDBACK_NACK_PERIOD_US    (50000)
+#else
 #define MAX_FEEDBACK_NACK_PERIOD_US    (110000)
+#endif
 
 #define MIN_FRAME_PERIOD_US     (30)
 
@@ -232,8 +222,8 @@
 #define MIN_ENHANCE_BOOST_PPS   (200)
 
 // new fec
-#define MAX_FEC2_MODE_BOOK_ID    (6)
-#define MAX_VALID_FEC2_BOOK_ID   (5)
+#define MAX_FEC2_MODE_BOOK_ID    (8)
+#define MAX_VALID_FEC2_BOOK_ID   (7)
 
 #define MAX_FEC2_MATRIX_H_SIZE   (4)
 #define MAX_FEC2_MATRIX_V_SIZE   (MAX_FEC2_MATRIX_H_SIZE)

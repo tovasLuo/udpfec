@@ -36,10 +36,16 @@ class SendFec2CodeMatrix {
 
     void Init(void);
     void ChangeFecMode(const u32 &new_code_book_id);
+    void ClearEncodeCapacity(void);
 
     Fec2EnDeCodeMatrix encode_matrix_;
 
     Fec2Buffer fec_buf_;
+
+    u32 h_capacity_[MAX_FEC2_MATRIX_H_SIZE];
+    u32 v_capacity_[MAX_FEC2_MATRIX_V_SIZE];
+    u32 uh_capacity_[MAX_FEC2_HILL_SIZE];
+    u32 dh_capacity_[MAX_FEC2_HILL_SIZE];
 
 PRIVATE:
     TranMemPool &pack_mem_pool_;
@@ -89,6 +95,7 @@ class GtpFec2 {
     u32  Decode(Fec2CodePack *fec_code, const u64 &ts_us);
     u32  CacheDataPack(GtpPacket *pack, const u64 &ts_us);
     void ChangeFecMode(const u32 &new_code_book_id);
+    u8   RecvFecBookId(void) const;
     u32  PrintFec2Param(u8 *out_str, const u32 &mem_size);
     void ClearResource(const f32 &loss, const u64 &ts_us);
 
@@ -97,10 +104,10 @@ PRIVATE:
     u32  BlockEncode(GtpPacket *pack, const u64 &ts_us);
     void HorizontalEncode(const encode_pos &h_id, const encode_pos &v_id, u8 *data, const u32 &data_size);
     void VerticalEncode(const encode_pos &h_id, const encode_pos &v_id, u8 *data, const u32 &data_size);
-    void HillEncode(Fec2CodePackMgr fec_code_mgr[], const Fec2CodeDir &fec_encode_dir,
+    void HillEncode(Fec2CodePackMgr fec_code_mgr[], u32 capacity[], const Fec2CodeDir &fec_encode_dir,
                     const encode_pos &fec_encode_pos, const encode_pos &bit_pos,
                     const encode_pos &bit_num, u8 *data, const u32 &data_size);
-    void SendFecCodePacket(Fec2CodePackMgr &fec_code_mgr);
+    void SendFecCodePacket(Fec2CodePackMgr &fec_code_mgr, u32 *capacity);
     void CachedFecEncodePack(Fec2CodePackMgr *fec_code_mgr, Fec2CodePack *fec_code_pack);
 
     u32  RestoreDataByHDir(const goodtp_pos &h_start_pos, const goodtp_pos &res_pos, const u8 &h_size,
@@ -111,7 +118,7 @@ PRIVATE:
                               const goodtp_pos &res_pos, Fec2CodePackMgr &fec_code_mgr,
                               const Fec2EnDeCodeMatrix &decode_matrix);
 
-    u32  ReAllocateEncodeMem(const u32 &new_size, Fec2CodePackMgr &fec_code_mgr);
+    u32  ReAllocateEncodeMem(const u32 &new_size, Fec2CodePackMgr &fec_code_mgr, u32 *capacity);
     void TryRecoveryPackByFecPack(const encode_pos &fec_encode_pos, const Fec2CodeDir &fec_encode_dir,
                                   Fec2EnDeCodeMatrix &decode_matrix);
     void TryRecoveryPackByDataPack(const goodtp_pos &cache_pos, Fec2EnDeCodeMatrix &decode_matrix,
@@ -138,9 +145,7 @@ PRIVATE:
     SessionPublicData *pb_dt_;
 
     u8  using_fec_book_id_;
-    u8  force_fec_book_flag_;
-    u8  force_fec_book_id_;
-    u8  byte_rsv_[1];
+    u8  byte_rsv_[3];
     u32 next_pack_sn_;
 
     SendFec2CodeMatrix encode_;

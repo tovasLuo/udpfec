@@ -196,8 +196,10 @@ class GoodTp {
     GtpHandler  GetSelfHandler(void);
     GtpSession* GetSession(GtpAddr *tran_addr, GtpHandler_p app_gtp_hdl,
                            const u32 &mode = (u32)(GtpSessionMode::kSender), const u32 &pack_sn = 0,
-                           const u32 &sort_sn = 0);
+                           const u32 &sort_sn = 0, const u32 &sort_sn_valid = GTP_NO,
+                           const u32 &create_session = GTP_YES);
     GtpSession* GetSession(const GtpSessionKey &session_key);
+    GtpSession* GetSessionByAddr(GtpAddr *tran_addr);
 
     void CheckResourceActiveStatus(GtpHandler_p app_gtp_hdl);
     void SendArqCachedPackWhenDead(void);
@@ -213,7 +215,8 @@ class GoodTp {
     u32 CheckSingleThreadCalling(void);
 
     GtpSession* BuildNewSession(const GtpSessionKey &key, GtpAddr *tran_addr, GtpHandler_p app_gtp_hdl,
-                                const u32 &mode, const u32 &pack_sn, const u32 &sort_sn, const goodtp_sock &sfd);
+                                const u32 &mode, const u32 &pack_sn, const u32 &sort_sn,
+                                const u32 &sort_sn_valid, const goodtp_sock &sfd);
 
 PRIVATE:
     void DelSpsSessionByKey(GtpHandler_p app_gtp_hdl, const GtpSessionKey &link_key);

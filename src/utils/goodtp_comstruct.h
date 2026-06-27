@@ -56,6 +56,46 @@ typedef int16_t  i16;
 typedef int32_t  i32;
 typedef int64_t  i64;
 
+inline u16 GtpReadU16Unaligned(const void *ptr) {
+    u16 value = 0;
+    memcpy(&value, ptr, sizeof(value));
+    return value;
+}
+
+inline u32 GtpReadU32Unaligned(const void *ptr) {
+    u32 value = 0;
+    memcpy(&value, ptr, sizeof(value));
+    return value;
+}
+
+inline u64 GtpReadU64Unaligned(const void *ptr) {
+    u64 value = 0;
+    memcpy(&value, ptr, sizeof(value));
+    return value;
+}
+
+inline f32 GtpReadF32Unaligned(const void *ptr) {
+    f32 value = 0.0f;
+    memcpy(&value, ptr, sizeof(value));
+    return value;
+}
+
+inline void GtpWriteU16Unaligned(void *ptr, const u16 &value) {
+    memcpy(ptr, &value, sizeof(value));
+}
+
+inline void GtpWriteU32Unaligned(void *ptr, const u32 &value) {
+    memcpy(ptr, &value, sizeof(value));
+}
+
+inline void GtpWriteU64Unaligned(void *ptr, const u64 &value) {
+    memcpy(ptr, &value, sizeof(value));
+}
+
+inline void GtpWriteF32Unaligned(void *ptr, const f32 &value) {
+    memcpy(ptr, &value, sizeof(value));
+}
+
 typedef u16 goodtp_pos;
 typedef u8  encode_pos;
 
@@ -335,30 +375,17 @@ typedef struct _GtpSessionKey {
         u64 ip_value = 0;
 
         if (IPV4_BIN_IP_SIZE == peer_ip_size) {
-            ip_value  = (u64)(*((u32*)peer_bin_ip_));
-            ip_value += (u64)(*((u32*)self_bin_ip_));
+            ip_value  = (u64)(GtpReadU32Unaligned(peer_bin_ip_));
+            ip_value += (u64)(GtpReadU32Unaligned(self_bin_ip_));
             ip_value |= ((((u64)peer_bin_port_) + ((u64)self_bin_port_)) << 33);
         } else {
-            u16 *move_pos = (u16*)peer_bin_ip_;
+            for (u32 i = 0; 8 > i; ++i) {
+                ip_value += ((u64)GtpReadU16Unaligned(peer_bin_ip_ + (i * sizeof(u16))));
+            }
 
-            ip_value += ((u64)(*move_pos));
-            ip_value += ((u64)(*(move_pos + 1)));
-            ip_value += ((u64)(*(move_pos + 2)));
-            ip_value += ((u64)(*(move_pos + 3)));
-            ip_value += ((u64)(*(move_pos + 4)));
-            ip_value += ((u64)(*(move_pos + 5)));
-            ip_value += ((u64)(*(move_pos + 6)));
-            ip_value += ((u64)(*(move_pos + 7)));
-
-            move_pos  = (u16*)self_bin_ip_;
-            ip_value += ((u64)(*move_pos));
-            ip_value += ((u64)(*(move_pos + 1)));
-            ip_value += ((u64)(*(move_pos + 2)));
-            ip_value += ((u64)(*(move_pos + 3)));
-            ip_value += ((u64)(*(move_pos + 4)));
-            ip_value += ((u64)(*(move_pos + 5)));
-            ip_value += ((u64)(*(move_pos + 6)));
-            ip_value += ((u64)(*(move_pos + 7)));
+            for (u32 i = 0; 8 > i; ++i) {
+                ip_value += ((u64)GtpReadU16Unaligned(self_bin_ip_ + (i * sizeof(u16))));
+            }
 
             ip_value |= ((((u64)peer_bin_port_) + ((u64)self_bin_port_)) << 32);
         }
@@ -586,9 +613,6 @@ typedef struct _Fec2EnDeCodeMatrix {
         start_pack_sn_ = 0;
         memset(rsv_byte_, 0x00, sizeof(rsv_byte_));
 
-        u64 *clear_pos = (u64*)(&start_pos_);
-        *clear_pos = 0;
-
         u32 i;
 
         for (i = 0; MAX_FEC2_MATRIX_H_SIZE > i; ++i) {
@@ -622,9 +646,6 @@ typedef struct _Fec2EnDeCodeMatrix {
         start_pos_     = 0;
         start_pack_sn_ = 0;
         memset(rsv_byte_, 0x00, sizeof(rsv_byte_));
-
-        u64 *clear_pos = (u64*)(&start_pos_);
-        *clear_pos = 0;
 
         u32 i;
 
@@ -842,17 +863,14 @@ typedef struct _Correction {
     u8 dec_k_;    // decrease coefficient.
 }Correction;
 
-typedef struct _SortCachePack {
-    GtpPacket *pack_;
-    GtpAddr *tran_addr_;
-}SortCachePack;
-
 typedef struct _LinkerStat {
     _LinkerStat(const u64 &create_ts_us):
         data_bitrate_sum_(0), data_bitrate_bkup_(0), net_bitrate_sum_(0), net_bitrate_bkup_(0),
         data_pack_sum_(0), data_pack_bkup_(0), net_pack_sum_(0), net_pack_bkup_(0),
         data_bitrate_bps_(0), net_bitrate_bps_(0), data_pack_pps_(0), net_pack_pps_(0),
-        first_frame_sum_(0), ack_sum_(0), nack_sum_(0), retran_frame_sum_(0), last_calc_ts_us_((u32)create_ts_us) {
+        first_frame_sum_(0), ack_sum_(0), nack_sum_(0), retran_frame_sum_(0),
+        first_frame_bkup_(0), retran_frame_bkup_(0), first_frame_pps_(0), retran_frame_pps_(0),
+        last_calc_ts_us_((u32)create_ts_us) {
     }
 
     _LinkerStat(const _LinkerStat &a) :
@@ -870,6 +888,10 @@ typedef struct _LinkerStat {
         net_pack_pps_(a.net_pack_pps_),
         first_frame_sum_(a.first_frame_sum_),
         retran_frame_sum_(a.retran_frame_sum_),
+        first_frame_bkup_(a.first_frame_bkup_),
+        retran_frame_bkup_(a.retran_frame_bkup_),
+        first_frame_pps_(a.first_frame_pps_),
+        retran_frame_pps_(a.retran_frame_pps_),
         ack_sum_(a.ack_sum_),
         nack_sum_(a.nack_sum_),
         last_calc_ts_us_(a.last_calc_ts_us_) {
@@ -890,6 +912,10 @@ typedef struct _LinkerStat {
         net_pack_pps_      = a.net_pack_pps_;
         first_frame_sum_   = a.first_frame_sum_;
         retran_frame_sum_  = a.retran_frame_sum_;
+        first_frame_bkup_  = a.first_frame_bkup_;
+        retran_frame_bkup_ = a.retran_frame_bkup_;
+        first_frame_pps_   = a.first_frame_pps_;
+        retran_frame_pps_  = a.retran_frame_pps_;
         ack_sum_           = a.ack_sum_;
         nack_sum_          = a.nack_sum_;
         last_calc_ts_us_   = a.last_calc_ts_us_;
@@ -928,6 +954,20 @@ typedef struct _LinkerStat {
         }
         data_pack_bkup_ = data_pack_sum_;
 
+        if (first_frame_bkup_ <= first_frame_sum_) {
+            first_frame_pps_ = first_frame_sum_ - first_frame_bkup_;
+        } else {
+            first_frame_pps_ = first_frame_sum_ + (0xFFFFFFFF - first_frame_bkup_);
+        }
+        first_frame_bkup_ = first_frame_sum_;
+
+        if (retran_frame_bkup_ <= retran_frame_sum_) {
+            retran_frame_pps_ = retran_frame_sum_ - retran_frame_bkup_;
+        } else {
+            retran_frame_pps_ = retran_frame_sum_ + (0xFFFFFFFF - retran_frame_bkup_);
+        }
+        retran_frame_bkup_ = retran_frame_sum_;
+
         //corrects the pps value.
         if (((u32)(cur_ts_us & 0x00000000FFFFFFFF)) <= last_calc_ts_us_) {
             last_calc_ts_us_ = ((u32)(cur_ts_us & 0x00000000FFFFFFFF));
@@ -939,6 +979,8 @@ typedef struct _LinkerStat {
 
         data_pack_pps_    = (u32)(((f32)data_pack_pps_) * k_factor);
         net_pack_pps_     = (u32)(((f32)net_pack_pps_) * k_factor);
+        first_frame_pps_  = (u32)(((f32)first_frame_pps_) * k_factor);
+        retran_frame_pps_ = (u32)(((f32)retran_frame_pps_) * k_factor);
         data_bitrate_bps_ = (u32)(((f32)data_bitrate_bps_) * k_factor);
         net_bitrate_bps_  = (u32)(((f32)net_bitrate_bps_) * k_factor);
 
@@ -967,6 +1009,11 @@ typedef struct _LinkerStat {
 
     u32 first_frame_sum_;
     u32 retran_frame_sum_;
+
+    u32 first_frame_bkup_;
+    u32 retran_frame_bkup_;
+    u32 first_frame_pps_;
+    u32 retran_frame_pps_;
 
     u32 ack_sum_;
     u32 nack_sum_;
@@ -1041,6 +1088,7 @@ typedef struct _SessionPublicData {
         peer_version_(0xFF),
         max_send_loss_per_s_(FLOAT_ZERO),
         bakeup_send_loss_(FLOAT_ZERO),
+        game_fec_policy_loss_(FLOAT_ZERO),
         session_(NULL),
         send_consume_("gtp_send"),
         recv_consume_("gtp_recv"),
@@ -1069,6 +1117,7 @@ typedef struct _SessionPublicData {
         peer_version_(a.peer_version_),
         max_send_loss_per_s_(a.max_send_loss_per_s_),
         bakeup_send_loss_(a.bakeup_send_loss_),
+        game_fec_policy_loss_(a.game_fec_policy_loss_),
         session_(a.session_),
         send_consume_(a.send_consume_),
         recv_consume_(a.recv_consume_),
@@ -1100,6 +1149,7 @@ typedef struct _SessionPublicData {
         this->session_             = a.session_;
         this->max_send_loss_per_s_ = a.max_send_loss_per_s_;
         this->bakeup_send_loss_    = a.bakeup_send_loss_;
+        this->game_fec_policy_loss_ = a.game_fec_policy_loss_;
         this->bit_rsv_             = a.bit_rsv_;
         this->send_consume_        = a.send_consume_;
         this->recv_consume_        = a.recv_consume_;
@@ -1181,6 +1231,14 @@ typedef struct _SessionPublicData {
         max_send_loss_per_s_ = bakeup_send_loss_;
         bakeup_send_loss_    = FLOAT_ZERO;
 
+        #if (2 == APPLICATION_TYPE)
+        if (max_send_loss_per_s_ > game_fec_policy_loss_) {
+            game_fec_policy_loss_ = (max_send_loss_per_s_ * 0.80f) + (game_fec_policy_loss_ * 0.20f);
+        } else {
+            game_fec_policy_loss_ = (max_send_loss_per_s_ * 0.10f) + (game_fec_policy_loss_ * 0.90f);
+        }
+        #endif
+
         #if (1 == ENABLE_MD_PERF_CHECK)
         send_consume_.CalcAvgConsume();
         recv_consume_.CalcAvgConsume();
@@ -1216,6 +1274,7 @@ typedef struct _SessionPublicData {
 
     f32 max_send_loss_per_s_;
     f32 bakeup_send_loss_;
+    f32 game_fec_policy_loss_;
 
     void *session_;
 
@@ -1244,6 +1303,43 @@ inline void GtpSplitStreamKey(const u64 &stream_key, u32 *hash, u32 *user_id) {
     }
 }
 
+inline ChangeZone* GtpGetPacketChangeZone(GtpPacket *pack) {
+    if ((NULL == pack) || (GTP_YES != pack->has_chg_zone_) || (pack->pack_size_ < pack->header_offset_)) {
+        return NULL;
+    }
+
+    u32 min_header_offset = sizeof(GtpPacket) + sizeof(ChangeZone);
+    if (GTP_YES == pack->has_loss_flag_) {
+        min_header_offset += sizeof(f32);
+    }
+
+    if (GTP_YES == pack->has_check_flag_) {
+        min_header_offset += sizeof(u64);
+    }
+
+    if (GTP_YES == pack->has_ts_flag_) {
+        min_header_offset += sizeof(u64);
+    }
+
+    if (GTP_YES == pack->has_rtt_flag_) {
+        min_header_offset += sizeof(u32);
+    }
+
+    if (0 != ((u8)(pack->repeat_counter_))) {
+        min_header_offset += sizeof(u32);
+    }
+
+    if (min_header_offset > pack->header_offset_) {
+        return NULL;
+    }
+
+    return (ChangeZone*)(((u8*)pack) + pack->header_offset_ - sizeof(ChangeZone));
+}
+
+inline const ChangeZone* GtpGetPacketChangeZone(const GtpPacket *pack) {
+    return GtpGetPacketChangeZone((GtpPacket*)pack);
+}
+
 inline u64 GtpReadPacketStreamKey(const GtpPacket *pack) {
     if ((NULL == pack) || (GTP_YES != pack->has_check_flag_)) {
         return 0;
@@ -1254,10 +1350,10 @@ inline u64 GtpReadPacketStreamKey(const GtpPacket *pack) {
         move += sizeof(u32);
     }
 
-    const u32 hash = *((u32*)move);
+    const u32 hash = GtpReadU32Unaligned(move);
     move += sizeof(u32);
 
-    const u32 user_id = *((u32*)move);
+    const u32 user_id = GtpReadU32Unaligned(move);
     return GtpMakeStreamKey(hash, user_id);
 }
 
@@ -1278,9 +1374,9 @@ inline u32 GtpInsertStreamKeyHeader(GtpPacket *pack, const u64 &stream_key) {
     GtpSplitStreamKey(stream_key, &hash, &user_id);
 
     u8 *move = ((u8*)pack) + sizeof(GtpPacket);
-    *((u32*)move) = hash;
+    GtpWriteU32Unaligned(move, hash);
     move += sizeof(u32);
-    *((u32*)move) = user_id;
+    GtpWriteU32Unaligned(move, user_id);
 
     pack->has_check_flag_ = GTP_YES;
     pack->header_offset_  = (u8)(old_header_offset + key_size);
@@ -1299,9 +1395,9 @@ inline u32 GtpWriteStreamKeyHeader(GtpPacket *pack, const u64 &stream_key) {
     GtpSplitStreamKey(stream_key, &hash, &user_id);
 
     u8 *move = ((u8*)pack) + sizeof(GtpPacket);
-    *((u32*)move) = hash;
+    GtpWriteU32Unaligned(move, hash);
     move += sizeof(u32);
-    *((u32*)move) = user_id;
+    GtpWriteU32Unaligned(move, user_id);
 
     pack->has_check_flag_ = GTP_YES;
     pack->header_offset_  = (u8)(sizeof(GtpPacket) + sizeof(u64));
@@ -1334,7 +1430,7 @@ inline u32 GtpRemoveStreamKeyHeader(GtpPacket *pack) {
 
 #define GtpHeaderOldToNew(pack) {\
     if (0x00 == (*((u8*)(pack)))) {\
-        u32 tmp_org_value = *((u32*)(pack));\
+        u32 tmp_org_value = GtpReadU32Unaligned(pack);\
         OldGtpHeader4Byte *old_header = (OldGtpHeader4Byte*)(&tmp_org_value);\
         NewGtpHeader4Byte *new_header = (NewGtpHeader4Byte*)(pack);\
         new_header->goodtp_ver_    = old_header->goodtp_ver_;\
@@ -1348,7 +1444,7 @@ inline u32 GtpRemoveStreamKeyHeader(GtpPacket *pack) {
 
 #define GtpHeaderNewToOld(pack, peer_version) {\
     if (0x00 == (peer_version)) {\
-        u32 tmp_org_value = *((u32*)(pack));\
+        u32 tmp_org_value = GtpReadU32Unaligned(pack);\
         OldGtpHeader4Byte *old_header = (OldGtpHeader4Byte*)(pack);\
         NewGtpHeader4Byte *new_header = (NewGtpHeader4Byte*)(&tmp_org_value);\
         old_header->goodtp_ver_    = new_header->goodtp_ver_;\

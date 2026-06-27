@@ -1310,7 +1310,7 @@ PRIVATE:
         }
 
         // fourth: distributing the memory for marking the status of the transport memory pool for using.
-        temp_tran_buf_mng->bitmap_size = (temp_tran_buf_mng->pool_size >> 6);  // NOLINT 一个u64管理64个c3buf item
+        temp_tran_buf_mng->bitmap_size = ((temp_tran_buf_mng->pool_size + 63) >> 6);  // NOLINT 一个u64管理64个c3buf item
         temp_tran_buf_mng->used_bitmap = (uint64_t*)malloc(sizeof(uint64_t) * temp_tran_buf_mng->bitmap_size); // NOLINT
         if (NULL == temp_tran_buf_mng->used_bitmap) {
             free(temp_tran_buf_mng->pool_header);

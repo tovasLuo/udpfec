@@ -1383,6 +1383,26 @@ GoodTp::GoodTp(const i32 &pos, const u32 &session_ttl_us, const GtpCallBackParam
     fec_mode_book_[5].v_size_     = 0;
     fec_mode_book_[5].block_size_ = 2;
     fec_mode_book_[5].rcv_        = 0;
+
+    fec_mode_book_[6].mode_       = (u8)(Fec2Mode::kBlock);
+    fec_mode_book_[6].h_flag_     = 1;
+    fec_mode_book_[6].v_flag_     = 1;
+    fec_mode_book_[6].uh_flag_    = 1;
+    fec_mode_book_[6].dh_flag_    = 0;
+    fec_mode_book_[6].h_size_     = 2;
+    fec_mode_book_[6].v_size_     = 2;
+    fec_mode_book_[6].block_size_ = 4;
+    fec_mode_book_[6].rcv_        = 0;
+
+    fec_mode_book_[7].mode_       = (u8)(Fec2Mode::kBlock);
+    fec_mode_book_[7].h_flag_     = 1;
+    fec_mode_book_[7].v_flag_     = 0;
+    fec_mode_book_[7].uh_flag_    = 1;
+    fec_mode_book_[7].dh_flag_    = 0;
+    fec_mode_book_[7].h_size_     = 2;
+    fec_mode_book_[7].v_size_     = 2;
+    fec_mode_book_[7].block_size_ = 4;
+    fec_mode_book_[7].rcv_        = 0;
 }
 
 GoodTp::~GoodTp() {
@@ -1428,7 +1448,7 @@ u32 GoodTp::Init(void) {
 }
 
 GtpSession* GoodTp::GetSession(GtpAddr *tran_addr, GtpHandler_p app_gtp_hdl, const u32 &mode, const u32 &pack_sn,
-                               const u32 &sort_sn) {
+                               const u32 &sort_sn, const u32 &sort_sn_valid, const u32 &create_session) {
     goodtp_sock sfd = (goodtp_sock)(tran_addr->sfd_);
 
     u8  peer_bin_ip[IPV6_BIN_IP_SIZE] = {0};
@@ -1459,7 +1479,11 @@ GtpSession* GoodTp::GetSession(GtpAddr *tran_addr, GtpHandler_p app_gtp_hdl, con
             return itr->second;
         }
 
-        return BuildNewSession(session_key, tran_addr, app_gtp_hdl, mode, pack_sn, sort_sn, sfd);
+        if (GTP_YES != create_session) {
+            return NULL;
+        }
+
+        return BuildNewSession(session_key, tran_addr, app_gtp_hdl, mode, pack_sn, sort_sn, sort_sn_valid, sfd);
     }
 
     GtpSessionKey out_key(tran_addr->stream_key_, sfd, &(peer_bin_ip[0]), peer_bin_ip_size, peer_bin_port,
@@ -1470,7 +1494,11 @@ GtpSession* GoodTp::GetSession(GtpAddr *tran_addr, GtpHandler_p app_gtp_hdl, con
         return itr->second;
     }
 
-    return BuildNewSession(out_key, tran_addr, app_gtp_hdl, mode, pack_sn, sort_sn, sfd);
+    if (GTP_YES != create_session) {
+        return NULL;
+    }
+
+    return BuildNewSession(out_key, tran_addr, app_gtp_hdl, mode, pack_sn, sort_sn, sort_sn_valid, sfd);
 }
 
 u32 GoodTp::CheckSingleThreadCalling(void) {
@@ -1485,7 +1513,8 @@ u32 GoodTp::CheckSingleThreadCalling(void) {
 }
 
 GtpSession* GoodTp::BuildNewSession(const GtpSessionKey &key, GtpAddr *tran_addr, GtpHandler_p app_gtp_hdl,
-                                    const u32 &mode, const u32 &pack_sn, const u32 &sort_sn, const goodtp_sock &sfd) {
+                                    const u32 &mode, const u32 &pack_sn, const u32 &sort_sn,
+                                    const u32 &sort_sn_valid, const goodtp_sock &sfd) {
     GtpSession *session = NULL;
 
     try {
@@ -1522,7 +1551,7 @@ create_new_session_pos_:
                             app_gtp_hdl, &(fec_mode_book_[0]),  mode);
         #endif
 
-        u32 nret = new_session->Init(current_ts_us_, &(win_cache_[0]), l_border_sn, next_out_sn);
+        u32 nret = new_session->Init(current_ts_us_, &(win_cache_[0]), l_border_sn, next_out_sn, sort_sn_valid);
         if (GTP_OK != nret) {
             delete new_session;
             new_session = NULL;
@@ -1606,6 +1635,39 @@ GtpSession* GoodTp::GetSession(const GtpSessionKey &session_key) {
     return itr->second;
 }
 
+GtpSession* GoodTp::GetSessionByAddr(GtpAddr *tran_addr) {
+    if (NULL == tran_addr) {
+        return NULL;
+    }
+
+    if ((GTP_YES == tran_addr->enable_key_) && (0 != tran_addr->stream_key_)) {
+        GtpSessionKey session_key(tran_addr->stream_key_);
+        return GetSession(session_key);
+    }
+
+    goodtp_sock sfd = (goodtp_sock)(tran_addr->sfd_);
+
+    u8  peer_bin_ip[IPV6_BIN_IP_SIZE] = {0};
+    u8  self_bin_ip[IPV6_BIN_IP_SIZE] = {0};
+
+    u16 peer_ip_size  = 0;
+    u16 peer_bin_port = 0;
+    u16 self_ip_size  = 0;
+    u16 self_bin_port = 0;
+
+    GtpSockAddrToBinAddr(&(tran_addr->sock_addr_[0]), &(peer_bin_ip[0]), &peer_ip_size, &peer_bin_port);
+
+    if (0 != tran_addr->self_addr_len_) {
+        GtpSockAddrToBinAddr(&(tran_addr->self_addr_[0]), &(self_bin_ip[0]), &self_ip_size, &self_bin_port);
+    } else {
+        memset(self_bin_ip, 0x00, sizeof(self_bin_ip));
+    }
+
+    GtpSessionKey session_key(sfd, &(peer_bin_ip[0]), peer_ip_size, peer_bin_port, &(self_bin_ip[0]),
+                              self_ip_size, self_bin_port);
+    return GetSession(session_key);
+}
+
 void GoodTp::CheckResourceActiveStatus(GtpHandler_p app_gtp_hdl) {
     current_ts_us_ = GtpSysTimestampUs();
 
@@ -1671,9 +1733,10 @@ void GoodTp::CheckResourceActiveStatus(GtpHandler_p app_gtp_hdl) {
             itr->second->fec2_obj_.PopAllPack(current_ts_us_);
             #endif
 
-            GtpLog(cb_.write_log_cb_, kGtpSessionMd, kGtpLogLevelWarning, "deleted session%s:%u<--->%s:%u.\r\n",
+            GtpLog(cb_.write_log_cb_, kGtpSessionMd, kGtpLogLevelWarning, "deleted session%s:%u<--->%s:%u(key=%llu).\r\n",
                    itr->second->pb_dt_.self_ip_, (u32)(itr->second->pb_dt_.self_port_),
-                   itr->second->pb_dt_.peer_ip_, (u32)(itr->second->pb_dt_.peer_port_));
+                   itr->second->pb_dt_.peer_ip_, (u32)(itr->second->pb_dt_.peer_port_),
+                   (unsigned long long)(itr->second->pb_dt_.tran_addr_.stream_key_));
 
             delete (itr->second);
             itr = session_map_.erase(itr);
@@ -1844,9 +1907,12 @@ u32 GoodTp::ShowLinker(const u8 *matched_str, u8 *out_str, const u32 mem_size) {
     unordered_map<GtpSessionKey, GtpSession*, GtpSessionKeyHash>::iterator itr = session_map_.begin();
 
     while (session_map_.end() != itr) {
-        str_size = (u32)snprintf((char*)wrt_pos, free_sz, "%s:%u-->%s:%u\r\n", itr->second->pb_dt_.self_ip_,
+        str_size = (u32)snprintf((char*)wrt_pos, free_sz, "%s:%u-->%s:%u stream_key=%llu enable_key=%u\r\n",
+                                 itr->second->pb_dt_.self_ip_,
                                  (u32)(itr->second->pb_dt_.self_port_), itr->second->pb_dt_.peer_ip_,
-                                 (u32)(itr->second->pb_dt_.peer_port_));
+                                 (u32)(itr->second->pb_dt_.peer_port_),
+                                 (unsigned long long)(itr->second->pb_dt_.tran_addr_.stream_key_),
+                                 (u32)(itr->second->pb_dt_.tran_addr_.enable_key_));
 
         if (0 != *matched_str) {
             if (NULL == strstr((const char*)wrt_pos, (const char*)matched_str)) {

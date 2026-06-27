@@ -34,6 +34,12 @@ typedef enum _WinLogLevelEnum {
     kWinLogLevelButt
 }WinLogLevelEnum;
 
+static inline u8* SlidWinAlignCache(u8 *ptr) {
+    const size_t align_size = sizeof(void*);
+    const size_t addr       = (size_t)ptr;
+    return (u8*)((addr + align_size - 1) & (~(align_size - 1)));
+}
+
 #define ClearMemory(u16_mem_header, u16_mem_size, begin_pos, end_pos, last_pos_clear_flag) {\
     u32 move_pos = begin_pos;\
     do {\
@@ -356,7 +362,7 @@ u32 SlidWin::BlockSnEntryWin(const u64 &sn_bit_map, const u32 &begin_sn, const u
     if (l_border_sn_ <= begin_sn) {
         cur_sn_span = begin_sn - l_border_sn_;
     } else {
-        cur_sn_span = (0xFFFFFFFF - l_border_sn_) + begin_sn;
+        cur_sn_span = (0xFFFFFFFF - l_border_sn_) + begin_sn + 1;
     }
 
     if (max_sn_span_ < cur_sn_span) {
@@ -455,7 +461,7 @@ u32 SlidWin::BlockSnEntryWin(const u32 &sn_bit_map, const u32 &begin_sn, const u
     if (l_border_sn_ <= begin_sn) {
         cur_sn_span = begin_sn - l_border_sn_;
     } else {
-        cur_sn_span = (0xFFFFFFFF - l_border_sn_) + begin_sn;
+        cur_sn_span = (0xFFFFFFFF - l_border_sn_) + begin_sn + 1;
     }
 
     if (max_sn_span_ < cur_sn_span) {
@@ -564,8 +570,9 @@ u32 SlidWin::SnEntryWin(const u32 &sn, const u64 &ts_us, const u32 &calc_loss_fl
             if (SELF_SN_OUT_R_ERR == nrun_result) {
                 recv_out_r_counter_ += 1;
                 if (MAX_RESET_RECV_WIN_THRSHLD <= recv_out_r_counter_) {
+                    const u32 reset_sn = sn & RESET_RECV_WIN_SN_MASK;
                     WinLog(kWinLogLevelWarning, slid_win_mode_, "[win_hdl=%p]receiving win async to sending win, "\
-                           "now reset receiving win's left border sn to %u\r\n", this, sn & 0xFFFFFFF1);
+                           "now reset receiving win's left border sn to %u\r\n", this, reset_sn);
                     goto sn_entry_reset_win_pos_;
                 }
             }
@@ -585,7 +592,7 @@ u32 SlidWin::SnEntryWin(const u32 &sn, const u64 &ts_us, const u32 &calc_loss_fl
         cur_sn_pos = (sn - l_border_sn_) + l_border_pos_;
     } else {
         // the sn has been turned over.
-        cur_sn_pos = ((0xFFFFFFFF - l_border_sn_) + sn) + l_border_pos_;
+        cur_sn_pos = ((0xFFFFFFFF - l_border_sn_) + sn + 1) + l_border_pos_;
     }
     cur_sn_pos &= WIN_POS_MASK;  // avoid the window turn over.
 
@@ -669,7 +676,7 @@ u32 SlidWin::SnEntryWin(const u32 &sn, const u64 &ts_us, const u32 &calc_loss_fl
     return SELF_SUCESS;
 
 sn_entry_reset_win_pos_:
-    ResetWin(sn & 0xFFFFFFF1, ts_us);
+    ResetWin(sn & RESET_RECV_WIN_SN_MASK, ts_us);
 
     no_calc_loss_sn_num_ += 1;
 
@@ -946,13 +953,13 @@ u32 SlidWin::NackSnEntryWin(const NackData *nack, const u64 &ts_us) {
     if (l_border_sn_ <= comb_head_sn) {
         head_span = comb_head_sn - l_border_sn_;
     } else {
-        head_span = (0xFFFFFFFF - l_border_sn_) + comb_head_sn;
+        head_span = (0xFFFFFFFF - l_border_sn_) + comb_head_sn + 1;
     }
 
     if (l_border_sn_ <= comb_tail_sn) {
         tail_span = comb_tail_sn - l_border_sn_;
     } else {
-        tail_span = (0xFFFFFFFF - l_border_sn_) + comb_tail_sn;
+        tail_span = (0xFFFFFFFF - l_border_sn_) + comb_tail_sn + 1;
     }
 
     head_pos = (l_border_pos_ + head_span) & WIN_POS_MASK;
@@ -1025,7 +1032,7 @@ u32 SlidWin::NackSnEntryWin(const NackData *nack, const u64 &ts_us) {
         if (l_border_sn_ <= nack_sn) {
             sn_span = nack_sn - l_border_sn_;
         } else {
-            sn_span = nack_sn + (0xFFFFFFFF - l_border_sn_);
+            sn_span = nack_sn + (0xFFFFFFFF - l_border_sn_) + 1;
         }
 
         if (max_sn_span_ < sn_span) {
@@ -1071,7 +1078,7 @@ u32 SlidWin::SnTsEntryWin(const u32 &sn, const u64 &ts_us) {
         cur_sn_pos = (sn - l_border_sn_) + l_border_pos_;
     } else {
         // sn has been turned over.
-        cur_sn_pos = ((0xFFFFFFFF - l_border_sn_) + sn) + l_border_pos_;
+        cur_sn_pos = ((0xFFFFFFFF - l_border_sn_) + sn + 1) + l_border_pos_;
     }
     cur_sn_pos &= WIN_POS_MASK;  // avoid the window overturn.
 
@@ -1322,8 +1329,8 @@ update_rto_sn_std_end_pos_:
     WinLog(kWinLogLevelDebug, slid_win_mode_, "calced jitter: Jitter=%ums\r\n", jitter_us_/1000);
     #endif
 
-    if ((15.000001 <= (((f32)(jitter * 100)) / ((f32)cur_rtt_us_)))
-     && (10.000001 <= (((f32)(jitter_us_ * 100)) / ((f32)cur_rtt_us_)))) {
+    if ((15.000001 <= (((f32)jitter * 100.0f) / ((f32)cur_rtt_us_)))
+     && (10.000001 <= (((f32)jitter_us_ * 100.0f) / ((f32)cur_rtt_us_)))) {
         #ifdef _SELFDEBUG
         WinLog(kWinLogLevelDebug, slid_win_mode_, "single_jitter=%d rtt=%u\r\n", jitter, cur_rtt_us_);
         #endif
@@ -1355,8 +1362,11 @@ update_rto_sn_std_end_pos_:
     }
 
     if (kRecvSlidWinMode == slid_win_mode_) {
-        // default receive mode: RTO = 0.125*RTT
-        if ((DEFAULT_RECV_RTO_DEC_K != recv_rto_dec_k_) && (0 != recv_rto_dec_k_)) {
+        // Low-PPS game streams need a slightly wider disorder window because
+        // packet spacing dominates short RTT fractions.
+        if (LOW_PPS_DISORDER_THRESHOLD >= avg_pps_) {
+            rto_ts_us_ = (cur_rtt_us_ >> 2);
+        } else if ((DEFAULT_RECV_RTO_DEC_K != recv_rto_dec_k_) && (0 != recv_rto_dec_k_)) {
             rto_ts_us_ = (u32)(((f32)cur_rtt_us_) / ((f32)recv_rto_dec_k_));
         } else {
             rto_ts_us_ = (cur_rtt_us_ >> 3);
@@ -1364,13 +1374,24 @@ update_rto_sn_std_end_pos_:
 
         rto_ts_us_ += jitter_us_;
 
-        if (MAX_DISORDER_BUF_US < rto_ts_us_) {
-            rto_ts_us_ = MAX_DISORDER_BUF_US;
-            goto set_rtt_continue_pos_;
-        }
+        if (LOW_PPS_DISORDER_THRESHOLD >= avg_pps_) {
+            if (MAX_LOW_PPS_DISORDER_BUF_US < rto_ts_us_) {
+                rto_ts_us_ = MAX_LOW_PPS_DISORDER_BUF_US;
+                goto set_rtt_continue_pos_;
+            }
 
-        if (MIN_DISORDER_BUF_US > rto_ts_us_) {
-            rto_ts_us_ = MIN_DISORDER_BUF_US;
+            if (MIN_LOW_PPS_DISORDER_BUF_US > rto_ts_us_) {
+                rto_ts_us_ = MIN_LOW_PPS_DISORDER_BUF_US;
+            }
+        } else {
+            if (MAX_DISORDER_BUF_US < rto_ts_us_) {
+                rto_ts_us_ = MAX_DISORDER_BUF_US;
+                goto set_rtt_continue_pos_;
+            }
+
+            if (MIN_DISORDER_BUF_US > rto_ts_us_) {
+                rto_ts_us_ = MIN_DISORDER_BUF_US;
+            }
         }
 
         goto set_rtt_continue_pos_;
@@ -1656,7 +1677,7 @@ u32 SlidWin::UpdateMaxSnPos(const u32 &current_sn_pos, const u32 &sn) {
     if (max_span <= cur_span) {
         max_sn_pos_          = current_sn_pos;
         max_sn_              = sn;
-        max_sn_span_         = max_span;
+        max_sn_span_         = cur_span;
         expect_next_recv_sn_ = max_sn_ + 1;
     }
 
@@ -1703,7 +1724,7 @@ u32 SlidWin::SnIsValid(const u32 &cur_sn) const {
     if (l_border_sn_ <= cur_sn) {
         sn_span = cur_sn - l_border_sn_;
     } else {
-        sn_span = cur_sn + (0xFFFFFFFF - l_border_sn_);
+        sn_span = cur_sn + (0xFFFFFFFF - l_border_sn_) + 1;
     }
 
     if (cur_win_size_ < sn_span) {
@@ -2039,11 +2060,7 @@ void SlidWin::CalcSndLoss(const u64 &ts_us, const u32 &force_calc) {
         }
 
         if (0 == sn_bit_map_[block_loop]) {
-            loss_pack_num  += 64;
-            move_pos       += 64;
-            move_pos       &= WIN_POS_MASK;  // ring buffer, the buffer's length is 65536
-
-            goto next_block_loop_pos_;
+            goto calc_bit_discard_pos_;
         }
 
 calc_bit_discard_pos_:
@@ -2053,7 +2070,7 @@ calc_bit_discard_pos_:
         while ((64 > bit_loop) && (cur_sn_span <= max_sn_span)) {
             if (0 == (sn_bit_map_[block_loop] & bit_mask)) {
                 delta_ms = CalcDeltaTsMs(ts_ms, sn_ts_ms_[move_pos]);
-                if ((rto_ts_ms > delta_ms) && (SELF_NO == force_calc)) {
+                if (rto_ts_ms > delta_ms) {
                     // temp avoid loss = 0.0% for disconnect linker by iptables.
                     break_flag = SELF_YES;
                     break;
@@ -2208,7 +2225,7 @@ void SlidWin::CalcRcvLoss(const u64 &ts_us, const u32 &force_calc) {
 
     if (min_calc_loss_sn_num_ > no_calc_loss_sn_num_) {
         #if (2 == APPLICATION_TYPE)
-        if (0 == loss_) {
+        if ((0 == loss_) && (SELF_NO == force_calc)) {
             return;
         }
         #endif
@@ -2610,19 +2627,20 @@ calc_rcv_loss_rsp_ack_nack_pos_:
         goto calc_rcv_loss_move_win_pos_;
     }
 
-    #if (2 == APPLICATION_TYPE)
-    if ((0 < loss_pack_num) && (loss_pack_num == ((u32)sv_loss_sn_pos))
-        && (MAX_GAME_FAST_NACK_SN_NUM >= loss_pack_num)) {
-    #else
     if ((0 < loss_pack_num) &&
-        ((2.000001 > report_loss) || (MAX_FEEDBACK_NACK_SN_NUM > loss_pack_num))) {
-    #endif
+        ((2.000001 > report_loss) ||
+        #if (2 == APPLICATION_TYPE)
+         ((MAX_FEEDBACK_NACK_SN_NUM << 1) > loss_pack_num)
+        #else
+         (MAX_FEEDBACK_NACK_SN_NUM > loss_pack_num)
+        #endif
+        )) {
         NackData *nack_sn_bitmap = (NackData*)cache_;
 
         nack_sn_bitmap->head_sn_     = l_border_sn_;
         nack_sn_bitmap->tail_sn_     = max_sn_;
         nack_sn_bitmap->recv_loss_   = loss_;
-        nack_sn_bitmap->nack_num_    = (u16)sv_loss_sn_pos;
+        nack_sn_bitmap->nack_num_    = (u16)loss_pack_num;
         nack_sn_bitmap->cache_ts_us_ = ts_us;
 
         if (l_border_pos_ <= rto_tmout_pos) {
@@ -2644,7 +2662,7 @@ calc_rcv_loss_rsp_ack_nack_pos_:
     }
 
     {
-    ReceivedSnBitMap *ack_sn_bitmap = (ReceivedSnBitMap*)cache_;
+    ReceivedSnBitMap *ack_sn_bitmap = (ReceivedSnBitMap*)SlidWinAlignCache(cache_);
 
     ack_sn_bitmap->sn_bit_map_  = &(cache_[sizeof(ReceivedSnBitMap) + sizeof(u64)]);
     ack_sn_bitmap->head_sn_     = l_border_sn_;
@@ -2658,11 +2676,9 @@ calc_rcv_loss_rsp_ack_nack_pos_:
         ack_sn_bitmap->rto_sn_ = l_border_sn_ + (rto_tmout_pos + (WIN_BUF_SIZE -  l_border_pos_));
     }
 
-    ack_sn_bitmap->rto_sn_ = max_sn_;
-
     {
     u32 ack_span = 0;
-    u8* tmp_mem  = &(cache_[sizeof(ReceivedSnBitMap) + sizeof(u64)]);
+    u8* tmp_mem  = ((u8*)ack_sn_bitmap) + sizeof(ReceivedSnBitMap) + sizeof(u64);
 
     if (l_border_pos_ <= max_sn_pos_) {
         ack_span = max_sn_pos_ - l_border_pos_;
@@ -2972,7 +2988,7 @@ u32 SlidWin::CheckIsRepeatPacketSn(const u32 &cur_sn, const u64 &ts_us) {
     if (l_border_sn_ <= cur_sn) {
         cur_l_sn_span = cur_sn - l_border_sn_;
     } else {
-        cur_l_sn_span = cur_sn + (0xFFFFFFFF - l_border_sn_);
+        cur_l_sn_span = cur_sn + (0xFFFFFFFF - l_border_sn_) + 1;
     }
 
     // current is out of the left border.
@@ -2987,7 +3003,7 @@ u32 SlidWin::CheckIsRepeatPacketSn(const u32 &cur_sn, const u64 &ts_us) {
     if (l_border_sn_ <= max_sn_) {
         max_l_sn_span = max_sn_ - l_border_sn_;
     } else {
-        max_l_sn_span = max_sn_ + (0xFFFFFFFF - l_border_sn_);
+        max_l_sn_span = max_sn_ + (0xFFFFFFFF - l_border_sn_) + 1;
     }
 
     // new max sn, it's usully expect next sn.
@@ -3053,8 +3069,8 @@ calc_quality_by_handler_start_pos_:
 }
 
 void SlidWin::ForcastCongest(const u64 &ts_us) {
-    f32 ratio   = ((f32)(last_jitter_ * 100)) / ((f32)cur_rtt_us_);
-    f32 correct = ((f32)(jitter_us_ * 100)) / ((f32)cur_rtt_us_);
+    f32 ratio   = (((f32)last_jitter_ * 100.0f)) / ((f32)cur_rtt_us_);
+    f32 correct = (((f32)jitter_us_ * 100.0f)) / ((f32)cur_rtt_us_);
 
     f32 back_ratio  = ratio_cach_;
     f32 delta_ratio = ratio - ratio_cach_;
@@ -3300,7 +3316,7 @@ u32 SlidWin::CheckRealExistLoss(const u32 &cur_sn, const u64 &cur_ts) {
 
     if (expect_next_recv_sn_ < cur_sn) {
         if ((1000 > expect_next_recv_sn_) && (0x7FFFFFFF < cur_sn)) {
-            temp_span = expect_next_recv_sn_ + (0xFFFFFFFF - cur_sn);  // expect next sn is turn over.
+            temp_span = expect_next_recv_sn_ + (0xFFFFFFFF - cur_sn) + 1;  // expect next sn is turn over.
         } else {
             temp_span = cur_sn - expect_next_recv_sn_;
         }
@@ -3308,7 +3324,7 @@ u32 SlidWin::CheckRealExistLoss(const u32 &cur_sn, const u64 &cur_ts) {
     }
 
     if ((1000 > cur_sn) && (0x7FFFFFFF < expect_next_recv_sn_)) {
-        temp_span = cur_sn + (0xFFFFFFFF - expect_next_recv_sn_);      // current sn is turn over.
+        temp_span = cur_sn + (0xFFFFFFFF - expect_next_recv_sn_) + 1;      // current sn is turn over.
         goto check_disorder_or_loss_pos_;
     }
     temp_span = expect_next_recv_sn_ - cur_sn;
