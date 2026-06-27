@@ -129,7 +129,7 @@ u32 GtpArq::PacketEntryList(GtpPacket *pack, GtpAddr *tran_addr, const u32 &firs
 
     node->last_send_ts_us_ = ts_us;
     node->pack_            = (u8*)pack;
-    node->tran_addr_       = (u8*)tran_addr;
+    node->tran_addr_       = (u8*)(&pb_dt_->tran_addr_);
     node->pack_len_        = (u16)(pack->pack_size_);
     node->try_agin_flg_    = GTP_NO;
     node->payload_offset_  = (u8)(pack->header_offset_);
