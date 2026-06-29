@@ -320,16 +320,16 @@ fec_mode_to_default_pos_:
         // col1 (2-10% loss): 0 for pps>=30 — FEC book5 covers this range; boost just doubles bandwidth.
         u32 boost_alg_param[][6] = {
             // loss < 1% loss < 10% loss < 20% loss < 35% loss < 50% loss >= 50%
-            {0,          0,         2,         3,         2,         2},  // pps < 12  low-pps game
-            {0,          0,         1,         1,         1,         0},  // pps < 30  phone game
-            {0,          0,         1,         1,         1,         0},  // pps < 50  phone game
-            {0,          0,         1,         1,         1,         0},  // pps < 90  low-rate pc game
-            {0,          0,         1,         1,         1,         0},  // pps < 130 low-rate pc game
-            {0,          0,         1,         1,         1,         0},  // pps < 170 medium-rate pc game
-            {0,          0,         1,         1,         1,         0},  // pps < 210 medium-rate pc game
-            {0,          0,         1,         1,         1,         0},  // pps < 250 high-tail-latency pc game
-            {0,          0,         1,         1,         1,         0},  // pps < 330 high-rate pc game
-            {0,          0,         1,         1,         1,         0},  // pps >= 330 high-rate pc game
+            {0,          0,         2,         0,         0,         0},  // pps < 12  low-pps game
+            {0,          0,         1,         0,         0,         0},  // pps < 30  phone game
+            {0,          0,         1,         0,         0,         0},  // pps < 50  phone game
+            {0,          0,         1,         0,         0,         0},  // pps < 90  low-rate pc game
+            {0,          0,         1,         0,         0,         0},  // pps < 130 low-rate pc game
+            {0,          0,         1,         0,         0,         0},  // pps < 170 medium-rate pc game
+            {0,          0,         1,         0,         0,         0},  // pps < 210 medium-rate pc game
+            {0,          0,         1,         0,         0,         0},  // pps < 250 high-tail-latency pc game
+            {0,          0,         1,         0,         0,         0},  // pps < 330 high-rate pc game
+            {0,          0,         1,         0,         0,         0},  // pps >= 330 high-rate pc game
         };
 
         u32 boost_std_pps[][9] = {
@@ -3489,12 +3489,12 @@ u8 GtpSession::CalcGameFecPolicy(void) const {
 
     static const u8 game_fec_policy_table[][7] = {
         // pps:  <20  20-49 50-79 80-109 110-139 140-169 170+
-        {0xFF,  0xFF, 0xFF, 0xFF,  0xFF,   0xFF,   0xFF},  // loss < 2%  (FEC off)
+        {0xFF,  0xFF,   5,    5,     5,      5,      5},  // loss < 2%  (pps<50: FEC off; pps>=50: book5)
         {  5,     5,    5,    5,     5,      5,      5},  // 2% <= loss < 10%
         {  4,     4,    4,    4,     4,      4,      4},  // 10% <= loss < 25%
-        {  2,     2,    2,    2,     2,      2,      2},  // 25% <= loss < 50%
-        {  2,     2,    2,    2,     2,      2,      2},  // 50% <= loss < 100%
-        {  2,     2,    2,    2,     2,      2,      2}   // loss >= 100%
+        {0xFF,  0xFF, 0xFF, 0xFF,  0xFF,   0xFF,   0xFF},  // 25% <= loss < 50%  (not handled)
+        {0xFF,  0xFF, 0xFF, 0xFF,  0xFF,   0xFF,   0xFF},  // 50% <= loss < 100%  (not handled)
+        {0xFF,  0xFF, 0xFF, 0xFF,  0xFF,   0xFF,   0xFF}   // loss >= 100%  (not handled)
     };
 
     f32 policy_loss = pb_dt_.game_fec_policy_loss_;

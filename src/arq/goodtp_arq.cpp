@@ -173,9 +173,9 @@ u32 GtpArq::PacketEntryList(GtpPacket *pack, GtpAddr *tran_addr, const u32 &firs
     // Guard against boosting during quiet periods after an intermittent burst.
     // After PushPack, node_num_ includes the just-added original.
     // A small backlog means ACKs are flowing and the network is currently healthy.
-    // Only clone when backlog >= 2*(1+max_boost_times_), requiring at least
-    // (max_boost_times_+1) consecutive losses to build up before boosting kicks in.
-    const u32 boost_backlog_thresh = 2u + 2u * (u32)max_boost_times_;
+    // Only clone when backlog >= 1+2*max_boost_times_, requiring at least
+    // max_boost_times_ consecutive losses to build up before boosting kicks in.
+    const u32 boost_backlog_thresh = 1u + 2u * (u32)max_boost_times_;
     if (arq_list_.node_num_ < boost_backlog_thresh) {
         return GTP_OK;
     }
