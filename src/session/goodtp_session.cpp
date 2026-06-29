@@ -323,13 +323,13 @@ fec_mode_to_default_pos_:
             {0,          0,         2,         0,         0,         0},  // pps < 12  low-pps game
             {0,          0,         1,         0,         0,         0},  // pps < 30  phone game
             {0,          0,         1,         0,         0,         0},  // pps < 50  phone game
-            {0,          0,         1,         0,         0,         0},  // pps < 90  low-rate pc game
-            {0,          0,         1,         0,         0,         0},  // pps < 130 low-rate pc game
-            {0,          0,         1,         0,         0,         0},  // pps < 170 medium-rate pc game
-            {0,          0,         1,         0,         0,         0},  // pps < 210 medium-rate pc game
-            {0,          0,         1,         0,         0,         0},  // pps < 250 high-tail-latency pc game
-            {0,          0,         1,         0,         0,         0},  // pps < 330 high-rate pc game
-            {0,          0,         1,         0,         0,         0},  // pps >= 330 high-rate pc game
+            {0,          1,         1,         0,         0,         0},  // pps < 90  low-rate pc game
+            {0,          1,         1,         0,         0,         0},  // pps < 130 low-rate pc game
+            {0,          1,         1,         0,         0,         0},  // pps < 170 medium-rate pc game
+            {0,          1,         1,         0,         0,         0},  // pps < 210 medium-rate pc game
+            {0,          1,         1,         0,         0,         0},  // pps < 250 high-tail-latency pc game
+            {0,          1,         1,         0,         0,         0},  // pps < 330 high-rate pc game
+            {0,          1,         1,         0,         0,         0},  // pps >= 330 high-rate pc game
         };
 
         u32 boost_std_pps[][9] = {
