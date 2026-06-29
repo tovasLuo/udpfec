@@ -637,9 +637,14 @@ static void print_result(const SceneResult &r, int book_id, int pps) {
 }
 
 /* ─────────── 主函数 ─────────── */
-int main() {
+int main(int argc, char **argv) {
     setvbuf(stdout, nullptr, _IONBF, 0);
     srand((unsigned)time(nullptr));
+
+    bool low_pps_only = false;
+    for (int i = 1; i < argc; ++i) {
+        if (strcmp(argv[i], "--low-pps") == 0) low_pps_only = true;
+    }
 
     if (GTP_OK != InsLoadGtpModule()) {
         fprintf(stderr, "InsLoadGtpModule failed\n"); return 1;
@@ -647,6 +652,7 @@ int main() {
 
     sep('=',88); printf("  GoodTP 全方位专业测试（单线程单实例驱动，符合设计约束）\n"); sep('=',88);
 
+    if (!low_pps_only) {
     /* ══════════════════════════════════════════════════
      * PART 1: 核心场景（150pps / 1包/帧（均匀发包）/ book4 / 6s）
      * Direction A：每 tick 发 1 包（6.7ms间距），FEC矩阵均匀填充
@@ -781,6 +787,7 @@ int main() {
     printf("     book4 FEC开销≈70%%（自动FEC管理会在稳定后逐步降低FEC发送）\n");
     printf("     ACK/NACK/RTT控制包≈20-30%%\n");
     printf("     建议：0%%丢包超过1s → auto-FEC自动关闭，降至控制包开销\n");
+    } // !low_pps_only PART1-3
     /* ══════════════════════════════════════════════════
      * PART 4: 延迟基准 — PPS 变化对延迟的影响（0%丢包 + 10%丢包）
      * 关注：FEC矩阵填充时间 = block_size/pps，低PPS下FEC恢复延迟大
@@ -813,6 +820,7 @@ int main() {
         }
     }
 
+    if (!low_pps_only) {
     /* ══════════════════════════════════════════════════
      * PART 5: 延迟随丢包率变化（150pps，pkts_per_frm=1均匀，book4自适应，6s）
      * 关注：0→5%→10%→20% 延迟是否可接受，拐点在哪
@@ -940,6 +948,7 @@ int main() {
     printf("    ppf=3: 2帧填满矩阵，间距20ms，首帧3包次帧1包，FEC在第2帧（+20ms）\n");
     printf("    ppf=4: 1帧填满矩阵，FEC与数据同帧发出，理论上恢复延迟最低（~loopback）\n");
 
+    } // !low_pps_only PART5-7
     /* ══════════════════════════════════════════════════
      * PART 8: 低 PPS 专项延迟测试（ppf=1 均匀发包，10%/5% 丢包）
      * 目标：量化 Method B 在 5-30pps 真实游戏 pps 区间的收益
@@ -953,13 +962,13 @@ int main() {
     sep('-');
 
     int p8_pps[]  = {5, 10, 15, 20, 25, 30};
-    int p8_loss[] = {5, 10};
+    int p8_loss[] = {0, 5, 10};
     for (int loss : p8_loss) {
         for (int pps : p8_pps) {
             SceneCfg cfg{};
             char nm[64]; snprintf(nm,sizeof(nm),"P8 %dpps %d%%", pps, loss);
             cfg.name = nm;
-            cfg.loss.model = LOSS_RANDOM;
+            cfg.loss.model = (loss == 0) ? LOSS_NONE : LOSS_RANDOM;
             cfg.loss.loss_pct = loss;
             cfg.pps = pps;
             cfg.pkts_per_frm = 1;   // 均匀发包，ppf=1
@@ -975,9 +984,10 @@ int main() {
         sep('-');
     }
     sep('=');
-    printf("  测试完成\n");
+    printf("  PART 8 测试完成\n");
     sep('=');
 
+    if (!low_pps_only) {
     /* ══════════════════════════════════════════════════
      * PART 9: book4 vs book5 带宽效率对比（5%丢包核心场景）
      * 目标：量化 book5(2×1 H, FEC=33%) vs book4(2×2 H+V, FEC=50%)
@@ -1100,6 +1110,7 @@ int main() {
     sep('=');
     printf("  PART 10 完成（book 类型见 book实 列：4=book4, 5=book5）\n");
     sep('=');
+    } // !low_pps_only PART9-10
 
     RmLoadGtpModule();
     return 0;

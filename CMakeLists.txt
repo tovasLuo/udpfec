@@ -12,6 +12,7 @@ add_library(fec STATIC
     src/mempool/goodtp_mem_pool.cpp
     src/mgr/goodtp_mgr.cpp
     src/session/goodtp_factorcalulation.cpp
+    src/session/goodtp_reorder_window.cpp
     src/session/goodtp_session.cpp
 )
 

@@ -317,18 +317,19 @@ fec_mode_to_default_pos_:
 
         #if (2 == APPLICATION_TYPE)
         // boost number, continue discard packet.
+        // col1 (2-10% loss): 0 for pps>=30 — FEC book5 covers this range; boost just doubles bandwidth.
         u32 boost_alg_param[][6] = {
             // loss < 1% loss < 10% loss < 20% loss < 35% loss < 50% loss >= 50%
-            {1,          1,         2,         3,         2,         2},  // pps < 12  test speed
-            {0,          1,         1,         1,         1,         0},  // pps < 30  phone game
-            {0,          1,         1,         1,         1,         0},  // pps < 50  phone game
-            {0,          1,         1,         1,         1,         0},  // pps < 90  low-rate pc game
-            {0,          1,         1,         1,         1,         0},  // pps < 130 low-rate pc game
-            {0,          1,         1,         1,         1,         0},  // pps < 170 medium-rate pc game
-            {0,          1,         1,         1,         1,         0},  // pps < 210 medium-rate pc game
-            {0,          1,         1,         1,         1,         0},  // pps < 250 high-tail-latency pc game
-            {0,          1,         1,         1,         1,         0},  // pps < 330 high-rate pc game
-            {0,          1,         1,         1,         1,         0},  // pps >= 330 high-rate pc game
+            {0,          0,         2,         3,         2,         2},  // pps < 12  low-pps game
+            {0,          0,         1,         1,         1,         0},  // pps < 30  phone game
+            {0,          0,         1,         1,         1,         0},  // pps < 50  phone game
+            {0,          0,         1,         1,         1,         0},  // pps < 90  low-rate pc game
+            {0,          0,         1,         1,         1,         0},  // pps < 130 low-rate pc game
+            {0,          0,         1,         1,         1,         0},  // pps < 170 medium-rate pc game
+            {0,          0,         1,         1,         1,         0},  // pps < 210 medium-rate pc game
+            {0,          0,         1,         1,         1,         0},  // pps < 250 high-tail-latency pc game
+            {0,          0,         1,         1,         1,         0},  // pps < 330 high-rate pc game
+            {0,          0,         1,         1,         1,         0},  // pps >= 330 high-rate pc game
         };
 
         u32 boost_std_pps[][9] = {
@@ -1054,6 +1055,7 @@ GtpSession::GtpSession(const goodtp_sock &sfd, const u8 dst_sock_addr[], const u
     rmv_close_alg_ts_us_(0),
     nack_burst_detected_(0),
     new_gap_detected_(0),
+    gap_nack_hold_ticks_(0),
     #ifdef _SELFDEBUG
     debug_feedback_reason_(kGtpFeedbackDebugUnknown),
     #endif
@@ -1140,6 +1142,7 @@ GtpSession::GtpSession(GtpAddr *tran_addr, const GtpHandler &gtp_hdl, GtpMemPool
     rmv_close_alg_ts_us_(0),
     nack_burst_detected_(0),
     new_gap_detected_(0),
+    gap_nack_hold_ticks_(0),
     #ifdef _SELFDEBUG
     debug_feedback_reason_(kGtpFeedbackDebugUnknown),
     #endif
@@ -2422,7 +2425,7 @@ u32 GtpSession::PackPostHandler(GtpPacket *pack, const u32 &size, GtpAddr *tran_
 
             #if (2 == APPLICATION_TYPE)
             if ((0 != recv_max_data_sn_) && (1 < ((i32)(pack->pack_sn_ - recv_max_data_sn_)))) {
-                new_gap_detected_ = 2;
+                gap_nack_hold_ticks_ = 3;
             }
 
             if ((0 == recv_max_data_sn_) || (0 < ((i32)(pack->pack_sn_ - recv_max_data_sn_)))) {
@@ -3022,12 +3025,22 @@ void GtpSession::TimerHandler(const u64 &ts_us, ConsumeTime *wheel_consume) {
     }
 
 timer_handler_continue_pos_:
-    if ((0 != rtt_us_) && ((gen_new_rtt_ts_us_ + MIN_RTT_EXIST_TM_SZ_US) <= ts_us)) {
-        SendSetRecvRttPacket();
+    {
+        const u64 rtt_probe_interval = (recv_idle_calc_period_us_ > MIN_RTT_EXIST_TM_SZ_US)
+                                       ? recv_idle_calc_period_us_ : MIN_RTT_EXIST_TM_SZ_US;
+        if ((GTP_ON == pb_dt_.alg_top_switch_) && (0 != rtt_us_) && ((gen_new_rtt_ts_us_ + rtt_probe_interval) <= ts_us)) {
+            SendSetRecvRttPacket();
+        }
     }
 
     #if (2 == APPLICATION_TYPE)
-    if (0 < new_gap_detected_) {
+    if ((GTP_ON == pb_dt_.alg_top_switch_) && (0 < gap_nack_hold_ticks_)) {
+        gap_nack_hold_ticks_ -= 1;
+        if (0 == gap_nack_hold_ticks_) {
+            new_gap_detected_ = 2;
+        }
+    }
+    if ((GTP_ON == pb_dt_.alg_top_switch_) && (0 < new_gap_detected_)) {
         new_gap_detected_ -= 1;
         #ifdef _SELFDEBUG
         debug_feedback_reason_ = kGtpFeedbackDebugGapTimer;
@@ -3045,7 +3058,8 @@ timer_handler_continue_pos_:
     }
     #endif
 
-    if ((0xFFFFFFFFFFFFFFFF != recv_idle_calc_loss_ts_us)
+    if ((GTP_ON == pb_dt_.alg_top_switch_)
+     && (0xFFFFFFFFFFFFFFFF != recv_idle_calc_loss_ts_us)
      && ((recv_idle_calc_loss_ts_us + recv_idle_calc_period_us_) <= ts_us)) {
         const u32 burst_flag = nack_burst_detected_;
         nack_burst_detected_ = 0;
@@ -3475,7 +3489,7 @@ u8 GtpSession::CalcGameFecPolicy(void) const {
 
     static const u8 game_fec_policy_table[][7] = {
         // pps:  <20  20-49 50-79 80-109 110-139 140-169 170+
-        {  5,     5,    5,    5,     5,      5,      5},  // loss < 2%
+        {0xFF,  0xFF, 0xFF, 0xFF,  0xFF,   0xFF,   0xFF},  // loss < 2%  (FEC off)
         {  5,     5,    5,    5,     5,      5,      5},  // 2% <= loss < 10%
         {  4,     4,    4,    4,     4,      4,      4},  // 10% <= loss < 25%
         {  2,     2,    2,    2,     2,      2,      2},  // 25% <= loss < 50%
@@ -3728,6 +3742,15 @@ u32 GtpSession::PrintHarqParam(u8 *out_str, const u32 &mem_size) {
     wrt_num = (u32)snprintf((char*)wrt_pos, free_sz, "\r\n  harq_node_num= %u", arq_.arq_list_.node_num_);
     PrintAfterHandlerReturn(str_len, wrt_num, free_sz, wrt_pos);
 
+    wrt_num = (u32)snprintf((char*)wrt_pos, free_sz, "\r\n rto_resend_counter= %u", arq_.rto_resend_counter_);
+    PrintAfterHandlerReturn(str_len, wrt_num, free_sz, wrt_pos);
+
+    wrt_num = (u32)snprintf((char*)wrt_pos, free_sz, "\r\n ack_resend_counter= %u", arq_.ack_resend_counter_);
+    PrintAfterHandlerReturn(str_len, wrt_num, free_sz, wrt_pos);
+
+    wrt_num = (u32)snprintf((char*)wrt_pos, free_sz, "\r\n boost_resend_counter= %u", arq_.arq_list_.ai_repair_sum_);
+    PrintAfterHandlerReturn(str_len, wrt_num, free_sz, wrt_pos);
+
     return str_len;
 }
 
@@ -3939,6 +3962,15 @@ void GtpSession::RttHandler(const u32 &rtt_us) {
         recv_idle_calc_period_us_ = MAX_HANDLER_CALC_PERIOD_US;
     } else if (MIN_HANDLER_CALC_PERIOD_US > recv_idle_calc_period_us_) {
         recv_idle_calc_period_us_ = MIN_HANDLER_CALC_PERIOD_US;
+    }
+
+    // PPS floor applied after RTT clamp so low-PPS sessions don't send ACK faster than inter-packet interval.
+    const u32 cur_pps = GetSendBusinessPps();
+    if (0 < cur_pps) {
+        const u64 pps_floor_us = 1000000ULL / cur_pps;
+        if (pps_floor_us > recv_idle_calc_period_us_) {
+            recv_idle_calc_period_us_ = pps_floor_us;
+        }
     }
 
     self_session_ttl_us_ = ((rtt_us << 2) + rtt_us);

@@ -194,6 +194,7 @@ PRIVATE:
     u32 rmv_close_alg_period_us_;
     u8 nack_burst_detected_;
     u8 new_gap_detected_;
+    u8 gap_nack_hold_ticks_;
     #ifdef _SELFDEBUG
     u8 debug_feedback_reason_;
     #endif

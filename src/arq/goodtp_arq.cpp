@@ -167,7 +167,16 @@ u32 GtpArq::PacketEntryList(GtpPacket *pack, GtpAddr *tran_addr, const u32 &firs
     PushPack(arq_list_, node);
 
     if ((GTP_OFF == boost_switch_) || (0 == max_boost_times_)) {
-        // Good network: boost is controlled by LinkQualityCallback.
+        return GTP_OK;
+    }
+
+    // Guard against boosting during quiet periods after an intermittent burst.
+    // After PushPack, node_num_ includes the just-added original.
+    // A small backlog means ACKs are flowing and the network is currently healthy.
+    // Only clone when backlog >= 2*(1+max_boost_times_), requiring at least
+    // (max_boost_times_+1) consecutive losses to build up before boosting kicks in.
+    const u32 boost_backlog_thresh = 2u + 2u * (u32)max_boost_times_;
+    if (arq_list_.node_num_ < boost_backlog_thresh) {
         return GTP_OK;
     }
 
