@@ -1235,7 +1235,7 @@ typedef struct _SessionPublicData {
         if (max_send_loss_per_s_ > game_fec_policy_loss_) {
             game_fec_policy_loss_ = (max_send_loss_per_s_ * 0.80f) + (game_fec_policy_loss_ * 0.20f);
         } else {
-            game_fec_policy_loss_ = (max_send_loss_per_s_ * 0.10f) + (game_fec_policy_loss_ * 0.90f);
+            game_fec_policy_loss_ = (max_send_loss_per_s_ * 0.25f) + (game_fec_policy_loss_ * 0.75f);
         }
         #endif
 

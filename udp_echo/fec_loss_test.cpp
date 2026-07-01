@@ -79,12 +79,24 @@ struct Stats {
 static Stats g_stats;
 
 /* ───────────────────── 测试参数 ───────────────────── */
-static int g_loss_pct  = 20;    /* 丢包百分比 0-100 */
+static std::atomic<int> g_loss_pct{20}; /* 丢包百分比 0-100，支持运行期动态切换 */
 static int g_pps       = 50;    /* 每秒发包数 */
 static int g_duration  = 10;    /* 测试秒数 */
 static int g_book_id   = 4;     /* FEC codebook */
 static int g_use_key   = 0;     /* 1=enable_key_模式，测试FEC包stream_key_嵌入 */
+/* spike 模式：在 spike_at_s 秒时切到 spike_pct 持续 spike_dur_s 秒，之后恢复 */
+static int g_spike_pct   = 0;   /* 0 = 不注入尖刺 */
+static int g_spike_at_s  = 0;
+static int g_spike_dur_s = 3;
 static volatile int g_running = 1;
+
+/* per-phase frame counters for spike test */
+struct PhaseStats {
+    std::atomic<uint32_t> sent{0};
+    std::atomic<uint32_t> recv{0};
+};
+static PhaseStats g_phase[3];  /* 0=pre-spike, 1=spike, 2=post-spike */
+static std::atomic<int> g_phase_idx{0};
 
 #define TEST_STREAM_KEY  0x1234567890ABCDEFULL
 
@@ -116,7 +128,7 @@ static pthread_mutex_t g_lock_b = PTHREAD_MUTEX_INITIALIZER;
 
 /* ───────────────────── 随机丢包 ───────────────────── */
 static int should_drop(void) {
-    return (rand() % 100) < g_loss_pct;
+    return (rand() % 100) < g_loss_pct.load(std::memory_order_relaxed);
 }
 
 /* ───────────────────── goodtp 回调 ───────────────────── */
@@ -138,6 +150,10 @@ static uint32_t RecvFrameCbB(GtpHandler_p hdl, void *frame, uint32_t size, GtpAd
         TestFrame *f = (TestFrame *)frame;
         if (f->magic == 0xDEADBEEF) {
             g_stats.recv_frames.fetch_add(1);
+            if (g_spike_pct > 0) {
+                int ph = g_phase_idx.load(std::memory_order_relaxed);
+                g_phase[ph].recv.fetch_add(1);
+            }
         }
     }
     return GTP_OK;
@@ -302,21 +318,33 @@ static const char *book_name(int id) {
 
 /* ───────────────────── main ───────────────────── */
 int main(int argc, char *argv[]) {
-    if (argc >= 2) g_loss_pct = atoi(argv[1]);
+    int base_loss = 20;
+    if (argc >= 2) base_loss  = atoi(argv[1]);
     if (argc >= 3) g_pps      = atoi(argv[2]);
     if (argc >= 4) g_duration = atoi(argv[3]);
     if (argc >= 5) g_book_id  = atoi(argv[4]);
     if (argc >= 6) g_use_key  = atoi(argv[5]);
+    if (argc >= 7) g_spike_pct  = atoi(argv[6]);
+    if (argc >= 8) g_spike_at_s = atoi(argv[7]);
+    if (argc >= 9) g_spike_dur_s= atoi(argv[8]);
+    g_loss_pct.store(base_loss);
 
-    if (g_loss_pct < 0 || g_loss_pct > 90) { fprintf(stderr, "loss_pct 0-90\n"); return 1; }
+    if (base_loss < 0 || base_loss > 90)   { fprintf(stderr, "loss_pct 0-90\n"); return 1; }
     if (g_pps < 1 || g_pps > 5000)         { fprintf(stderr, "pps 1-5000\n");    return 1; }
     if (g_book_id < 0 || g_book_id > 5)    { fprintf(stderr, "book_id 0-5\n");   return 1; }
 
     srand((unsigned)time(NULL));
 
     printf("=== fec_loss_test ===\n");
-    printf("loss=%d%%  pps=%d  duration=%ds  book_id=%d(%s)  use_key=%d\n\n",
-           g_loss_pct, g_pps, g_duration, g_book_id, book_name(g_book_id), g_use_key);
+    if (g_spike_pct > 0) {
+        printf("loss=%d%%  pps=%d  duration=%ds  book_id=%d(%s)  use_key=%d\n"
+               "SPIKE: at t+%ds inject %d%% loss for %ds, then back to %d%%\n\n",
+               base_loss, g_pps, g_duration, g_book_id, book_name(g_book_id), g_use_key,
+               g_spike_at_s, g_spike_pct, g_spike_dur_s, base_loss);
+    } else {
+        printf("loss=%d%%  pps=%d  duration=%ds  book_id=%d(%s)  use_key=%d\n\n",
+               base_loss, g_pps, g_duration, g_book_id, book_name(g_book_id), g_use_key);
+    }
 
     /* goodtp 模块加载 */
     if (GTP_OK != InsLoadGtpModule()) {
@@ -382,17 +410,40 @@ int main(int argc, char *argv[]) {
     pthread_create(&tid_timer, NULL, timer_thread, &ta);
 
     /* 发送循环 */
-    uint64_t interval_us = 1000000ULL / (uint64_t)g_pps;
-    uint64_t deadline    = now_us() + (uint64_t)g_duration * 1000000ULL;
-    uint64_t next_send   = now_us();
-    uint32_t seq         = 0;
+    uint64_t interval_us  = 1000000ULL / (uint64_t)g_pps;
+    uint64_t start_us     = now_us();
+    uint64_t deadline     = start_us + (uint64_t)g_duration * 1000000ULL;
+    uint64_t spike_start  = (g_spike_pct > 0) ? (start_us + (uint64_t)g_spike_at_s  * 1000000ULL) : UINT64_MAX;
+    uint64_t spike_end    = (g_spike_pct > 0) ? (spike_start + (uint64_t)g_spike_dur_s * 1000000ULL) : UINT64_MAX;
+    uint64_t next_send    = start_us;
+    uint32_t seq          = 0;
+    int      spike_active = 0;
 
     while (now_us() < deadline) {
-        if (now_us() >= next_send) {
+        uint64_t ts = now_us();
+
+        /* spike phase management */
+        if (g_spike_pct > 0) {
+            if (!spike_active && ts >= spike_start && ts < spike_end) {
+                spike_active = 1;
+                g_loss_pct.store(g_spike_pct);
+                g_phase_idx.store(1);
+                printf("[t=%.1fs] SPIKE ON: loss %d%% → %d%%\n",
+                       (ts - start_us) / 1e6, base_loss, g_spike_pct);
+            } else if (spike_active && ts >= spike_end) {
+                spike_active = 0;
+                g_loss_pct.store(base_loss);
+                g_phase_idx.store(2);
+                printf("[t=%.1fs] SPIKE OFF: loss %d%% → %d%% (recovery window)\n",
+                       (ts - start_us) / 1e6, g_spike_pct, base_loss);
+            }
+        }
+
+        if (ts >= next_send) {
             TestFrame f;
             f.magic      = 0xDEADBEEF;
             f.seq        = ++seq;
-            f.send_ts_us = now_us();
+            f.send_ts_us = ts;
             snprintf(f.payload, sizeof(f.payload), "seq=%u", seq);
 
             pthread_mutex_lock(&g_lock_a);
@@ -415,6 +466,9 @@ int main(int argc, char *argv[]) {
                 uint32_t ret = GtpFrameSend(g_inst_a.gtp_hdl, mem, sizeof(f), taddr, 0, 0);
                 if (GTP_OK == ret) {
                     g_stats.sent_frames.fetch_add(1);
+                    if (g_spike_pct > 0) {
+                        g_phase[g_phase_idx.load(std::memory_order_relaxed)].sent.fetch_add(1);
+                    }
                 } else {
                     GtpFreePackMem(g_inst_a.gtp_hdl, mem);
                 }
@@ -454,9 +508,22 @@ int main(int argc, char *argv[]) {
     printf("接收帧:      %u\n", recvd);
     printf("模拟丢包:    %u  (%.1f%%)\n", drops, sent ? drops * 100.0 / (sent + drops) : 0.0);
     printf("FEC异常日志: %u  (期望: 0)\n", anom);
-    printf("帧丢失率:    %.1f%%\n", sent ? (sent - recvd) * 100.0 / sent : 0.0);
+    printf("帧丢失率:    %.2f%%\n", sent ? (sent - recvd) * 100.0 / sent : 0.0);
     if (g_use_key) {
         printf("FEC包key正确: %u  key错误: %u  (use_key=1时统计)\n", fec_ok, fec_bad);
+    }
+
+    if (g_spike_pct > 0) {
+        printf("\n--- spike 分段完帧率 ---\n");
+        const char *pname[] = {"pre-spike (base loss)", "spike phase", "post-spike (recovery)"};
+        for (int i = 0; i < 3; ++i) {
+            uint32_t ps = g_phase[i].sent.load();
+            uint32_t pr = g_phase[i].recv.load();
+            if (ps > 0) {
+                printf("  [%d] %-28s sent=%-4u recv=%-4u delivery=%.2f%%\n",
+                       i, pname[i], ps, pr, pr * 100.0 / ps);
+            }
+        }
     }
 
     printf("\n--- 发送端(A)算法参数 ---\n%s\n", alg_buf_a);
@@ -491,12 +558,12 @@ int main(int argc, char *argv[]) {
     /* 实际因 ARQ 补足，丢帧率应明显低于原始丢包率 */
     float frame_loss_pct = sent ? (sent - recvd) * 100.0f / sent : 0.0f;
     float theoretical_fec_recovery = (g_book_id == 4 || g_book_id == 3) ? 25.0f : 0.0f;
-    if (g_loss_pct <= (int)theoretical_fec_recovery && frame_loss_pct > 5.0f) {
-        printf("[FAIL] 丢包率 %d%% 应在 FEC 可恢复范围内，但帧丢失 %.1f%%\n",
-               g_loss_pct, frame_loss_pct);
+    if (base_loss <= (int)theoretical_fec_recovery && frame_loss_pct > 5.0f) {
+        printf("[FAIL] 丢包率 %d%% 应在 FEC 可恢复范围内，但帧丢失 %.2f%%\n",
+               base_loss, frame_loss_pct);
         pass = 0;
     } else {
-        printf("[PASS] 帧丢失率 %.1f%%（原始丢包率 %d%%）\n", frame_loss_pct, g_loss_pct);
+        printf("[PASS] 帧丢失率 %.2f%%（原始丢包率 %d%%）\n", frame_loss_pct, base_loss);
     }
 
     printf("\n整体：%s\n", pass ? "PASS" : "FAIL");

@@ -203,7 +203,9 @@ void LinkQualityCallback(slid_win_hdl win_hdl, void *cntxt_hdl, const u32 &rtt_u
             goto proc_sender_network_quality_pos_;
         }
 
-        if (rmv_loss_thresheld < loss) {
+        // Only extend the timer if loss is still at or above the shutdown threshold.
+        // In the 15-25% range let the timer expire naturally so the algorithm can re-enable.
+        if (max_loss_thresheld <= loss) {
             session->rmv_close_alg_ts_us_ = ((u32)(session->last_active_ts_us_ & 0x00000000FFFFFFFF))
                                           + session->rmv_close_alg_period_us_;
             goto proc_sender_network_quality_pos_;
