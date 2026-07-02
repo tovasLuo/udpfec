@@ -319,12 +319,12 @@ fec_mode_to_default_pos_:
 
         #if (2 == APPLICATION_TYPE)
         // boost number, continue discard packet.
-        // col1 (2-10% loss): 0 for pps>=30 — FEC book5 covers this range; boost just doubles bandwidth.
+        // col1 (2-10% loss): 1 for all pps — book4 covers burst; ARQ boost adds proactive clone on backlog.
         u32 boost_alg_param[][6] = {
             // loss < 1% loss < 10% loss < 20% loss < 35% loss < 50% loss >= 50%
-            {0,          0,         2,         0,         0,         0},  // pps < 12  low-pps game
-            {0,          0,         1,         0,         0,         0},  // pps < 30  phone game
-            {0,          0,         1,         0,         0,         0},  // pps < 50  phone game
+            {0,          1,         2,         0,         0,         0},  // pps < 12  low-pps game
+            {0,          1,         1,         0,         0,         0},  // pps < 30  phone game
+            {0,          1,         1,         0,         0,         0},  // pps < 50  phone game
             {0,          1,         1,         0,         0,         0},  // pps < 90  low-rate pc game
             {0,          1,         1,         0,         0,         0},  // pps < 130 low-rate pc game
             {0,          1,         1,         0,         0,         0},  // pps < 170 medium-rate pc game
@@ -591,7 +591,7 @@ report_net_quality_cont_pos_:
         #if (2 == APPLICATION_TYPE)
         u32 max_retran_std[][6] = {
             // 25000us >= rtt, 50000us >= rtt, 100000us >= rtt, 150000us >= rtt, 250000us >= rtt, 250000us < rtt
-            {5, 5, 4, 3, 2, 2},  // 10.000001 >= loss
+            {5, 5, 5, 3, 2, 2},  // 10.000001 >= loss  (50-100ms RTT: 4→5 retrans for CS2 burst recovery)
             {5, 4, 4, 3, 3, 2},  // 20.000001 >= loss  (150-250ms: 2→3, >250ms: 1→2)
             {5, 4, 4, 3, 2, 1},  // 30.000001 >= loss  (100-150ms: 2→3, 150-250ms: 1→2)
             {5, 4, 3, 2, 1, 1},  // 40.000001 >= loss
@@ -2427,7 +2427,7 @@ u32 GtpSession::PackPostHandler(GtpPacket *pack, const u32 &size, GtpAddr *tran_
 
             #if (2 == APPLICATION_TYPE)
             if ((0 != recv_max_data_sn_) && (1 < ((i32)(pack->pack_sn_ - recv_max_data_sn_)))) {
-                gap_nack_hold_ticks_ = 3;
+                gap_nack_hold_ticks_ = 2;
             }
 
             if ((0 == recv_max_data_sn_) || (0 < ((i32)(pack->pack_sn_ - recv_max_data_sn_)))) {
@@ -3039,7 +3039,7 @@ timer_handler_continue_pos_:
     if ((GTP_ON == pb_dt_.alg_top_switch_) && (0 < gap_nack_hold_ticks_)) {
         gap_nack_hold_ticks_ -= 1;
         if (0 == gap_nack_hold_ticks_) {
-            new_gap_detected_ = 2;
+            new_gap_detected_ = 3;
         }
     }
     if ((GTP_ON == pb_dt_.alg_top_switch_) && (0 < new_gap_detected_)) {

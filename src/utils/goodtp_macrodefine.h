@@ -27,7 +27,7 @@
 #define ENABLE_INNER_VALID_CHCK   (1)
 #define ENABLE_TRACE_CODE_FLAG    (0)
 #define ENABLE_BOOST_AI_FLAG      (1)
-#define ENABLE_ARQ_BOOST_FLAG     (0)
+#define ENABLE_ARQ_BOOST_FLAG     (1)
 #define ENABLE_FRAME_COPY_OUT     (0)
 #define ENABLE_ARQ                (1)
 #define ENABLE_FEC                (1)
