@@ -179,7 +179,17 @@ void LinkQualityCallback(slid_win_hdl win_hdl, void *cntxt_hdl, const u32 &rtt_u
             rmv_loss_thresheld = (f32)RMV_RELIABLE_LOSS_THRESHLD;
         }
 
-        if (max_loss_thresheld <= loss) {
+        /* dir=down(kDownLinkerLoss)是对端反馈还没到/已过期时的本地粗糙估计（未ACK就当丢），
+           游戏模式下触发一次计算只需 MIN_CALC_LOSS_SN_NUM=3 个包（slidwin_self.h），会话中途
+           一次突发只要恰好有1-2个包还没来得及被ACK（可能只是没走完一个RTT，不是真丢），比例
+           就能冲到25%以上，被当成真实丢包瞬间关闭算法。dir=up(kUpLinkerLoss)用的是对端明确
+           反馈的fdbk_loss_，是可信数值，不受此限制。这里只对不可信的本地粗估计要求最少3个
+           "确认丢失"的包（而不是比例）才采信，避免单包未及时ACK的噪声触发误关闭；真实持续
+           丢包会在接下来几个几十ms一次的评估周期里很快攒够样本，不影响真正需要关闭的场景。 */
+        const u32 kMinDownLossConfirmSamples = 3;
+        const bool loss_confirmed = (kUpLinkerLoss == loss_dir) || (kMinDownLossConfirmSamples <= loss_num);
+
+        if ((max_loss_thresheld <= loss) && loss_confirmed) {
             if (GTP_OFF != session->pb_dt_.alg_top_switch_) {
                 session->pb_dt_.alg_top_switch_ = GTP_OFF;
 
