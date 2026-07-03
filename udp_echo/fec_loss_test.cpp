@@ -16,11 +16,20 @@
  *     指标：无 "fec restore abnormal" 错误日志，接收帧数与发送帧数匹配。
  *
  * 运行方式：
- *   cd udp_echo/build && ./fec_loss_test [loss_percent] [pps] [seconds] [book_id]
+ *   cd udp_echo/build && ./fec_loss_test [loss%] [pps] [seconds] [book_id] [use_key]
+ *                                        [spike_pct spike_at_s spike_dur_s spike_dur_ms]
+ *                                        [link_delay_ms]
  *   示例：
  *     ./fec_loss_test 20 50 10 4    # 20% 丢包，50 PPS，10s，book4(H+V 2x2)
  *     ./fec_loss_test 25 50 10 3    # 25% 丢包，50 PPS，10s，book3(全向 2x2) [TEST 2]
  *     ./fec_loss_test 20 200 15 4   # 20% 丢包，200 PPS，15s，测缓冲绕回 [TEST 3]
+ *
+ *   TEST 4 — RealtimeReorderWindow 交付顺序/静默丢弃量化（CS2 "错过" 排查）
+ *     loopback RTT≈0 时 ARQ/FEC 恢复远快于 reorder 窗口 20-30ms 的等待上限，复现不出问题，
+ *     需要用最后一个参数注入单向链路延迟（近似真实 WiFi RTT 的一半）才能让 reorder 窗口的
+ *     "等不到就跳过/丢弃" 路径真实触发。
+ *     ./fec_loss_test 9 128 30 4 0 0 0 0 0 30   # 9%丢包，128pps，30s，单向延迟30ms(≈RTT 60ms)
+ *     观察输出里的"帧丢失率" vs "内部残余丢包(r_loss)"的差值，以及"乱序交付/前跳"计数。
  */
 
 #include <stdio.h>
@@ -37,6 +46,8 @@
 #include <time.h>
 #include <stdarg.h>
 #include <atomic>
+#include <vector>
+#include <map>
 
 #include "bitlinker.h"
 
@@ -77,6 +88,27 @@ struct Stats {
 };
 
 static Stats g_stats;
+
+/* ───────────────────── 交付顺序统计（量化 RealtimeReorderWindow 影响） ─────────────────────
+ * RecvFrameCbB 只被单个接收线程调用（GoodTP 单线程约束），因此这里用普通变量即可，无需原子操作。
+ * out_of_order：交付给应用层的帧序号比之前交付过的更小，说明 GoodTP 内部的 reorder 窗口在等待
+ * 空缺超时后放弃顺序保证、先交付了后到的帧（skip-ahead）——这正是 CS2 侧"错过"可能的来源：
+ * 帧最终被交付了，但顺序被打乱，落在游戏帧的时间窗之外。
+ * max_forward_skip：单次前跳交付时，跳过的序号个数（即被跳过、大概率随后到达却被reorder窗口
+ * 直接丢弃的帧数——见 RealtimeReorderWindow::Push() 的 SnBefore(sn, expect_sn_) -> kPushDrop）。 */
+static uint32_t g_last_delivered_seq   = 0;
+static uint32_t g_out_of_order_count   = 0;
+static uint64_t g_forward_skip_total   = 0;  /* Σ(本次交付seq - 上次交付seq - 1)，即被跳过的帧数总和 */
+static uint32_t g_forward_skip_events  = 0;
+
+/* "有效可用"时间窗计数：真正决定 CS2 是否卡顿的不是"最终有没有交付"，而是"交付时是否还在游戏
+ * 能用的时间预算内"。GoodTP 层面"迟到但补投"了的帧，如果到达时已经比这几个阈值还晚，从 CS2
+ * 的角度大概率跟"彻底没收到"没有本质区别（早就被判定为错过/用插值代替了）。这里用几个粗略的
+ * 参考阈值（不知道 CS2 实际预算，取几个量级做对比）而不是只看整体 p50/p90/p99，避免"技术上
+ * 交付了"掩盖"实际上早就没用了"的问题。 */
+#define NUM_LATE_THRESHOLDS 3
+static const uint32_t g_late_threshold_us[NUM_LATE_THRESHOLDS] = {30000, 50000, 100000};
+static uint32_t g_late_over_threshold[NUM_LATE_THRESHOLDS] = {0, 0, 0};
 
 /* ───────────────────── 测试参数 ───────────────────── */
 static std::atomic<int> g_loss_pct{20}; /* 丢包百分比 0-100，支持运行期动态切换 */
@@ -163,6 +195,74 @@ static int should_drop(void) {
     return (rand() % 100) < g_loss_pct.load(std::memory_order_relaxed);
 }
 
+/* ───────────────────── 单向链路延迟模拟 ─────────────────────
+ * loopback 本身 RTT≈0，而 RealtimeReorderWindow 的 wait_us 上限只有 20-30ms——如果 ARQ/FEC
+ * 恢复也在几毫秒内完成，永远不会触发"等不到就跳过"的 drop 路径，复现不出真实 WiFi 场景下的
+ * "错过"。这里给 A→B / B→A 都加一个可配置的单向固定延迟（近似真实 WiFi RTT 的一半），让重传/FEC
+ * 恢复报文的到达时间接近真实场景，从而让 reorder 窗口的 skip-ahead/drop 行为有机会真实触发。
+ * g_link_delay_us == 0 时完全退化为原来的直通 sendto()，不影响其它已有测试用例。 */
+static int g_link_delay_us = 0;
+
+struct DelayedPacket {
+    std::vector<uint8_t> data;
+    int fd;
+    struct sockaddr_in dst;
+    socklen_t dst_len;
+};
+static std::multimap<uint64_t, DelayedPacket> g_delay_q_a2b;
+static std::multimap<uint64_t, DelayedPacket> g_delay_q_b2a;
+static pthread_mutex_t g_delay_lock_a2b = PTHREAD_MUTEX_INITIALIZER;
+static pthread_mutex_t g_delay_lock_b2a = PTHREAD_MUTEX_INITIALIZER;
+
+static void EnqueueDelayed(std::multimap<uint64_t, DelayedPacket> *q, pthread_mutex_t *lock,
+                            const void *pack, uint32_t size, int fd, const struct sockaddr_in &dst,
+                            socklen_t dst_len) {
+    DelayedPacket dp;
+    dp.data.assign((const uint8_t*)pack, (const uint8_t*)pack + size);
+    dp.fd  = fd;
+    dp.dst = dst;
+    dp.dst_len = dst_len;
+    uint64_t deliver_ts = now_us() + (uint64_t)g_link_delay_us;
+
+    pthread_mutex_lock(lock);
+    q->insert(std::make_pair(deliver_ts, dp));
+    pthread_mutex_unlock(lock);
+}
+
+static void FlushDueDelayed(std::multimap<uint64_t, DelayedPacket> *q, pthread_mutex_t *lock, uint64_t ts_us) {
+    pthread_mutex_lock(lock);
+    while (!q->empty() && q->begin()->first <= ts_us) {
+        DelayedPacket dp = q->begin()->second;
+        q->erase(q->begin());
+        pthread_mutex_unlock(lock);
+        sendto(dp.fd, dp.data.data(), dp.data.size(), 0, (struct sockaddr*)&dp.dst, dp.dst_len);
+        pthread_mutex_lock(lock);
+    }
+    pthread_mutex_unlock(lock);
+}
+
+static void *delay_dispatch_thread(void *arg) {
+    (void)arg;
+    for (;;) {
+        uint64_t ts = now_us();
+        FlushDueDelayed(&g_delay_q_a2b, &g_delay_lock_a2b, ts);
+        FlushDueDelayed(&g_delay_q_b2a, &g_delay_lock_b2a, ts);
+
+        pthread_mutex_lock(&g_delay_lock_a2b);
+        bool empty_a2b = g_delay_q_a2b.empty();
+        pthread_mutex_unlock(&g_delay_lock_a2b);
+        pthread_mutex_lock(&g_delay_lock_b2a);
+        bool empty_b2a = g_delay_q_b2a.empty();
+        pthread_mutex_unlock(&g_delay_lock_b2a);
+
+        if (!g_running && empty_a2b && empty_b2a) {
+            break;
+        }
+        usleep(500);
+    }
+    return NULL;
+}
+
 /* ───────────────────── goodtp 回调 ───────────────────── */
 static uint32_t SendPackCbA(GtpHandler_p hdl, void *pack, uint32_t size, GtpAddr *addr) {
     (void)hdl;
@@ -172,8 +272,13 @@ static uint32_t SendPackCbA(GtpHandler_p hdl, void *pack, uint32_t size, GtpAddr
         return GTP_OK;
     }
     InstCtx *ctx = (InstCtx *)addr->context_;
-    sendto(ctx->sfd_send, pack, size, 0,
-           (struct sockaddr *)&ctx->peer_addr, ctx->peer_addr_len);
+    if (g_link_delay_us > 0) {
+        EnqueueDelayed(&g_delay_q_a2b, &g_delay_lock_a2b, pack, size, ctx->sfd_send,
+                       ctx->peer_addr, ctx->peer_addr_len);
+    } else {
+        sendto(ctx->sfd_send, pack, size, 0,
+               (struct sockaddr *)&ctx->peer_addr, ctx->peer_addr_len);
+    }
     return GTP_OK;
 }
 
@@ -183,6 +288,20 @@ static uint32_t RecvFrameCbB(GtpHandler_p hdl, void *frame, uint32_t size, GtpAd
         TestFrame *f = (TestFrame *)frame;
         if (f->magic == 0xDEADBEEF) {
             g_stats.recv_frames.fetch_add(1);
+
+            /* 交付顺序检测：只在单接收线程内访问，无需加锁 */
+            if (0 != g_last_delivered_seq) {
+                if (f->seq <= g_last_delivered_seq) {
+                    g_out_of_order_count += 1;
+                } else if (f->seq > g_last_delivered_seq + 1) {
+                    g_forward_skip_total  += (f->seq - g_last_delivered_seq - 1);
+                    g_forward_skip_events += 1;
+                }
+            }
+            if (f->seq > g_last_delivered_seq) {
+                g_last_delivered_seq = f->seq;
+            }
+
             int ph = (g_spike_pct > 0) ? g_phase_idx.load(std::memory_order_relaxed) : 0;
             if (g_spike_pct > 0) {
                 g_phase[ph].recv.fetch_add(1);
@@ -190,6 +309,15 @@ static uint32_t RecvFrameCbB(GtpHandler_p hdl, void *frame, uint32_t size, GtpAd
             uint64_t nu = now_us();
             if (nu > f->send_ts_us) {
                 uint32_t lat = (uint32_t)(nu - f->send_ts_us);
+                /* 减去人为注入的单向网络延迟——那是模拟真实物理传输时间，CS2 的可用时间预算
+                 * 本来就要把它算进去，不是 GoodTP 自己造成的"额外"延迟。这里只关心 GoodTP
+                 * 自身（reorder窗口/ARQ等待）在网络传输之外又加了多少。 */
+                uint32_t extra_lat = (lat > (uint32_t)g_link_delay_us) ? (lat - (uint32_t)g_link_delay_us) : 0;
+                for (int th = 0; th < NUM_LATE_THRESHOLDS; ++th) {
+                    if (extra_lat > g_late_threshold_us[th]) {
+                        g_late_over_threshold[th] += 1;
+                    }
+                }
                 uint32_t pos = g_lat_num[ph].fetch_add(1);
                 if (pos < MAX_LAT_SAMPLES) {
                     g_lat_us[ph][pos] = lat;
@@ -219,8 +347,13 @@ static uint32_t SendPackCbB(GtpHandler_p hdl, void *pack, uint32_t size, GtpAddr
         return GTP_OK;
     }
     InstCtx *ctx = (InstCtx *)addr->context_;
-    sendto(ctx->sfd_send, pack, size, 0,
-           (struct sockaddr *)&ctx->peer_addr, ctx->peer_addr_len);
+    if (g_link_delay_us > 0) {
+        EnqueueDelayed(&g_delay_q_b2a, &g_delay_lock_b2a, pack, size, ctx->sfd_send,
+                       ctx->peer_addr, ctx->peer_addr_len);
+    } else {
+        sendto(ctx->sfd_send, pack, size, 0,
+               (struct sockaddr *)&ctx->peer_addr, ctx->peer_addr_len);
+    }
     return GTP_OK;
 }
 
@@ -380,6 +513,7 @@ int main(int argc, char *argv[]) {
     if (argc >= 8) g_spike_at_s = atoi(argv[7]);
     if (argc >= 9) g_spike_dur_s= atoi(argv[8]);
     if (argc >= 10) g_spike_dur_ms = atoi(argv[9]);
+    if (argc >= 11) g_link_delay_us = atoi(argv[10]) * 1000;  /* 单向延迟，单位ms，模拟真实WiFi RTT/2 */
     g_loss_pct.store(base_loss);
 
     if (base_loss < 0 || base_loss > 90)   { fprintf(stderr, "loss_pct 0-90\n"); return 1; }
@@ -457,10 +591,11 @@ int main(int argc, char *argv[]) {
     RecvThreadArg rb = {&g_inst_b, g_inst_b.gtp_hdl, &g_lock_b};
     TimerArg      ta = {g_inst_a.gtp_hdl, g_inst_b.gtp_hdl, &g_lock_a, &g_lock_b};
 
-    pthread_t tid_ra, tid_rb, tid_timer;
+    pthread_t tid_ra, tid_rb, tid_timer, tid_delay;
     pthread_create(&tid_ra,    NULL, recv_thread, &ra);
     pthread_create(&tid_rb,    NULL, recv_thread, &rb);
     pthread_create(&tid_timer, NULL, timer_thread, &ta);
+    pthread_create(&tid_delay, NULL, delay_dispatch_thread, NULL);
 
     /* 发送循环 */
     uint64_t interval_us  = 1000000ULL / (uint64_t)g_pps;
@@ -536,10 +671,16 @@ int main(int argc, char *argv[]) {
         usleep(100);
     }
 
+    /* 在真正停掉收包线程之前，先把延迟队列里还在"飞行中"的报文排空，否则会被当成额外丢包 */
+    if (g_link_delay_us > 0) {
+        usleep((useconds_t)g_link_delay_us + 50000);
+    }
+
     g_running = 0;
     pthread_join(tid_ra,    NULL);
     pthread_join(tid_rb,    NULL);
     pthread_join(tid_timer, NULL);
+    pthread_join(tid_delay, NULL);
 
     /* 读取算法参数 */
     uint8_t alg_buf_a[4096] = {0};
@@ -551,6 +692,17 @@ int main(int argc, char *argv[]) {
     GetAlgorithmParam(g_inst_a.gtp_hdl, ip_a, ip_b, alg_buf_a, sizeof(alg_buf_a));
     GetAlgorithmParam(g_inst_b.gtp_hdl, ip_b, ip_a, alg_buf_b, sizeof(alg_buf_b));
 
+    /* 从 B（接收端）算法参数串里取出 r_loss（GoodTP 内部认为的、FEC/ARQ恢复后仍未收到的残余丢包率，
+     * 即"内部真实丢包"）。注意这是在 dedup 过滤后、DeliverFrameInOrder/reorder窗口之前统计的，
+     * 与应用层最终拿到的帧数无关——两者之间的差值就是 reorder 窗口自己造成的额外丢帧。 */
+    float internal_r_loss_pct = -1.0f;
+    {
+        const char *p = strstr((const char*)alg_buf_b, "r_loss=");
+        if (p) {
+            sscanf(p, "r_loss=%f%%", &internal_r_loss_pct);
+        }
+    }
+
     /* 结果报告 */
     uint32_t sent     = g_stats.sent_frames.load();
     uint32_t recvd    = g_stats.recv_frames.load();
@@ -558,15 +710,43 @@ int main(int argc, char *argv[]) {
     uint32_t anom     = g_stats.fec_anomaly.load();
     uint32_t fec_ok   = g_stats.fec_key_ok.load();
     uint32_t fec_bad  = g_stats.fec_key_bad.load();
+    float    frame_loss_pct_r = sent ? (sent - recvd) * 100.0f / sent : 0.0f;
 
     printf("\n========== 结果 ==========\n");
     printf("发送帧:      %u\n", sent);
     printf("接收帧:      %u\n", recvd);
     printf("模拟丢包:    %u  (%.1f%%)\n", drops, sent ? drops * 100.0 / (sent + drops) : 0.0);
     printf("FEC异常日志: %u  (期望: 0)\n", anom);
-    printf("帧丢失率:    %.2f%%\n", sent ? (sent - recvd) * 100.0 / sent : 0.0);
+    printf("帧丢失率(应用层最终拿到的):    %.2f%%\n", frame_loss_pct_r);
+    if (internal_r_loss_pct >= 0.0f) {
+        printf("内部残余丢包(r_loss，FEC/ARQ恢复后、reorder窗口之前): %.2f%%\n", internal_r_loss_pct);
+        float gap = frame_loss_pct_r - internal_r_loss_pct;
+        printf("疑似 reorder 窗口额外丢弃 = 帧丢失率 - r_loss = %.2f%%%s\n", gap,
+               (gap > 0.5f) ? "  <-- 显著，怀疑是 CS2 \"错过\" 的来源" : "");
+    }
     if (g_use_key) {
         printf("FEC包key正确: %u  key错误: %u  (use_key=1时统计)\n", fec_ok, fec_bad);
+    }
+
+    printf("\n--- 交付顺序（量化 RealtimeReorderWindow 影响） ---\n");
+    printf("乱序交付次数(seq回退):      %u  (%.3f%% of recv)\n",
+           g_out_of_order_count, recvd ? g_out_of_order_count * 100.0 / recvd : 0.0);
+    printf("前跳事件数(跳过空缺提前交付): %u\n", g_forward_skip_events);
+    printf("被跳过的帧数总和:            %llu  (跳过后若还能到达，会被 reorder 窗口 kPushDrop 丢弃)\n",
+           (unsigned long long)g_forward_skip_total);
+
+    /* "真丢失"只是下限——技术上交付了但迟到太多，从 CS2 的角度大概率跟没收到一样会被算成
+     * "错过"。用几个参考阈值把这两类合并成一个更贴近 CS2 侧观感的"有效错过率"，而不是只看
+     * 帧丢失率。 */
+    printf("\n--- 有效可用时间窗（GoodTP自身在网络传输之外又加的延迟，扣除了注入的单向网络延迟%dms）---\n",
+           g_link_delay_us / 1000);
+    for (int th = 0; th < NUM_LATE_THRESHOLDS; ++th) {
+        uint32_t too_late = g_late_over_threshold[th];
+        float too_late_pct = sent ? too_late * 100.0f / sent : 0.0f;
+        float effective_miss_pct = frame_loss_pct_r + too_late_pct;
+        printf("  阈值>%3ums: 迟到交付=%u(%.2f%%)  真丢失=%.2f%%  有效错过(丢失+迟到)=%.2f%%%s\n",
+               g_late_threshold_us[th] / 1000, too_late, too_late_pct, frame_loss_pct_r, effective_miss_pct,
+               (effective_miss_pct > 3.0f) ? "  <-- 超过CS2观察到的3%卡顿阈值" : "");
     }
 
     if (g_spike_pct > 0) {

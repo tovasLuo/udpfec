@@ -261,6 +261,7 @@ PRIVATE:
 
     RealtimeReorderWindow realtime_reorder_win_;
     u64 realtime_reorder_next_deliver_ts_us_;
+    u64 realtime_reorder_late_rescue_;  // kPushStaleDeliver 命中次数，观测"迟到补投"触发频率
 
 PRIVATE:
     u32 rtt_us_;

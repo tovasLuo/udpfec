@@ -1104,7 +1104,8 @@ GtpSession::GtpSession(const goodtp_sock &sfd, const u8 dst_sock_addr[], const u
     arq_node_mem_pool_(arq_node_mem_pool),
     pack_mem_pool_(pack_mem_pool),
     realtime_reorder_win_(),
-    realtime_reorder_next_deliver_ts_us_(0) {
+    realtime_reorder_next_deliver_ts_us_(0),
+    realtime_reorder_late_rescue_(0) {
     win_mem_s_  = GtpAlignSessionMem(((u8*)this) + sizeof(GtpSession));
     win_mem_r_  = GtpAlignSessionMem(win_mem_s_ + SlidwinInstanceSize());
     filter_mem_ = GtpAlignSessionMem(win_mem_r_ + SlidwinInstanceSize());
@@ -1192,7 +1193,8 @@ GtpSession::GtpSession(GtpAddr *tran_addr, const GtpHandler &gtp_hdl, GtpMemPool
     arq_node_mem_pool_(arq_node_mem_pool),
     pack_mem_pool_(pack_mem_pool),
     realtime_reorder_win_(),
-    realtime_reorder_next_deliver_ts_us_(0) {
+    realtime_reorder_next_deliver_ts_us_(0),
+    realtime_reorder_late_rescue_(0) {
     win_mem_s_  = GtpAlignSessionMem(((u8*)this) + sizeof(GtpSession));
     win_mem_r_  = GtpAlignSessionMem(win_mem_s_ + SlidwinInstanceSize());
     filter_mem_ = GtpAlignSessionMem(win_mem_r_ + SlidwinInstanceSize());
@@ -2833,6 +2835,21 @@ u32 GtpSession::CalcRealtimeReorderWaitUs() const {
         max_wait_us = 20000;
     }
 
+    /* 上面这几档固定上限只是按 FEC 补齐节奏估的，跟真实 RTT 无关。真实 WiFi/公网下 ARQ 的
+       NACK+重传往返经常超过 20-30ms，等待窗口不够长会频繁触发 skip-ahead，转化成不必要的乱序
+       交付。这里用持续更新的 RTT 测量值（pb_dt_.rtt_us_，见 RttHandler()）把上限适度抬高，
+       覆盖大约一次 NACK+重传往返；loopback/局域网 rtt_us_ 很小，这段基本不生效。 */
+    if (0 != pb_dt_.rtt_us_) {
+        const u32 rtt_based_wait_us = (pb_dt_.rtt_us_ * 3) / 2;
+        if (max_wait_us < rtt_based_wait_us) {
+            max_wait_us = rtt_based_wait_us;
+        }
+    }
+    const u32 kAbsoluteWaitCeilingUs = 60000;
+    if (max_wait_us > kAbsoluteWaitCeilingUs) {
+        max_wait_us = kAbsoluteWaitCeilingUs;
+    }
+
     if (max_wait_us < wait_us) {
         return max_wait_us;
     }
@@ -2967,12 +2984,20 @@ u32 GtpSession::DeliverFrameInOrder(GtpHandler_p gtp_hdl, const u32 &first_sn, c
     const u64 ts_us = last_active_ts_us_;
     RealtimeReorderWindow::PushResult push_result =
         realtime_reorder_win_.Push(first_sn, frame, frame_size, *tran_addr, ts_us);
-    if (RealtimeReorderWindow::kPushDirect == push_result) {
+    if ((RealtimeReorderWindow::kPushDirect == push_result)
+     || (RealtimeReorderWindow::kPushStaleDeliver == push_result)) {
+        if (RealtimeReorderWindow::kPushStaleDeliver == push_result) {
+            realtime_reorder_late_rescue_ += 1;
+        }
+
         #ifdef _SELFDEBUG
         GtpLog(cb_.write_log_cb_, kGtpSessionMd, kGtpLogLevelDebug,
-               "%s:%u<-->%s:%u realtime reorder directly delivered packet(sn=%u cache_num=%u now=%lluus).\r\n",
+               "%s:%u<-->%s:%u realtime reorder %s packet(sn=%u expect_sn=%u cache_num=%u now=%lluus).\r\n",
                pb_dt_.self_ip_, (u32)(pb_dt_.self_port_), pb_dt_.peer_ip_, (u32)(pb_dt_.peer_port_),
-               first_sn, realtime_reorder_win_.Count(), (unsigned long long)ts_us);
+               (RealtimeReorderWindow::kPushDirect == push_result) ? "directly delivered" :
+               "late-rescue delivered(out-of-order)",
+               first_sn, realtime_reorder_win_.ExpectSn(), realtime_reorder_win_.Count(),
+               (unsigned long long)ts_us);
         #endif
         u32 ret_value = DeliverFrameNow(gtp_hdl, frame, frame_size, tran_addr);
         if (GTP_OK != ret_value) {
@@ -3816,6 +3841,12 @@ u32 GtpSession::PrintAlgorithmParam(u8 *out_str, const u32 &mem_size) {
     PrintAfterHandlerReturn(str_len, wrt_num, free_sz, wrt_pos);
 
     wrt_num = (u32)snprintf((char*)wrt_pos, free_sz, "\r\n");
+    PrintAfterHandlerReturn(str_len, wrt_num, free_sz, wrt_pos);
+
+    wrt_num = (u32)snprintf((char*)wrt_pos, free_sz,
+                            "\r\n realtime_reorder: rtt=%uus late_rescue=%llu (曾被reorder窗口跳过、"
+                            "迟到后旁路补投的帧数)",
+                            pb_dt_.rtt_us_, (unsigned long long)realtime_reorder_late_rescue_);
     PrintAfterHandlerReturn(str_len, wrt_num, free_sz, wrt_pos);
 
     wrt_num = (u32)snprintf((char*)wrt_pos, free_sz, "\r\n%s=%lluus\r\n%s=%lluus\r\n%s=%lluus\r\n%s=%lluus",

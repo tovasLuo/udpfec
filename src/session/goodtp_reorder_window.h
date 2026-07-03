@@ -8,9 +8,10 @@
 class RealtimeReorderWindow {
  public:
     enum PushResult {
-        kPushDrop = 0,
+        kPushDrop = 0,      // 真正的重复包（同一sn已在缓存中），静默丢弃语义不变
         kPushDirect,
-        kPushCached
+        kPushCached,
+        kPushStaleDeliver   // expect_sn_已越过此sn（迟到的FEC/ARQ恢复包），不缓存，旁路立即交付
     };
 
     struct Frame {

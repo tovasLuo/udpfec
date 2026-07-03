@@ -148,7 +148,7 @@ RealtimeReorderWindow::PushResult RealtimeReorderWindow::Push(const u32 &sn, con
     }
 
     if (SnBefore(sn, expect_sn_)) {
-        return kPushDrop;
+        return kPushStaleDeliver;
     }
 
     if ((0 == count_) && (sn == expect_sn_)) {
