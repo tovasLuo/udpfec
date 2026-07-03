@@ -3844,8 +3844,7 @@ u32 GtpSession::PrintAlgorithmParam(u8 *out_str, const u32 &mem_size) {
     PrintAfterHandlerReturn(str_len, wrt_num, free_sz, wrt_pos);
 
     wrt_num = (u32)snprintf((char*)wrt_pos, free_sz,
-                            "\r\n realtime_reorder: rtt=%uus late_rescue=%llu (曾被reorder窗口跳过、"
-                            "迟到后旁路补投的帧数)",
+                            "\r\n realtime_reorder: rtt=%uus late_rescue=%llu",
                             pb_dt_.rtt_us_, (unsigned long long)realtime_reorder_late_rescue_);
     PrintAfterHandlerReturn(str_len, wrt_num, free_sz, wrt_pos);
 
