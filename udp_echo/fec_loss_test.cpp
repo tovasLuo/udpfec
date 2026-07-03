@@ -84,10 +84,13 @@ static int g_pps       = 50;    /* 每秒发包数 */
 static int g_duration  = 10;    /* 测试秒数 */
 static int g_book_id   = 4;     /* FEC codebook */
 static int g_use_key   = 0;     /* 1=enable_key_模式，测试FEC包stream_key_嵌入 */
-/* spike 模式：在 spike_at_s 秒时切到 spike_pct 持续 spike_dur_s 秒，之后恢复 */
+/* spike 模式：在 spike_at_s 秒时切到 spike_pct 持续 spike_dur_s 秒，之后恢复
+ * spike_dur_ms（若非0）覆盖 spike_dur_s，用于模拟"瞬间连续丢几个包"（几十~几百ms）而非
+ * 持续数秒的高丢包率，更贴近真实 wifi 微卡顿场景。 */
 static int g_spike_pct   = 0;   /* 0 = 不注入尖刺 */
 static int g_spike_at_s  = 0;
 static int g_spike_dur_s = 3;
+static int g_spike_dur_ms = 0;  /* 0 = 使用 g_spike_dur_s；否则以毫秒为准，覆盖秒参数 */
 static volatile int g_running = 1;
 
 /* per-phase frame counters for spike test */
@@ -97,6 +100,35 @@ struct PhaseStats {
 };
 static PhaseStats g_phase[3];  /* 0=pre-spike, 1=spike, 2=post-spike */
 static std::atomic<int> g_phase_idx{0};
+
+/* frame delivery latency samples (send_ts -> app deliver), bucketed per phase */
+#define MAX_LAT_SAMPLES 8192
+static uint32_t g_lat_us[3][MAX_LAT_SAMPLES];
+static std::atomic<uint32_t> g_lat_num[3];
+
+/* fine-grained (100ms) latency time series: recorded by RECEIVE time, so we can see
+ * exactly how long delivery stays delayed after a short loss burst. */
+#define LAT_BUCKET_US 100000ULL
+#define MAX_LAT_BUCKETS 900  /* 90s @ 100ms */
+static std::atomic<uint64_t> g_lat_bucket_sum_us[MAX_LAT_BUCKETS];
+static std::atomic<uint32_t> g_lat_bucket_cnt[MAX_LAT_BUCKETS];
+static std::atomic<uint32_t> g_lat_bucket_max_us[MAX_LAT_BUCKETS];
+
+/* per-second wire-byte counters (actual bytes handed to sendto(), including
+ * FEC parity packets and ARQ retransmissions), to observe bandwidth over
+ * time around a loss spike. */
+#define MAX_BW_SECONDS 600
+static std::atomic<uint64_t> g_bytes_a2b[MAX_BW_SECONDS]; /* A->B: data+FEC+retrans */
+static std::atomic<uint64_t> g_bytes_b2a[MAX_BW_SECONDS]; /* B->A: ack/nack/rtt */
+static uint64_t g_bw_start_us = 0;
+
+static inline void AcctBytes(std::atomic<uint64_t> *bucket, uint64_t ts_us, uint64_t start_us, uint32_t size) {
+    if (ts_us < start_us) return;
+    uint64_t sec = (ts_us - start_us) / 1000000ULL;
+    if (sec < MAX_BW_SECONDS) {
+        bucket[sec].fetch_add(size, std::memory_order_relaxed);
+    }
+}
 
 #define TEST_STREAM_KEY  0x1234567890ABCDEFULL
 
@@ -134,6 +166,7 @@ static int should_drop(void) {
 /* ───────────────────── goodtp 回调 ───────────────────── */
 static uint32_t SendPackCbA(GtpHandler_p hdl, void *pack, uint32_t size, GtpAddr *addr) {
     (void)hdl;
+    AcctBytes(g_bytes_a2b, now_us(), g_bw_start_us, size);
     if (should_drop()) {
         g_stats.dropped_at_net.fetch_add(1);
         return GTP_OK;
@@ -150,9 +183,27 @@ static uint32_t RecvFrameCbB(GtpHandler_p hdl, void *frame, uint32_t size, GtpAd
         TestFrame *f = (TestFrame *)frame;
         if (f->magic == 0xDEADBEEF) {
             g_stats.recv_frames.fetch_add(1);
+            int ph = (g_spike_pct > 0) ? g_phase_idx.load(std::memory_order_relaxed) : 0;
             if (g_spike_pct > 0) {
-                int ph = g_phase_idx.load(std::memory_order_relaxed);
                 g_phase[ph].recv.fetch_add(1);
+            }
+            uint64_t nu = now_us();
+            if (nu > f->send_ts_us) {
+                uint32_t lat = (uint32_t)(nu - f->send_ts_us);
+                uint32_t pos = g_lat_num[ph].fetch_add(1);
+                if (pos < MAX_LAT_SAMPLES) {
+                    g_lat_us[ph][pos] = lat;
+                }
+                if (nu >= g_bw_start_us) {
+                    uint64_t bkt = (nu - g_bw_start_us) / LAT_BUCKET_US;
+                    if (bkt < MAX_LAT_BUCKETS) {
+                        g_lat_bucket_sum_us[bkt].fetch_add(lat, std::memory_order_relaxed);
+                        g_lat_bucket_cnt[bkt].fetch_add(1, std::memory_order_relaxed);
+                        uint32_t cur_max = g_lat_bucket_max_us[bkt].load(std::memory_order_relaxed);
+                        while (lat > cur_max &&
+                               !g_lat_bucket_max_us[bkt].compare_exchange_weak(cur_max, lat)) {}
+                    }
+                }
             }
         }
     }
@@ -161,6 +212,7 @@ static uint32_t RecvFrameCbB(GtpHandler_p hdl, void *frame, uint32_t size, GtpAd
 
 static uint32_t SendPackCbB(GtpHandler_p hdl, void *pack, uint32_t size, GtpAddr *addr) {
     (void)hdl;
+    AcctBytes(g_bytes_b2a, now_us(), g_bw_start_us, size);
     /* B→A 方向（ACK/NACK/RTT）同样随机丢包，模拟真实双向网络丢包 */
     if (should_drop()) {
         g_stats.dropped_at_net.fetch_add(1);
@@ -178,8 +230,8 @@ static uint32_t RecvFrameCbA(GtpHandler_p hdl, void *frame, uint32_t size, GtpAd
 }
 
 static void LogCb(uint32_t level, const char *fmt, ...) {
-    /* 只打印 ERROR 及以上，并统计 FEC 异常 */
-    if (level > 3) return;
+    /* 打印 WARNING 及以上（含 alg on/off 切换），并统计 FEC 异常 */
+    if (level > 4) return;
 
     char buf[512];
     va_list ap;
@@ -191,11 +243,11 @@ static void LogCb(uint32_t level, const char *fmt, ...) {
         g_stats.fec_anomaly.fetch_add(1);
     }
 
-    static const char *lv[] = {"EMRG","ALRT","CRIT","ERR"};
-    printf("[gtp-%s] %s", lv[level], buf);
+    static const char *lv[] = {"EMRG","ALRT","CRIT","ERR","WARN"};
+    printf("[t=%.2fs][gtp-%s] %s", (now_us() - g_bw_start_us) / 1e6, lv[level], buf);
 }
 
-static uint32_t LogLevelCb(void) { return 3; /* kGtpLogLevelError */ }
+static uint32_t LogLevelCb(void) { return 4; /* kGtpLogLevelWarning: surface alg on/off transitions */ }
 
 /* ───────────────────── 接收线程 ───────────────────── */
 typedef struct RecvThreadArg {
@@ -327,6 +379,7 @@ int main(int argc, char *argv[]) {
     if (argc >= 7) g_spike_pct  = atoi(argv[6]);
     if (argc >= 8) g_spike_at_s = atoi(argv[7]);
     if (argc >= 9) g_spike_dur_s= atoi(argv[8]);
+    if (argc >= 10) g_spike_dur_ms = atoi(argv[9]);
     g_loss_pct.store(base_loss);
 
     if (base_loss < 0 || base_loss > 90)   { fprintf(stderr, "loss_pct 0-90\n"); return 1; }
@@ -412,9 +465,12 @@ int main(int argc, char *argv[]) {
     /* 发送循环 */
     uint64_t interval_us  = 1000000ULL / (uint64_t)g_pps;
     uint64_t start_us     = now_us();
+    g_bw_start_us         = start_us;
     uint64_t deadline     = start_us + (uint64_t)g_duration * 1000000ULL;
+    uint64_t spike_dur_us = (g_spike_dur_ms > 0) ? (uint64_t)g_spike_dur_ms * 1000ULL
+                                                  : (uint64_t)g_spike_dur_s * 1000000ULL;
     uint64_t spike_start  = (g_spike_pct > 0) ? (start_us + (uint64_t)g_spike_at_s  * 1000000ULL) : UINT64_MAX;
-    uint64_t spike_end    = (g_spike_pct > 0) ? (spike_start + (uint64_t)g_spike_dur_s * 1000000ULL) : UINT64_MAX;
+    uint64_t spike_end    = (g_spike_pct > 0) ? (spike_start + spike_dur_us) : UINT64_MAX;
     uint64_t next_send    = start_us;
     uint32_t seq          = 0;
     int      spike_active = 0;
@@ -528,6 +584,64 @@ int main(int argc, char *argv[]) {
 
     printf("\n--- 发送端(A)算法参数 ---\n%s\n", alg_buf_a);
     printf("--- 接收端(B)算法参数 ---\n%s\n", alg_buf_b);
+
+    /* frame latency percentiles per phase */
+    {
+        printf("\n--- 帧延迟(发送->上层交付) ---\n");
+        const char *pn[] = {"pre-spike", "spike", "post-spike"};
+        int nph = (g_spike_pct > 0) ? 3 : 1;
+        for (int ph = 0; ph < nph; ++ph) {
+            uint32_t n = g_lat_num[ph].load();
+            if (n > MAX_LAT_SAMPLES) n = MAX_LAT_SAMPLES;
+            if (0 == n) continue;
+            /* insertion-free percentile: qsort a copy */
+            static uint32_t tmp[MAX_LAT_SAMPLES];
+            memcpy(tmp, g_lat_us[ph], n * sizeof(uint32_t));
+            qsort(tmp, n, sizeof(uint32_t),
+                  [](const void *a, const void *b) -> int {
+                      uint32_t x = *(const uint32_t *)a, y = *(const uint32_t *)b;
+                      return (x > y) - (x < y);
+                  });
+            printf("  [%-10s] n=%-5u p50=%.1fms p90=%.1fms p99=%.1fms max=%.1fms\n",
+                   (g_spike_pct > 0) ? pn[ph] : "all", n,
+                   tmp[n / 2] / 1000.0, tmp[(uint32_t)(n * 0.90)] / 1000.0,
+                   tmp[(uint32_t)(n * 0.99)] / 1000.0, tmp[n - 1] / 1000.0);
+        }
+    }
+
+    /* fine-grained (100ms) latency time series, to see the shape/duration of a delay
+     * spike after a short burst rather than a diluted whole-phase average. */
+    if (g_spike_pct > 0) {
+        printf("\n--- 逐 100ms 延迟(围绕 spike 前后 %ds) ---\n", 5);
+        uint64_t win_start = (spike_start > start_us + 2000000ULL) ? (spike_start - 2000000ULL) : start_us;
+        uint64_t win_end   = spike_end + 5000000ULL;
+        uint64_t b0 = (win_start - start_us) / LAT_BUCKET_US;
+        uint64_t b1 = (win_end   - start_us) / LAT_BUCKET_US;
+        if (b1 >= MAX_LAT_BUCKETS) b1 = MAX_LAT_BUCKETS - 1;
+        printf("%-8s %-6s %-10s %-10s\n", "t(s)", "n", "avg(ms)", "max(ms)");
+        for (uint64_t b = b0; b <= b1; ++b) {
+            uint32_t cnt = g_lat_bucket_cnt[b].load();
+            if (0 == cnt) continue;
+            double avg = (g_lat_bucket_sum_us[b].load() / (double)cnt) / 1000.0;
+            double mx  = g_lat_bucket_max_us[b].load() / 1000.0;
+            double t   = (b * LAT_BUCKET_US) / 1e6;
+            const char *mark = (t >= (spike_start - start_us) / 1e6 && t < (spike_end - start_us) / 1e6) ? " <-spike" : "";
+            printf("%-8.2f %-6u %-10.2f %-10.2f%s\n", t, cnt, avg, mx, mark);
+        }
+    }
+
+    /* per-second bandwidth table (actual wire bytes incl. FEC + retrans) */
+    printf("\n--- 逐秒带宽(A->B 含FEC/重传, B->A 为ACK/NACK) ---\n");
+    printf("%-4s %-12s %-12s %s\n", "sec", "A->B(KB)", "A->B(Mbps)", "note");
+    for (int i = 0; i < g_duration && i < MAX_BW_SECONDS; ++i) {
+        uint64_t b = g_bytes_a2b[i].load();
+        const char *note = "";
+        if (g_spike_pct > 0) {
+            if (i >= g_spike_at_s && i < g_spike_at_s + g_spike_dur_s) note = "<- spike";
+            else if (i >= g_spike_at_s + g_spike_dur_s && i < g_spike_at_s + g_spike_dur_s + 8) note = "<- recovery";
+        }
+        printf("%-4d %-12.1f %-12.3f %s\n", i, b / 1024.0, (b * 8.0) / 1e6, note);
+    }
 
     /* 结论 */
     printf("\n========== 判定 ==========\n");

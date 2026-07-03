@@ -192,7 +192,11 @@ void LinkQualityCallback(slid_win_hdl win_hdl, void *cntxt_hdl, const u32 &rtt_u
                        max_loss_thresheld, loss, ((kUpLinkerLoss == loss_dir) ? "up" : "down"));
             }
 
-            session->rmv_close_alg_period_us_ = 1500000 + (session->last_active_ts_us_ & 0x00000000000FFFFF);
+            // Base cooldown 400-660ms (was 1500-2548ms): a wifi micro-stall typically clears
+            // in a few hundred ms, and the real re-enable gate below now also requires an
+            // actually-observed low-loss window (rmv_loss_thresheld), so this floor only needs
+            // to absorb single-window noise, not stand in as the sole safety margin.
+            session->rmv_close_alg_period_us_ = 400000 + (session->last_active_ts_us_ & 0x0003FFFF);
             session->rmv_close_alg_ts_us_     = ((u32)(session->last_active_ts_us_ & 0x00000000FFFFFFFF))
                                               + session->rmv_close_alg_period_us_;
 
@@ -211,7 +215,12 @@ void LinkQualityCallback(slid_win_hdl win_hdl, void *cntxt_hdl, const u32 &rtt_u
             goto proc_sender_network_quality_pos_;
         }
 
-        if (session->rmv_close_alg_ts_us_ > ((u32)(session->last_active_ts_us_ & 0x00000000FFFFFFFF))) {
+        // Re-enable needs both: cooldown elapsed AND the current window actually back under
+        // rmv_loss_thresheld. Previously this only checked the timer, so a link still sitting
+        // at 15-25% loss right when the timer expired would get re-enabled anyway; now a
+        // genuinely-still-bad link keeps getting re-evaluated instead of flapping back on early.
+        if ((session->rmv_close_alg_ts_us_ > ((u32)(session->last_active_ts_us_ & 0x00000000FFFFFFFF)))
+         || (rmv_loss_thresheld <= loss)) {
             goto proc_sender_network_quality_pos_;
         }
 
@@ -1058,6 +1067,7 @@ GtpSession::GtpSession(const goodtp_sock &sfd, const u8 dst_sock_addr[], const u
     nack_burst_detected_(0),
     new_gap_detected_(0),
     gap_nack_hold_ticks_(0),
+    elevated_loss_streak_(0),
     #ifdef _SELFDEBUG
     debug_feedback_reason_(kGtpFeedbackDebugUnknown),
     #endif
@@ -1145,6 +1155,7 @@ GtpSession::GtpSession(GtpAddr *tran_addr, const GtpHandler &gtp_hdl, GtpMemPool
     nack_burst_detected_(0),
     new_gap_detected_(0),
     gap_nack_hold_ticks_(0),
+    elevated_loss_streak_(0),
     #ifdef _SELFDEBUG
     debug_feedback_reason_(kGtpFeedbackDebugUnknown),
     #endif
@@ -3258,6 +3269,19 @@ void GtpSession::SecondTimerHandler(const u64 &cur_ts_us, ConsumeTime *wheel_con
 
     pb_dt_.SecondTimerHandler(cur_ts_us);
 
+    #if (2 == APPLICATION_TYPE)
+    // pb_dt_.max_send_loss_per_s_ now holds the peak loss seen in the second that just
+    // ended. A single isolated burst only pushes this past 10% for the one second it
+    // happened in; a genuinely degrading link keeps doing it every second.
+    if (10.0f <= pb_dt_.max_send_loss_per_s_) {
+        if (250 > elevated_loss_streak_) {
+            elevated_loss_streak_ += 1;
+        }
+    } else {
+        elevated_loss_streak_ = 0;
+    }
+    #endif
+
     ai_learn_sn_delta_ = pb_dt_.recv_stat_.data_pack_pps_ + (pb_dt_.recv_stat_.data_pack_pps_ >> 1);
     if (MIN_MIX_QUINTUPLET_THRESHOLD > ai_learn_sn_delta_) {
         ai_learn_sn_delta_ = MIN_MIX_QUINTUPLET_THRESHOLD;
@@ -3510,8 +3534,17 @@ u8 GtpSession::CalcGameFecPolicy(void) const {
         policy_loss = 1.0f;
     }
 
-    const u32 loss_idx = CalcGameFecTableLossIndex(policy_loss);
+    u32 loss_idx = CalcGameFecTableLossIndex(policy_loss);
     const u32 pps_idx  = CalcGameFecTablePpsIndex(policy_pps);
+
+    // The 10-25% row jumps to book4 (2x2, double the parity overhead of book5). Only take
+    // that jump once the elevated loss has actually persisted across 2+ seconds; an isolated
+    // sub-second burst is long since recovered by ARQ before this redundancy could ever help,
+    // so escalating for it is pure wasted bandwidth. Sustained bad links still escalate
+    // normally after the second consecutive high-loss second.
+    if ((2 == loss_idx) && (2 > elevated_loss_streak_)) {
+        loss_idx = 1;
+    }
 
     return game_fec_policy_table[loss_idx][pps_idx];
     #else

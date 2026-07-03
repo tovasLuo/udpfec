@@ -1235,7 +1235,11 @@ typedef struct _SessionPublicData {
         if (max_send_loss_per_s_ > game_fec_policy_loss_) {
             game_fec_policy_loss_ = (max_send_loss_per_s_ * 0.80f) + (game_fec_policy_loss_ * 0.20f);
         } else {
-            game_fec_policy_loss_ = (max_send_loss_per_s_ * 0.25f) + (game_fec_policy_loss_ * 0.75f);
+            // fall weight raised 0.25->0.42: a single burst spike used to take ~7s to decay
+            // below the book5 threshold (2%), keeping FEC at the 2x overhead book4 long after
+            // a brief wifi stall cleared. 0.42 cuts the decay tail to ~3-4s while still holding
+            // the redundancy up for a couple seconds after a spike as a safety margin.
+            game_fec_policy_loss_ = (max_send_loss_per_s_ * 0.42f) + (game_fec_policy_loss_ * 0.58f);
         }
         #endif
 

@@ -195,6 +195,11 @@ PRIVATE:
     u8 nack_burst_detected_;
     u8 new_gap_detected_;
     u8 gap_nack_hold_ticks_;
+    // Consecutive 1s windows where the per-second loss peak stayed >=10%. A lone short
+    // burst only ever bumps this to 1 (the very next second is clean again), so gating
+    // the FEC book4 upgrade on streak>=2 in CalcGameFecPolicy() keeps isolated spikes from
+    // triggering a redundancy ramp that always arrives after ARQ has already recovered them.
+    u8 elevated_loss_streak_;
     #ifdef _SELFDEBUG
     u8 debug_feedback_reason_;
     #endif
