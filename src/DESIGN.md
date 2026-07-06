@@ -402,9 +402,7 @@ App: GtpFrameSend(frame, size, tran_addr)
   │     ├─ pack_sn_++            分配发送序号
   │     └─ fec2.Encode(pack)     填 FEC 矩阵，满行/列发 FEC 冗余包
   │
-  ├─ GtpHeaderNewToOld(pack) ── 发送前版本兼容转换
   ├─ cb.send_pack_cb_() ──────── 回调：应用层通过 UDP 发出
-  ├─ GtpHeaderOldToNew(pack) ── 恢复本地格式
   │
   └─ session.FramePostHandler()
         ├─ SnEntrySlidWin(data_win_s_, sn)  登记发送窗口
@@ -512,7 +510,7 @@ u32  GtpShowAlgorithmParam(GtpHandler_p gtp_hdl, ...);
 `CheckSingleThreadCalling()` 检测同一实例被多线程调用（警告不强制），库的设计预期每个 `GoodTp` 实例由单一线程驱动，线程安全性由调用方保证。多路并发请创建多个实例（最多 64 个）。
 
 ### 版本兼容
-发包前 `GtpHeaderNewToOld()` 临时将头部格式转为旧版本格式，发包后 `GtpHeaderOldToNew()` 恢复，实现与旧版本协议的无缝互操作。
+不再兼容旧协议版本（v0/v1 已废弃删除），收发两端必须是同一个 `GTP_VERSION`，入口处 `GtpIsAcceptablePeerVersion()` 拒绝版本不匹配的对端。以后升级协议、新增按版本区分的特性统一通过 `GtpVersionAtLeast(ver, min_ver)` 判断，不再靠散落各处的魔数比较或整函数复制。
 
 ### 混合可靠性模式
 - **实时流（kRealTimeStream）**：FEC + ARQ 并行，容忍少量丢包换取低延迟

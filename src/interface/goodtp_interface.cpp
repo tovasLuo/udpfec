@@ -279,14 +279,12 @@ u32 GtpFrameSend(GtpHandler_p gtp_hdl, void *frame, u32 size, GtpAddr *tran_addr
     }
 
     first_sn = pack->pack_sn_;
-    if ((0x02 <= pack->goodtp_ver_) && (GTP_YES == pack->has_chg_zone_)) {
+    if (GTP_YES == pack->has_chg_zone_) {
         const ChangeZone *chg_zone = GtpGetPacketChangeZone(pack);
         if (NULL != chg_zone) {
             first_sn = chg_zone->sort_sn_;
         }
     }
-
-    GtpHeaderNewToOld(pack, session->pb_dt_.peer_version_);
 
     // step2: calling call back function to send packet.
     #if (1 == ENABLE_MD_PERF_CHECK)
@@ -302,8 +300,6 @@ u32 GtpFrameSend(GtpHandler_p gtp_hdl, void *frame, u32 size, GtpAddr *tran_addr
     #else
     nret = gtp_obj->cb_.send_pack_cb_(gtp_hdl, pack, pack_size, tran_addr);
     #endif
-
-    GtpHeaderOldToNew(pack);
 
     if (GTP_OK != nret) {
         GtpLog(gtp_obj->cb_.write_log_cb_, kGtpInterfaceMd, kGtpLogLevelError, "%s:%u<-->%s:%u calling "\
@@ -457,34 +453,13 @@ inline u32 InnerCheckPacketInvalid(const GtpPacket *pack, const u32 &size) {
     u32 header_offset = 0;
 
     // offset check.
-    switch (pack->goodtp_ver_) {
-    case 0x00: {
-        header_offset = CalcHeaderOffset(pack);
-        if (header_offset != pack->header_offset_) {
-            nret = GEN_ERR(kGtpInterfaceMd, kGtpPackHeaderErr);
-        }
-        break;
-    }
-
-    case 0x01: {
-        header_offset = CalcHeaderOffset(pack);
-        if (header_offset > pack->header_offset_) {
-            nret = GEN_ERR(kGtpInterfaceMd, kGtpPackHeaderErr);
-        }
-        break;
-    }
-
-    case 0x02: {
-        header_offset = CalcHeaderOffset(pack);
-        if (header_offset > pack->header_offset_) {
-            nret = GEN_ERR(kGtpInterfaceMd, kGtpPackHeaderErr);
-        }
-        break;
-    }
-
-    default: {
+    if (GTP_NO == GtpIsAcceptablePeerVersion(pack->goodtp_ver_)) {
         nret = GEN_ERR(kGtpInterfaceMd, kUnknownGtpVerErr);
-    }
+    } else {
+        header_offset = CalcHeaderOffset(pack);
+        if (header_offset > pack->header_offset_) {
+            nret = GEN_ERR(kGtpInterfaceMd, kGtpPackHeaderErr);
+        }
     }
 
     if (GTP_OK != nret) {
@@ -522,17 +497,10 @@ u32 GtpCheckPacketInvalid(void *pack, u32 pack_size, u64 *stream_key) {
         RETURN_ERR(kGtpInterfaceMd, kGtpPackLengthErr);
     }
 
-    u32 org_value  = GtpReadU32Unaligned(pack);
-    u32 check_rslt = GTP_OK;
-
-    GtpHeaderOldToNew(pack);
-
-    check_rslt = InnerCheckPacketInvalid((GtpPacket*)pack, pack_size);
+    u32 check_rslt = InnerCheckPacketInvalid((GtpPacket*)pack, pack_size);
     if ((GTP_OK == check_rslt) && (NULL != stream_key)) {
         *stream_key = GtpReadPacketStreamKey((GtpPacket*)pack);
     }
-
-    GtpWriteU32Unaligned(pack, org_value);
 
     return check_rslt;
 }
@@ -607,8 +575,10 @@ u32 GtpPacketReceive(GtpHandler_p gtp_hdl, void *pack, u32 pack_sz, GtpAddr *tra
     }
     #endif
 
-    if (0x00 == gtp_pack->goodtp_ver_) {
-        GtpLog(gtp_obj->cb_.write_log_cb_, kGtpInterfaceMd, kGtpLogLevelError, "The client version is too old.\r\n");
+    if (GTP_NO == GtpIsAcceptablePeerVersion(gtp_pack->goodtp_ver_)) {
+        GtpLog(gtp_obj->cb_.write_log_cb_, kGtpInterfaceMd, kGtpLogLevelError,
+               "The peer's protocol version(0x%02x) is incompatible, only 0x%02x is supported.\r\n",
+               (u32)(gtp_pack->goodtp_ver_), (u32)GTP_VERSION);
         RETURN_ERR(kGtpMgrMd, kPeerVerTooOldErr);
     }
 
@@ -643,12 +613,6 @@ u32 GtpPacketReceive(GtpHandler_p gtp_hdl, void *pack, u32 pack_sz, GtpAddr *tra
                (i32)GtpGetThreadId());
     }
     #endif
-
-    #if (1 == ENABLE_INNER_VALID_CHCK)
-    u32 org_value = GtpReadU32Unaligned(pack);
-    #endif
-
-    GtpHeaderOldToNew(pack);
 
     #if (1 == ENABLE_INTERFACE_LOG)
     u8 self_ip[GTP_MAX_STR_IP_SZ] = {0};
@@ -707,20 +671,11 @@ u32 GtpPacketReceive(GtpHandler_p gtp_hdl, void *pack, u32 pack_sz, GtpAddr *tra
                (u32)(gtp_pack->pack_type_), (u32)(gtp_pack->pack_size_), pack_sz, gtp_pack->pack_sn_, nret,
                (i32)GtpGetProcessId(), (i32)GtpGetThreadId());
 
-        if (0x00 == gtp_pack->goodtp_ver_) {
-            GtpWriteU32Unaligned(pack, org_value);  // restore original value.
-        }
-
         return nret;
     }
     #endif
 
-    if (0x02 > gtp_pack->goodtp_ver_) {
-        gtp_pack->has_chg_zone_ = GTP_NO;
-        gtp_pack->stream_type_  = kRealTimeStream;
-    }
-
-    if ((((u8)(GtpPackType::kGtpDataPackType)) == gtp_pack->pack_type_) && (0x02 <= gtp_pack->goodtp_ver_)) {
+    if (((u8)(GtpPackType::kGtpDataPackType)) == gtp_pack->pack_type_) {
         tran_addr->stream_type_ = gtp_pack->stream_type_;
     }
 
@@ -734,7 +689,7 @@ u32 GtpPacketReceive(GtpHandler_p gtp_hdl, void *pack, u32 pack_sz, GtpAddr *tra
 
     u32 sort_sn = 0;
     u32 sort_sn_valid = GTP_NO;
-    if ((0x01 < gtp_pack->goodtp_ver_) && (GTP_YES == gtp_pack->has_chg_zone_)) {
+    if (GTP_YES == gtp_pack->has_chg_zone_) {
         const ChangeZone *chg_zone = GtpGetPacketChangeZone(gtp_pack);
         if (NULL != chg_zone) {
             sort_sn = chg_zone->sort_sn_;
@@ -791,7 +746,7 @@ u32 GtpPacketReceive(GtpHandler_p gtp_hdl, void *pack, u32 pack_sz, GtpAddr *tra
         session->pb_dt_.peer_version_ = gtp_pack->goodtp_ver_;
     }
 
-    if ((((u8)(GtpPackType::kGtpDataPackType)) == gtp_pack->pack_type_) && (0x02 <= gtp_pack->goodtp_ver_)
+    if ((((u8)(GtpPackType::kGtpDataPackType)) == gtp_pack->pack_type_)
      && (session->pb_dt_.tran_addr_.stream_type_ != gtp_pack->stream_type_)) {
         session->pb_dt_.tran_addr_.stream_type_ = gtp_pack->stream_type_;
     }
@@ -884,7 +839,7 @@ u32 GtpPacketReceive(GtpHandler_p gtp_hdl, void *pack, u32 pack_sz, GtpAddr *tra
     tran_addr->timestamp_ = session->pb_dt_.tran_addr_.timestamp_;
 
     #if (1 == ENABLE_FRAME_COPY_OUT)
-    if ((kRealTimeStream == session->pb_dt_.tran_addr_.stream_type_) || (0x02 > gtp_pack->goodtp_ver_)) {
+    if (kRealTimeStream == session->pb_dt_.tran_addr_.stream_type_) {
         mem_spec = GtpPackSizeToMemSpec(frame_size);
     } else {
         mem_spec = GtpPackSizeToMemSpec(pack_size);
@@ -901,7 +856,7 @@ u32 GtpPacketReceive(GtpHandler_p gtp_hdl, void *pack, u32 pack_sz, GtpAddr *tra
         goto pack_receive_exit_pos_;
     }
 
-    if ((kRealTimeStream == session->pb_dt_.tran_addr_.stream_type_) || (0x02 > gtp_pack->goodtp_ver_)) {
+    if (kRealTimeStream == session->pb_dt_.tran_addr_.stream_type_) {
         memcpy(out_mem, frame, frame_size);
         frame = out_mem;
     } else {
@@ -920,7 +875,7 @@ u32 GtpPacketReceive(GtpHandler_p gtp_hdl, void *pack, u32 pack_sz, GtpAddr *tra
            pack_sn, first_sn);
     #endif
 
-    if ((0x02 <= gtp_pack->goodtp_ver_) && (GTP_YES == gtp_pack->has_chg_zone_)) {
+    if (GTP_YES == gtp_pack->has_chg_zone_) {
         const ChangeZone *chg_zone = GtpGetPacketChangeZone(gtp_pack);
         if (NULL != chg_zone) {
             deliver_first_sn = chg_zone->sort_sn_;

@@ -48,6 +48,17 @@
 
 #define GTP_VERSION               (0x02)
 
+// 统一版本判断入口：以后升级协议、新增按版本区分的特性，一律用这个宏判断，
+// 不要在各处手写魔数比较。
+// GtpVersionAtLeast 是给"未来"特性门禁用的通用">="判断（比如新协议版本引入可选
+// 字段、且新旧版本仍能互通时，用它判断"对端够不够新，能不能用这个新特性"）。
+#define GtpVersionAtLeast(ver, min_ver)      ((u8)((ver) >= (min_ver)))
+
+// 入口"能不能通话"用严格相等：目前不知道未来更高版本会强制新增什么必须理解的
+// 字段，宁可拒绝也不要用当前版本的解析逻辑去误读一个更高版本的包。等真的引入
+// 向前兼容的新版本时，再把这里放宽成 GtpVersionAtLeast(ver, MIN_ACCEPT_VER)。
+#define GtpIsAcceptablePeerVersion(ver)       ((u8)((ver) == GTP_VERSION))
+
 #define MIN_STACK_SIZE            (1024 << 9)
 
 #define GtpLimit(min, max, value) ((((min) > (value)) ? (min) : (((max) < (value)) ? (max) : (value))))
@@ -250,9 +261,6 @@
 #define goodtp_assertb(expression, retval) {\
 }
 #endif
-
-#define CalcRightGtpVer(self_ver, peer_ver) ((uint8_t)((0x00 == (self_ver)) ? 0x00:\
-                                             ((0xFF == (peer_ver)) ? GTP_VERSION : (peer_ver))))
 
 enum class GtpPackType: uint8_t {
     kGtpDataPackType       = 0x01,

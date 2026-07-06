@@ -80,8 +80,10 @@ session 层    GtpSession                单链路聚合体：三大算法组件
 
 **不得在运行时混用两套参数**，切换必须重新编译。
 
-### 包头格式兼容性
-发包前必须调用 `GtpHeaderNewToOld(pack, peer_version)` 转换为旧格式，发包后调用 `GtpHeaderOldToNew(pack)` 恢复，以兼容 `peer_version == 0x00` 的旧版本端。不得省略这两个宏调用。
+### 协议版本兼容性
+不再兼容旧版本对端（v0/v1 已废弃删除，`GtpHeaderNewToOld`/`GtpHeaderOldToNew` 等位域转换宏及 v1 专属组包函数已移除）。收发两端必须是同一个 `GTP_VERSION`；入口处 `GtpIsAcceptablePeerVersion()`（`goodtp_macrodefine.h`）会拒绝任何版本不匹配的对端（返回 `kPeerVerTooOldErr`）。
+
+以后升级协议、新增按版本区分的特性，一律通过 `GtpVersionAtLeast(ver, min_ver)` 判断，不要手写魔数比较或复制整个函数（历史上 `FramePrepHandlerWith01`/`FramePrepHandlerWithSelfVer` 的重复写法就是前车之鉴）。`peer_version_` 字段本身保留，用于学习对端版本、驱动入口拒绝检查、未来特性判断。
 
 ### 内存安全
 - `TranBufElement` 两端写有魔数（`0x5a` / `0x5aa55aa5`），改动内存分配逻辑时必须保持魔数完整性
@@ -101,9 +103,7 @@ GtpFrameSend
   → GoodTp::GetSession()               // 查找或懒创建 session
   → session.CalcMaxFramePeriod()
   → session.FramePrepHandler()          // 写包头 + pack_sn_++ + FEC 编码
-  → GtpHeaderNewToOld()                 // 兼容旧版本
   → cb_.send_pack_cb_()                 // 回调：应用 UDP 发出
-  → GtpHeaderOldToNew()
   → session.FramePostHandler()          // 登记发送滑窗 + 入 ARQ 链表
 ```
 

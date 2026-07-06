@@ -1398,7 +1398,7 @@ hill_fec_encode_exit_pos_:
 }
 
 void GtpFec2::SendFecCodePacket(Fec2CodePackMgr &fec_code_mgr, u32 *capacity) {
-    fec_code_mgr.fec_pack_->goodtp_ver_     = CalcRightGtpVer(GTP_VERSION, pb_dt_->peer_version_);
+    fec_code_mgr.fec_pack_->goodtp_ver_     = (u8)GTP_VERSION;
     fec_code_mgr.fec_pack_->header_offset_  = (u8)sizeof(GtpPacket);
     fec_code_mgr.fec_pack_->cache_us_flag_  = GTP_NO;
     fec_code_mgr.fec_pack_->has_loss_flag_  = GTP_NO;

@@ -2017,8 +2017,6 @@ u32 GtpSendPackCallBack(GtpHandler_p gtp_hdl, void *pack, u32 size, GtpAddr *tra
 
     u32 nret = GTP_OK;
 
-    GtpHeaderNewToOld(pack, session->pb_dt_.peer_version_);
-
     #if (1 == ENABLE_MD_PERF_CHECK)
     {
     u64 app_consume_us = GtpSysTimestampUs();

@@ -66,15 +66,6 @@ class GtpSession {
     u32 FramePrepHandler(void *frame, const u32 &frame_size, GtpPacket **out_pack, u32 *out_pack_size,
                     const u32 &hash, const u32 &user_id, const u32 &first_pack_sn = 0, const u32 &resend_num = 0);
 
-    u32 FramePrepHandlerWithSelfVer(void *frame, const u32 &frame_size, GtpPacket **out_pack, u32 *out_pack_size,
-                    const u32 &hash, const u32 &user_id, const u32 &first_pack_sn = 0, const u32 &resend_num = 0);
-
-    u32 FramePrepHandlerWithPeerVer(void *frame, const u32 &frame_size, GtpPacket **out_pack, u32 *out_pack_size,
-                    const u32 &hash, const u32 &user_id, const u32 &first_pack_sn = 0, const u32 &resend_num = 0);
-
-    u32 FramePrepHandlerWith01(void *frame, const u32 &frame_size, GtpPacket **out_pack, u32 *out_pack_size,
-                    const u32 &hash, const u32 &user_id, const u32 &first_pack_sn = 0, const u32 &resend_num = 0);
-
     u32 FilterRealtimeNackOffsets(const NackData *nack_data, u16 *out_nack, const u32 &max_nack_num,
                                   const u64 &ts_us) const;
 
@@ -165,7 +156,6 @@ PRIVATE:
                       const u32 &chg_status_flag);
     void RttHandler(const u32 &rtt_us);
     u32  CalcHeaderSize(const u32 &hash, const u32 &user_id, const u32 &resend_num);
-    u32  CalcHeaderSizeVersion01(const u32 &hash, const u32 &user_id, const u32 &resend_num);
     u32  PrintHarqParam(u8 *out_str, const u32 &mem_size);
     u32  DeliverFrameNow(GtpHandler_p gtp_hdl, const u8 *frame, const u32 &frame_size, GtpAddr *tran_addr);
     u32  CalcRealtimeReorderBaseIntervalUs() const;
