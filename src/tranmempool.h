@@ -1609,9 +1609,9 @@ PRIVATE:
         recovery_->last_check_time = current_time_us;
 
         while (recovery_->push_top_pos != current_pos) {
-            if (NULL != recovery_->ring_mem_vec[current_pos].tran_buf_element) {
-                if (MAX_USED_BUF_TIME_S > (current_time_us
-                                                  - recovery_->ring_mem_vec[current_pos].tran_buf_element->used_time_us)) {
+            TranbufElement *current_element = recovery_->ring_mem_vec[current_pos].tran_buf_element;
+            if (NULL != current_element) {
+                if (MAX_USED_BUF_TIME_S > (current_time_us - current_element->used_time_us)) {
                     break;
                 }
 
@@ -1626,28 +1626,23 @@ PRIVATE:
                 if ((recovery_->push_top_pos != pre_pos)
                  && (NULL != recovery_->ring_mem_vec[pre_pos].tran_buf_element)
                  && ((recovery_->ring_mem_vec[pre_pos].tran_buf_element->used_time_us
-                    > recovery_->ring_mem_vec[current_pos].tran_buf_element->used_time_us)
+                    > current_element->used_time_us)
                   || (recovery_->ring_mem_vec[pre_pos].tran_buf_element
-                   == recovery_->ring_mem_vec[current_pos].tran_buf_element))) {
+                   == current_element))) {
                     recovery_->ring_mem_vec[pre_pos].tran_buf_element = NULL;
                 }
 
-                if (recovery_->ring_mem_vec[current_pos].tran_buf_element->current_pack_pos <
-                    recovery_->ring_mem_vec[current_pos].tran_buf_element->sub_last_malloc_pos) {
-                    used_time_length_us = current_time_us
-                                        - recovery_->ring_mem_vec[current_pos].tran_buf_element->used_time_us;
+                if (current_element->current_pack_pos < current_element->sub_last_malloc_pos) {
+                    used_time_length_us = current_time_us - current_element->used_time_us;
                     average_used_time_per_item_us_ = (float)((float)(average_used_time_per_item_us_ * 0.6  // NOLINT
                                                    + (float)used_time_length_us * 0.4));  // NOLINT
 
-                    recovery_->ring_mem_vec[current_pos].tran_buf_element->referenceCounter    = 0;
-                    recovery_->ring_mem_vec[current_pos].tran_buf_element->usedFlag            = 0;
-                    recovery_->ring_mem_vec[current_pos].tran_buf_element->used_time_us        = 0;
-                    recovery_->ring_mem_vec[current_pos].tran_buf_element->current_pack_pos    =
-                                    &(recovery_->ring_mem_vec[current_pos].tran_buf_element->tran_buf_mem[BUF_OFFSET_SIZE]);
-                    recovery_->ring_mem_vec[current_pos].tran_buf_element->current_malloc_pos  =
-                                    &(recovery_->ring_mem_vec[current_pos].tran_buf_element->tran_buf_mem[BUF_OFFSET_SIZE]);
-                    recovery_->ring_mem_vec[current_pos].tran_buf_element->sub_last_malloc_pos =
-                                    &(recovery_->ring_mem_vec[current_pos].tran_buf_element->tran_buf_mem[BUF_OFFSET_SIZE]);
+                    current_element->referenceCounter    = 0;
+                    current_element->usedFlag            = 0;
+                    current_element->used_time_us        = 0;
+                    current_element->current_pack_pos    = &(current_element->tran_buf_mem[BUF_OFFSET_SIZE]);
+                    current_element->current_malloc_pos  = &(current_element->tran_buf_mem[BUF_OFFSET_SIZE]);
+                    current_element->sub_last_malloc_pos = &(current_element->tran_buf_mem[BUF_OFFSET_SIZE]);
 
                     recovery_->ring_mem_vec[current_pos].tran_buf_element = NULL;
 

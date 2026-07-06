@@ -243,6 +243,20 @@ inline u32 PackSnToMatrixId(const u32 &pack_sn, const u32 &block_size) {
     return matrix_id;
 }
 
+inline u32 TryRecvMatrixIdByBlockSize(const Fec2EnDeCodeMatrix decode_matrix[], const u32 &pack_sn,
+                                      const u32 &block_size) {
+    u32 matrix_id = PackSnToMatrixId(pack_sn, block_size);
+
+    if ((MAX_RECV_FEC2_MATRIX_NUM > matrix_id)
+     && (GTP_YES == decode_matrix[matrix_id].using_flag_)
+     && (block_size == decode_matrix[matrix_id].matrix_size_)
+     && (decode_matrix[matrix_id].start_pack_sn_ == PackSnToStartSn(pack_sn, block_size))) {
+        return matrix_id;
+    }
+
+    return MAX_RECV_FEC2_MATRIX_NUM;
+}
+
 void XorEncode(u8 *data, const u32 &data_size, u8 *code, const u32 &code_size, u32 *out_coded_size) {
     u32 xor_num      = 0;
     u32 nloop        = 0;
@@ -271,7 +285,28 @@ xor_code_start_pos_:
     xor_num     = (data_size >> 4);
     encoded_num = (xor_num << 4);
 
-    for (nloop = 0; xor_num > nloop; ++nloop) {
+    while ((nloop + 4) <= xor_num) {
+        const u32 offset = (nloop << 4);
+        __m128i data_vec0 = _mm_loadu_si128((const __m128i*)(data + offset));
+        __m128i data_vec1 = _mm_loadu_si128((const __m128i*)(data + offset + 16));
+        __m128i data_vec2 = _mm_loadu_si128((const __m128i*)(data + offset + 32));
+        __m128i data_vec3 = _mm_loadu_si128((const __m128i*)(data + offset + 48));
+        __m128i code_vec0 = _mm_loadu_si128((const __m128i*)(code + offset));
+        __m128i code_vec1 = _mm_loadu_si128((const __m128i*)(code + offset + 16));
+        __m128i code_vec2 = _mm_loadu_si128((const __m128i*)(code + offset + 32));
+        __m128i code_vec3 = _mm_loadu_si128((const __m128i*)(code + offset + 48));
+        code_vec0 = _mm_xor_si128(code_vec0, data_vec0);
+        code_vec1 = _mm_xor_si128(code_vec1, data_vec1);
+        code_vec2 = _mm_xor_si128(code_vec2, data_vec2);
+        code_vec3 = _mm_xor_si128(code_vec3, data_vec3);
+        _mm_storeu_si128((__m128i*)(code + offset), code_vec0);
+        _mm_storeu_si128((__m128i*)(code + offset + 16), code_vec1);
+        _mm_storeu_si128((__m128i*)(code + offset + 32), code_vec2);
+        _mm_storeu_si128((__m128i*)(code + offset + 48), code_vec3);
+        nloop += 4;
+    }
+
+    for (; xor_num > nloop; ++nloop) {
         const u32 offset = (nloop << 4);
         __m128i data_vec = _mm_loadu_si128((const __m128i*)(data + offset));
         __m128i code_vec = _mm_loadu_si128((const __m128i*)(code + offset));
@@ -282,7 +317,28 @@ xor_code_start_pos_:
     xor_num     = (data_size >> 4);
     encoded_num = (xor_num << 4);
 
-    for (nloop = 0; xor_num > nloop; ++nloop) {
+    while ((nloop + 4) <= xor_num) {
+        const u32 offset = (nloop << 4);
+        uint8x16_t data_vec0 = vld1q_u8(data + offset);
+        uint8x16_t data_vec1 = vld1q_u8(data + offset + 16);
+        uint8x16_t data_vec2 = vld1q_u8(data + offset + 32);
+        uint8x16_t data_vec3 = vld1q_u8(data + offset + 48);
+        uint8x16_t code_vec0 = vld1q_u8(code + offset);
+        uint8x16_t code_vec1 = vld1q_u8(code + offset + 16);
+        uint8x16_t code_vec2 = vld1q_u8(code + offset + 32);
+        uint8x16_t code_vec3 = vld1q_u8(code + offset + 48);
+        code_vec0 = veorq_u8(code_vec0, data_vec0);
+        code_vec1 = veorq_u8(code_vec1, data_vec1);
+        code_vec2 = veorq_u8(code_vec2, data_vec2);
+        code_vec3 = veorq_u8(code_vec3, data_vec3);
+        vst1q_u8(code + offset, code_vec0);
+        vst1q_u8(code + offset + 16, code_vec1);
+        vst1q_u8(code + offset + 32, code_vec2);
+        vst1q_u8(code + offset + 48, code_vec3);
+        nloop += 4;
+    }
+
+    for (; xor_num > nloop; ++nloop) {
         const u32 offset = (nloop << 4);
         uint8x16_t data_vec = vld1q_u8(data + offset);
         uint8x16_t code_vec = vld1q_u8(code + offset);
@@ -293,7 +349,36 @@ xor_code_start_pos_:
     xor_num     = (data_size >> 3);
     encoded_num = (xor_num << 3);
 
-    for (nloop = 0; xor_num > nloop; ++nloop) {
+    while ((nloop + 4) <= xor_num) {
+        const u32 offset = (nloop << 3);
+        u64 data_value0 = 0;
+        u64 data_value1 = 0;
+        u64 data_value2 = 0;
+        u64 data_value3 = 0;
+        u64 code_value0 = 0;
+        u64 code_value1 = 0;
+        u64 code_value2 = 0;
+        u64 code_value3 = 0;
+        memcpy(&data_value0, data + offset, sizeof(data_value0));
+        memcpy(&data_value1, data + offset + 8, sizeof(data_value1));
+        memcpy(&data_value2, data + offset + 16, sizeof(data_value2));
+        memcpy(&data_value3, data + offset + 24, sizeof(data_value3));
+        memcpy(&code_value0, code + offset, sizeof(code_value0));
+        memcpy(&code_value1, code + offset + 8, sizeof(code_value1));
+        memcpy(&code_value2, code + offset + 16, sizeof(code_value2));
+        memcpy(&code_value3, code + offset + 24, sizeof(code_value3));
+        code_value0 ^= data_value0;
+        code_value1 ^= data_value1;
+        code_value2 ^= data_value2;
+        code_value3 ^= data_value3;
+        memcpy(code + offset, &code_value0, sizeof(code_value0));
+        memcpy(code + offset + 8, &code_value1, sizeof(code_value1));
+        memcpy(code + offset + 16, &code_value2, sizeof(code_value2));
+        memcpy(code + offset + 24, &code_value3, sizeof(code_value3));
+        nloop += 4;
+    }
+
+    for (; xor_num > nloop; ++nloop) {
         const u32 offset = (nloop << 3);
         u64 data_value = 0;
         u64 code_value = 0;
@@ -464,22 +549,30 @@ inline encode_pos BuildHillPosVec(const Fec2EnDeCodeMatrix &matrix, const Fec2Co
     return 0;
 }
 
-inline encode_pos CalcHillBitPos(const Fec2EnDeCodeMatrix &matrix, const Fec2CodeDir &fec_encode_dir,
-                                 const encode_pos &fec_encode_pos, const goodtp_pos &cache_pos,
-                                 pLogCallBack write_log_cb) {
-    goodtp_pos pos_vec[MAX_FEC2_HILL_SIZE] = {0};
-    encode_pos pos_num = BuildHillPosVec(matrix, fec_encode_dir, fec_encode_pos, pos_vec, MAX_FEC2_HILL_SIZE,
+inline encode_pos BuildHillEncodeInfo(const Fec2EnDeCodeMatrix &matrix, const Fec2CodeDir &fec_encode_dir,
+                                      const encode_pos &fec_encode_pos, const goodtp_pos &cache_pos,
+                                      goodtp_pos out_pos_vec[], const u32 &out_vec_size, encode_pos *bit_pos,
+                                      pLogCallBack write_log_cb) {
+    if (NULL != bit_pos) {
+        *bit_pos = INVALID_ENCODE_POS;
+    }
+
+    encode_pos pos_num = BuildHillPosVec(matrix, fec_encode_dir, fec_encode_pos, out_pos_vec, out_vec_size,
                                          write_log_cb);
     encode_pos i = 0;
 
     while (pos_num > i) {
-        if (cache_pos == pos_vec[i]) {
-            return i;
+        if (cache_pos == out_pos_vec[i]) {
+            if (NULL != bit_pos) {
+                *bit_pos = i;
+            }
+            break;
         }
+
         i += 1;
     }
 
-    return INVALID_ENCODE_POS;
+    return pos_num;
 }
 
 inline i32 DoCorrection(const volatile u32 &org_value, const u8 &k, const CorrectionAct &act) {
@@ -718,6 +811,28 @@ inline u32 CheckRestoredFec2Pack(GtpPacket *pack, const u32 &restored_size, cons
     }
 
     return GTP_OK;
+}
+
+inline u32 CheckSameFecCodePack(const Fec2CodePack *cached_pack, const Fec2CodePack *new_pack) {
+    if ((NULL == cached_pack) || (NULL == new_pack)) {
+        return GTP_NO;
+    }
+
+    if ((cached_pack->pack_sn_ != new_pack->pack_sn_)
+     || (cached_pack->code_book_id_ != new_pack->code_book_id_)
+     || (cached_pack->fec_encode_dir_ != new_pack->fec_encode_dir_)
+     || (cached_pack->fec_encode_pos_ != new_pack->fec_encode_pos_)
+     || (cached_pack->encode_bit_map_ != new_pack->encode_bit_map_)
+     || (cached_pack->code_len_ != new_pack->code_len_)
+     || (cached_pack->pack_size_ != new_pack->pack_size_)) {
+        return GTP_NO;
+    }
+
+    if (0 != memcmp(cached_pack->fec_code_, new_pack->fec_code_, (u32)(new_pack->code_len_))) {
+        return GTP_NO;
+    }
+
+    return GTP_YES;
 }
 
 GtpFec2::GtpFec2(pSendPackCallBack send_pack_cb, pLogCallBack write_log_cb, TranMemPool &pack_mem_pool,
@@ -971,7 +1086,11 @@ fec2_decode_judge_book_chg_pos_:
     }
 
     if (NULL != fec_cache) {
-        CachedFecEncodePack(fec_cache, fec_code_pack);
+        u32 repeat_flag = GTP_NO;
+        u32 cache_ret = CachedFecEncodePack(fec_cache, fec_code_pack, &repeat_flag);
+        if ((GTP_OK != cache_ret) || (GTP_YES == repeat_flag)) {
+            return cache_ret;
+        }
 
         TryRecoveryPackByFecPack((encode_pos)(fec_code_pack->fec_encode_pos_),
                                  (Fec2CodeDir)(fec_code_pack->fec_encode_dir_), decode_.decode_matrix_[matrix_id]);
@@ -981,11 +1100,7 @@ fec2_decode_judge_book_chg_pos_:
 }
 
 u32 GtpFec2::CacheDataPack(GtpPacket *pack, const u64 &ts_us) {
-    #if (1 == ENABLE_FRAME_COPY_OUT)
-    GtpPackCacheStru *cache = decode_.fec_buf_.PushPack(pack, GTP_YES);
-    #else
     GtpPackCacheStru *cache = decode_.fec_buf_.PushPack(pack, GTP_NO);
-    #endif
 
     if (NULL == cache) {
         GtpLog(write_log_cb_, kGtpFecMd, kGtpLogLevelError, "Cache packet into fec2 buffer failedly.\r\n");
@@ -1015,6 +1130,10 @@ void GtpFec2::ChangeFecMode(const u32 &new_code_book_id) {
 
     using_fec_book_id_ = new_code_book_id;
     return;
+}
+
+u8 GtpFec2::RecvFecBookId(void) const {
+    return decode_.code_book_id_;
 }
 
 void GtpFec2::SetEmptyFecEnCode(const u32 &send_fec_pack_flag) {
@@ -1140,11 +1259,11 @@ block_encode_start_pos_:
         encode_pos fec_encode_pos = CalcHillEncodePos(encode_.encode_matrix_, h_pos, v_pos,
                                                       Fec2CodeDir::kUpHill, write_log_cb_);
         if (INVALID_ENCODE_POS != fec_encode_pos) {
-            encode_pos bit_pos = CalcHillBitPos(encode_.encode_matrix_, Fec2CodeDir::kUpHill, fec_encode_pos,
-                                                CalcPosInPackCache(pack->pack_sn_), write_log_cb_);
             goodtp_pos pos_vec[MAX_FEC2_HILL_SIZE] = {0};
-            encode_pos bit_num = BuildHillPosVec(encode_.encode_matrix_, Fec2CodeDir::kUpHill, fec_encode_pos,
-                                                 pos_vec, MAX_FEC2_HILL_SIZE, write_log_cb_);
+            encode_pos bit_pos = INVALID_ENCODE_POS;
+            encode_pos bit_num = BuildHillEncodeInfo(encode_.encode_matrix_, Fec2CodeDir::kUpHill, fec_encode_pos,
+                                                     CalcPosInPackCache(pack->pack_sn_), pos_vec,
+                                                     MAX_FEC2_HILL_SIZE, &bit_pos, write_log_cb_);
             if ((INVALID_ENCODE_POS != bit_pos) && (0 != bit_num)) {
                 HillEncode(encode_.encode_matrix_.uh_fec_code_, encode_.uh_capacity_,
                            Fec2CodeDir::kUpHill, fec_encode_pos, bit_pos, bit_num,
@@ -1157,11 +1276,11 @@ block_encode_start_pos_:
         encode_pos fec_encode_pos = CalcHillEncodePos(encode_.encode_matrix_, h_pos, v_pos,
                                                       Fec2CodeDir::kDownHill, write_log_cb_);
         if (INVALID_ENCODE_POS != fec_encode_pos) {
-            encode_pos bit_pos = CalcHillBitPos(encode_.encode_matrix_, Fec2CodeDir::kDownHill, fec_encode_pos,
-                                                CalcPosInPackCache(pack->pack_sn_), write_log_cb_);
             goodtp_pos pos_vec[MAX_FEC2_HILL_SIZE] = {0};
-            encode_pos bit_num = BuildHillPosVec(encode_.encode_matrix_, Fec2CodeDir::kDownHill, fec_encode_pos,
-                                                 pos_vec, MAX_FEC2_HILL_SIZE, write_log_cb_);
+            encode_pos bit_pos = INVALID_ENCODE_POS;
+            encode_pos bit_num = BuildHillEncodeInfo(encode_.encode_matrix_, Fec2CodeDir::kDownHill, fec_encode_pos,
+                                                     CalcPosInPackCache(pack->pack_sn_), pos_vec,
+                                                     MAX_FEC2_HILL_SIZE, &bit_pos, write_log_cb_);
             if ((INVALID_ENCODE_POS != bit_pos) && (0 != bit_num)) {
                 HillEncode(encode_.encode_matrix_.dh_fec_code_, encode_.dh_capacity_,
                            Fec2CodeDir::kDownHill, fec_encode_pos, bit_pos, bit_num,
@@ -1394,7 +1513,7 @@ hill_fec_encode_exit_pos_:
 }
 
 void GtpFec2::SendFecCodePacket(Fec2CodePackMgr &fec_code_mgr, u32 *capacity) {
-    fec_code_mgr.fec_pack_->goodtp_ver_     = CalcRightGtpVer(GTP_VERSION, pb_dt_->peer_version_);
+    fec_code_mgr.fec_pack_->goodtp_ver_     = GtpMakePacketVersion(pb_dt_->peer_version_);
     fec_code_mgr.fec_pack_->header_offset_  = (u8)sizeof(GtpPacket);
     fec_code_mgr.fec_pack_->cache_us_flag_  = GTP_NO;
     fec_code_mgr.fec_pack_->has_loss_flag_  = GTP_NO;
@@ -1447,12 +1566,30 @@ void GtpFec2::SendFecCodePacket(Fec2CodePackMgr &fec_code_mgr, u32 *capacity) {
     return;
 }
 
-void GtpFec2::CachedFecEncodePack(Fec2CodePackMgr *fec_code_mgr, Fec2CodePack *fec_code_pack) {
-    if (NULL != fec_code_mgr->fec_pack_) {
-        pack_mem_pool_.FreeTranBuf((u8*)(fec_code_mgr->fec_pack_));
+u32 GtpFec2::CachedFecEncodePack(Fec2CodePackMgr *fec_code_mgr, Fec2CodePack *fec_code_pack, u32 *repeat_flag) {
+    if ((NULL == fec_code_mgr) || (NULL == fec_code_pack) || (NULL == repeat_flag)) {
+        RETURN_ERR(kGtpFecMd, kInvalidInPutParam);
     }
 
-    // TODO(Albert.Feng) :: don't malloc new mem, can use the fec_code_pack.
+    *repeat_flag = GTP_NO;
+
+    if (GTP_YES == CheckSameFecCodePack(fec_code_mgr->fec_pack_, fec_code_pack)) {
+        *repeat_flag = GTP_YES;
+        return GTP_OK;
+    }
+
+    if (NULL != fec_code_mgr->fec_pack_) {
+        pack_mem_pool_.FreeTranBuf((u8*)(fec_code_mgr->fec_pack_));
+        fec_code_mgr->fec_pack_  = NULL;
+        fec_code_mgr->tran_addr_ = NULL;
+    }
+
+    if (NULL != pack_mem_pool_.TranBufUseRefAddOne((u8*)fec_code_pack)) {
+        fec_code_mgr->fec_pack_  = fec_code_pack;
+        fec_code_mgr->tran_addr_ = (NULL != pb_dt_) ? &(pb_dt_->tran_addr_) : NULL;
+        return GTP_OK;
+    }
+
     GtpAddr *tran_addr = NULL;
 
     u8 *new_buf  = NULL;
@@ -1468,7 +1605,7 @@ void GtpFec2::CachedFecEncodePack(Fec2CodePackMgr *fec_code_mgr, Fec2CodePack *f
         const string &stat_info = pack_mem_pool_.TranMemPoolStatInfo();
         GtpLog(write_log_cb_, kGtpArqMd, kGtpLogLevelWarning, "%s\r\n", stat_info.c_str());
 
-        return;
+        RETURN_ERR(kGtpFecMd, kMallocMemPoolItemFailedErr);
     }
 
     memcpy(new_buf, fec_code_pack, (u32)(fec_code_pack->pack_size_));
@@ -1476,7 +1613,7 @@ void GtpFec2::CachedFecEncodePack(Fec2CodePackMgr *fec_code_mgr, Fec2CodePack *f
     fec_code_mgr->fec_pack_  = (Fec2CodePack*)new_buf;
     fec_code_mgr->tran_addr_ = tran_addr;
 
-    return;
+    return GTP_OK;
 }
 
 u32 GtpFec2::RestoreDataByHDir(const goodtp_pos &h_start_pos, const goodtp_pos &res_pos, const u8 &h_size,
@@ -1563,7 +1700,17 @@ h_restore_next_pos_:
         return coded_sz;
     }
 
-    decode_.fec_buf_.PushPack(pack, GTP_NO);
+    if (NULL == decode_.fec_buf_.PushPack(pack, GTP_NO)) {
+        GtpLog(write_log_cb_, kGtpFecMd, kGtpLogLevelError,
+               "Cache horizontal restored packet into fec2 buffer failed(pack_sn=%u res_pos=%u).\r\n",
+               pack->pack_sn_, (u32)res_pos);
+        pack_mem_pool_.FreeTranBuf((u8*)pack);
+
+        fec_code_mgr.fec_pack_  = NULL;
+        fec_code_mgr.tran_addr_ = NULL;
+
+        RETURN_ERR(kGtpFecMd, kCachePackFailedErr);
+    }
 
     pack_mem_pool_.FreeTranBuf((u8*)pack);
 
@@ -1655,7 +1802,17 @@ v_restore_next_pos_:
         return coded_sz;
     }
 
-    decode_.fec_buf_.PushPack(pack, GTP_NO);
+    if (NULL == decode_.fec_buf_.PushPack(pack, GTP_NO)) {
+        GtpLog(write_log_cb_, kGtpFecMd, kGtpLogLevelError,
+               "Cache vertical restored packet into fec2 buffer failed(pack_sn=%u res_pos=%u).\r\n",
+               pack->pack_sn_, (u32)res_pos);
+        pack_mem_pool_.FreeTranBuf((u8*)pack);
+
+        fec_code_mgr.fec_pack_  = NULL;
+        fec_code_mgr.tran_addr_ = NULL;
+
+        RETURN_ERR(kGtpFecMd, kCachePackFailedErr);
+    }
 
     pack_mem_pool_.FreeTranBuf((u8*)pack);
 
@@ -1742,7 +1899,17 @@ hill_restore_next_pos_:
         return coded_sz;
     }
 
-    decode_.fec_buf_.PushPack(pack, GTP_NO);
+    if (NULL == decode_.fec_buf_.PushPack(pack, GTP_NO)) {
+        GtpLog(write_log_cb_, kGtpFecMd, kGtpLogLevelError,
+               "Cache %s restored packet into fec2 buffer failed(pack_sn=%u res_pos=%u).\r\n",
+               Fec2CodeDirToStr(fec_code_mgr.fec_pack_->fec_encode_dir_), pack->pack_sn_, (u32)res_pos);
+        pack_mem_pool_.FreeTranBuf((u8*)pack);
+
+        fec_code_mgr.fec_pack_  = NULL;
+        fec_code_mgr.tran_addr_ = NULL;
+
+        RETURN_ERR(kGtpFecMd, kCachePackFailedErr);
+    }
 
     pack_mem_pool_.FreeTranBuf((u8*)pack);
 
@@ -1821,6 +1988,7 @@ void GtpFec2::TryRecoveryPackByFecPack(const encode_pos &fec_encode_pos, const F
         if (GTP_OK != nret) {
             GtpLog(write_log_cb_, kGtpFecMd, kGtpLogLevelError, "Call RestoreDataByHDir() failed(0x%08x) by "\
                    "horizontal.\r\n", nret);
+            break;
         }
 
         if ((GTP_NO == decode_matrix.v_flag_) && (GTP_NO == decode_matrix.uh_flag_)
@@ -2013,6 +2181,7 @@ void GtpFec2::TryRecoveryPackByDataPack(const goodtp_pos &cache_pos, Fec2EnDeCod
         if (GTP_OK != nret) {
             GtpLog(write_log_cb_, kGtpFecMd, kGtpLogLevelError, "Call RestoreDataByHDir() failed(0x%08x) by "\
                    "horizontal.\r\n", nret);
+            goto try_restore_v_pack_pos_;
         }
 
         if ((GTP_NO == decode_matrix.v_flag_) && (GTP_NO == decode_matrix.uh_flag_)
@@ -2056,8 +2225,9 @@ try_restore_v_pack_pos_:
         nret = RestoreDataByVDir(move_pos, res_pos, (u8)(decode_matrix.h_size_), (u8)(decode_matrix.v_size_),
                                  decode_matrix.v_fec_code_[v_pos], decode_matrix);
         if (GTP_OK != nret) {
-            GtpLog(write_log_cb_, kGtpFecMd, kGtpLogLevelError, "Call RestoreDataByHDir() failed(0x%08x) by "\
-                   "horizontal.\r\n", nret);
+            GtpLog(write_log_cb_, kGtpFecMd, kGtpLogLevelError, "Call RestoreDataByVDir() failed(0x%08x) by "\
+                   "vertical.\r\n", nret);
+            goto try_restore_uh_pack_pos_;
         }
 
         if ((GTP_NO == decode_matrix.h_flag_) && (GTP_NO == decode_matrix.uh_flag_)
@@ -2114,6 +2284,7 @@ try_restore_uh_pack_pos_:
         if (GTP_OK != nret) {
             GtpLog(write_log_cb_, kGtpFecMd, kGtpLogLevelError, "Call RestoreDataByHillDir() failed(0x%08x) by "\
                    "uphill.\r\n", nret);
+            goto try_restore_dh_pack_pos_;
         }
 
         TryRecoveryPackByDataPack(res_pos, decode_matrix, Fec2TryRestoreType::kFec2RestoreUpHill);
@@ -2153,6 +2324,7 @@ try_restore_dh_pack_pos_:
         if (GTP_OK != nret) {
             GtpLog(write_log_cb_, kGtpFecMd, kGtpLogLevelError, "Call RestoreDataByHillDir() failed(0x%08x) by "\
                    "downhill.\r\n", nret);
+            goto try_restore_data_exit_pos_;
         }
 
         TryRecoveryPackByDataPack(res_pos, decode_matrix, Fec2TryRestoreType::kFec2RestoreDownHill);
@@ -2460,6 +2632,53 @@ hill_calc_restore_next_pos_:
     return res_pos;
 }
 
+void GtpFec2::ClearReceiveMatrixIfStale(const u32 &matrix_id, const goodtp_pos &current_pos_in_cache,
+                                        const u32 &cur_sn) {
+    if (MAX_RECV_FEC2_MATRIX_NUM <= matrix_id) {
+        return;
+    }
+
+    Fec2EnDeCodeMatrix &dm = decode_.decode_matrix_[matrix_id];
+    if (GTP_NO == dm.using_flag_) {
+        return;
+    }
+
+    goodtp_pos block_offset = (current_pos_in_cache + MAX_FEC2_CACHE_CAPACITY - dm.start_pos_)
+                            & ((goodtp_pos)FEC2_CACHE_CAPACITY_MASK);
+
+    if (block_offset >= (goodtp_pos)(dm.matrix_size_)) {
+        return;
+    }
+
+    u32 matrix_end_sn = dm.start_pack_sn_ + dm.matrix_size_;
+    if (GTP_YES == CheckPackSnInBlock(cur_sn, dm.start_pack_sn_, matrix_end_sn)) {
+        return;
+    }
+
+    goodtp_pos clear_pos = dm.start_pos_;
+    u8 steps = 0;
+    while (steps < dm.matrix_size_) {
+        if ((clear_pos != current_pos_in_cache) && (NULL != decode_.fec_buf_.pack_cache_[clear_pos])) {
+            decode_.fec_buf_.PopPack(clear_pos);
+        }
+
+        steps    += 1;
+        clear_pos = (clear_pos + 1) & ((goodtp_pos)FEC2_CACHE_CAPACITY_MASK);
+    }
+
+    dm.Clear(pack_mem_pool_);
+
+    #ifdef _SELFDEBUG
+    GtpLog(write_log_cb_, kGtpFecMd, kGtpLogLevelDebug,
+           "ClearReceiveUnUsedResource: clear stale matrix(m_id=%u start_sn=%u end_sn=%u "
+           "new_sn=%u start_pos=%u cur_pos=%u).\r\n",
+           matrix_id, dm.start_pack_sn_, matrix_end_sn, cur_sn,
+           (u32)(dm.start_pos_), (u32)current_pos_in_cache);
+    #endif
+
+    return;
+}
+
 void GtpFec2::ClearReceiveUnUsedResource(const goodtp_pos &current_pos_in_cache) {
     if (NULL == decode_.fec_buf_.pack_cache_[current_pos_in_cache]) {
         return;
@@ -2467,52 +2686,27 @@ void GtpFec2::ClearReceiveUnUsedResource(const goodtp_pos &current_pos_in_cache)
 
     GtpPacket *cur_pack = (GtpPacket*)(decode_.fec_buf_.pack_cache_[current_pos_in_cache]->payload_);
     u32 cur_sn = cur_pack->pack_sn_;
+    const u32 block_size_vec[] = {2, 4, 16, 8};
+    u32 checked_matrix_id[sizeof(block_size_vec) / sizeof(block_size_vec[0])] = {MAX_RECV_FEC2_MATRIX_NUM};
+    u32 checked_num = 0;
+    u32 loop = 0;
 
-    u16 m_id = 0;
-    while (MAX_RECV_FEC2_MATRIX_NUM > m_id) {
-        Fec2EnDeCodeMatrix &dm = decode_.decode_matrix_[m_id];
-
-        if (GTP_NO == dm.using_flag_) {
-            m_id += 1;
-            continue;
-        }
-
-        goodtp_pos block_offset = (current_pos_in_cache + MAX_FEC2_CACHE_CAPACITY - dm.start_pos_)
-                                & ((goodtp_pos)FEC2_CACHE_CAPACITY_MASK);
-
-        if (block_offset >= (goodtp_pos)(dm.matrix_size_)) {
-            m_id += 1;
-            continue;
-        }
-
-        u32 matrix_end_sn = dm.start_pack_sn_ + dm.matrix_size_;
-        if (GTP_YES == CheckPackSnInBlock(cur_sn, dm.start_pack_sn_, matrix_end_sn)) {
-            m_id += 1;
-            continue;
-        }
-
-        goodtp_pos clear_pos = dm.start_pos_;
-        u8 steps = 0;
-        while (steps < dm.matrix_size_) {
-            if ((clear_pos != current_pos_in_cache) && (NULL != decode_.fec_buf_.pack_cache_[clear_pos])) {
-                decode_.fec_buf_.PopPack(clear_pos);
+    while ((sizeof(block_size_vec) / sizeof(block_size_vec[0])) > loop) {
+        u32 matrix_id = PackSnToMatrixId(cur_sn, block_size_vec[loop]);
+        u32 checked_loop = 0;
+        while (checked_num > checked_loop) {
+            if (checked_matrix_id[checked_loop] == matrix_id) {
+                goto clear_recv_resource_next_pos_;
             }
-
-            steps    += 1;
-            clear_pos = (clear_pos + 1) & ((goodtp_pos)FEC2_CACHE_CAPACITY_MASK);
+            checked_loop += 1;
         }
 
-        dm.Clear(pack_mem_pool_);
+        ClearReceiveMatrixIfStale(matrix_id, current_pos_in_cache, cur_sn);
+        checked_matrix_id[checked_num] = matrix_id;
+        checked_num += 1;
 
-        #ifdef _SELFDEBUG
-        GtpLog(write_log_cb_, kGtpFecMd, kGtpLogLevelDebug,
-               "ClearReceiveUnUsedResource: clear stale matrix(m_id=%u start_sn=%u end_sn=%u "
-               "new_sn=%u start_pos=%u cur_pos=%u).\r\n",
-               (u32)m_id, dm.start_pack_sn_, matrix_end_sn, cur_sn,
-               (u32)(dm.start_pos_), (u32)current_pos_in_cache);
-        #endif
-
-        m_id += 1;
+clear_recv_resource_next_pos_:
+        loop += 1;
     }
 }
 
@@ -2565,44 +2759,26 @@ clear_not_belong_matrix_pack_exit_pos_:
 
 // @return: < MAX_RECV_FEC2_MATRIX_NUM(sucess), >= MAX_RECV_FEC2_MATRIX_NUM(failed, it means invalid).
 u32 GtpFec2::CalcRecvMatrixIdByPackSn(const u32 &pack_sn) {
-    // check by block size = 2.
-    u32 matrix_id = PackSnToMatrixId(pack_sn, 2);
-
-    if ((MAX_RECV_FEC2_MATRIX_NUM > matrix_id)
-     && (GTP_YES == decode_.decode_matrix_[matrix_id].using_flag_)
-     && (2 == decode_.decode_matrix_[matrix_id].matrix_size_)
-     && (decode_.decode_matrix_[matrix_id].start_pack_sn_ == PackSnToStartSn(pack_sn, 2))) {
+    const u32 preferred_block_size = (u32)(decode_.code_book_[decode_.code_book_id_].block_size_);
+    u32 matrix_id = TryRecvMatrixIdByBlockSize(decode_.decode_matrix_, pack_sn, preferred_block_size);
+    if (MAX_RECV_FEC2_MATRIX_NUM > matrix_id) {
         return matrix_id;
     }
 
-    // check by block size = 4.
-    matrix_id = PackSnToMatrixId(pack_sn, 4);
+    const u32 block_size_vec[] = {2, 4, 16, 8};
+    u32 loop = 0;
+    while ((sizeof(block_size_vec) / sizeof(block_size_vec[0])) > loop) {
+        if (preferred_block_size == block_size_vec[loop]) {
+            loop += 1;
+            continue;
+        }
 
-    if ((MAX_RECV_FEC2_MATRIX_NUM > matrix_id)
-     && (GTP_YES == decode_.decode_matrix_[matrix_id].using_flag_)
-     && (4 == decode_.decode_matrix_[matrix_id].matrix_size_)
-     && (decode_.decode_matrix_[matrix_id].start_pack_sn_ == PackSnToStartSn(pack_sn, 4))) {
-        return matrix_id;
-    }
+        matrix_id = TryRecvMatrixIdByBlockSize(decode_.decode_matrix_, pack_sn, block_size_vec[loop]);
+        if (MAX_RECV_FEC2_MATRIX_NUM > matrix_id) {
+            return matrix_id;
+        }
 
-    // check by block size = 16.
-    matrix_id = PackSnToMatrixId(pack_sn, 16);
-
-    if ((MAX_RECV_FEC2_MATRIX_NUM > matrix_id)
-     && (GTP_YES == decode_.decode_matrix_[matrix_id].using_flag_)
-     && (16 == decode_.decode_matrix_[matrix_id].matrix_size_)
-     && (decode_.decode_matrix_[matrix_id].start_pack_sn_ == PackSnToStartSn(pack_sn, 16))) {
-        return matrix_id;
-    }
-
-    // check by block size = 8.
-    matrix_id = PackSnToMatrixId(pack_sn, 8);
-
-    if ((MAX_RECV_FEC2_MATRIX_NUM > matrix_id)
-     && (GTP_YES == decode_.decode_matrix_[matrix_id].using_flag_)
-     && (8 == decode_.decode_matrix_[matrix_id].matrix_size_)
-     && (decode_.decode_matrix_[matrix_id].start_pack_sn_ == PackSnToStartSn(pack_sn, 8))) {
-        return matrix_id;
+        loop += 1;
     }
 
     return MAX_RECV_FEC2_MATRIX_NUM;

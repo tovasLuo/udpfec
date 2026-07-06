@@ -182,24 +182,6 @@ typedef u32 (*pDecodePacketCallBack)(void *pack, const u32 &size, u8 **out_frame
 
 #pragma pack(1)
 
-typedef struct _OldGtpHeader4Byte {
-    u32 goodtp_ver_:8;
-    u32 header_offset_:6;
-    u32 cache_us_flag_:1;
-    u32 has_loss_flag_:1;
-    u32 pack_type_:4;
-    u32 pack_size_:12;
-}OldGtpHeader4Byte;
-
-typedef struct _NewGtpHeader4Byte {
-    u32 goodtp_ver_:8;
-    u32 header_offset_:6;
-    u32 cache_us_flag_:1;
-    u32 has_loss_flag_:1;
-    u32 pack_type_:3;
-    u32 pack_size_:13;
-}NewGtpHeader4Byte;
-
 typedef struct _ChangeZone {
     u32 sort_sn_;
     u32 senter_ts_us_;
@@ -1233,9 +1215,13 @@ typedef struct _SessionPublicData {
 
         #if (2 == APPLICATION_TYPE)
         if (max_send_loss_per_s_ > game_fec_policy_loss_) {
-            game_fec_policy_loss_ = (max_send_loss_per_s_ * 0.60f) + (game_fec_policy_loss_ * 0.40f);
+            game_fec_policy_loss_ = (max_send_loss_per_s_ * 0.80f) + (game_fec_policy_loss_ * 0.20f);
         } else {
-            game_fec_policy_loss_ = (max_send_loss_per_s_ * 0.30f) + (game_fec_policy_loss_ * 0.70f);
+            // fall weight raised 0.25->0.42: a single burst spike used to take ~7s to decay
+            // below the book5 threshold (2%), keeping FEC at the 2x overhead book4 long after
+            // a brief wifi stall cleared. 0.42 cuts the decay tail to ~3-4s while still holding
+            // the redundancy up for a couple seconds after a spike as a safety margin.
+            game_fec_policy_loss_ = (max_send_loss_per_s_ * 0.42f) + (game_fec_policy_loss_ * 0.58f);
         }
         #endif
 
@@ -1301,6 +1287,43 @@ inline void GtpSplitStreamKey(const u64 &stream_key, u32 *hash, u32 *user_id) {
     if (NULL != user_id) {
         *user_id = (u32)((stream_key >> 32) & 0x00000000FFFFFFFFULL);
     }
+}
+
+inline ChangeZone* GtpGetPacketChangeZone(GtpPacket *pack) {
+    if ((NULL == pack) || (GTP_YES != pack->has_chg_zone_) || (pack->pack_size_ < pack->header_offset_)) {
+        return NULL;
+    }
+
+    u32 min_header_offset = sizeof(GtpPacket) + sizeof(ChangeZone);
+    if (GTP_YES == pack->has_loss_flag_) {
+        min_header_offset += sizeof(f32);
+    }
+
+    if (GTP_YES == pack->has_check_flag_) {
+        min_header_offset += sizeof(u64);
+    }
+
+    if (GTP_YES == pack->has_ts_flag_) {
+        min_header_offset += sizeof(u64);
+    }
+
+    if (GTP_YES == pack->has_rtt_flag_) {
+        min_header_offset += sizeof(u32);
+    }
+
+    if (0 != ((u8)(pack->repeat_counter_))) {
+        min_header_offset += sizeof(u32);
+    }
+
+    if (min_header_offset > pack->header_offset_) {
+        return NULL;
+    }
+
+    return (ChangeZone*)(((u8*)pack) + pack->header_offset_ - sizeof(ChangeZone));
+}
+
+inline const ChangeZone* GtpGetPacketChangeZone(const GtpPacket *pack) {
+    return GtpGetPacketChangeZone((GtpPacket*)pack);
 }
 
 inline u64 GtpReadPacketStreamKey(const GtpPacket *pack) {
@@ -1389,34 +1412,6 @@ inline u32 GtpRemoveStreamKeyHeader(GtpPacket *pack) {
     pack->pack_size_      = (u16)(old_pack_size - key_size);
 
     return key_size;
-}
-
-#define GtpHeaderOldToNew(pack) {\
-    if (0x00 == (*((u8*)(pack)))) {\
-        u32 tmp_org_value = GtpReadU32Unaligned(pack);\
-        OldGtpHeader4Byte *old_header = (OldGtpHeader4Byte*)(&tmp_org_value);\
-        NewGtpHeader4Byte *new_header = (NewGtpHeader4Byte*)(pack);\
-        new_header->goodtp_ver_    = old_header->goodtp_ver_;\
-        new_header->header_offset_ = old_header->header_offset_;\
-        new_header->cache_us_flag_ = old_header->cache_us_flag_;\
-        new_header->has_loss_flag_ = old_header->has_loss_flag_;\
-        new_header->pack_type_     = old_header->pack_type_;\
-        new_header->pack_size_     = old_header->pack_size_;\
-    }\
-}
-
-#define GtpHeaderNewToOld(pack, peer_version) {\
-    if (0x00 == (peer_version)) {\
-        u32 tmp_org_value = GtpReadU32Unaligned(pack);\
-        OldGtpHeader4Byte *old_header = (OldGtpHeader4Byte*)(pack);\
-        NewGtpHeader4Byte *new_header = (NewGtpHeader4Byte*)(&tmp_org_value);\
-        old_header->goodtp_ver_    = new_header->goodtp_ver_;\
-        old_header->header_offset_ = new_header->header_offset_;\
-        old_header->cache_us_flag_ = new_header->cache_us_flag_;\
-        old_header->has_loss_flag_ = new_header->has_loss_flag_;\
-        old_header->pack_type_     = new_header->pack_type_;\
-        old_header->pack_size_     = new_header->pack_size_;\
-    }\
 }
 
 #define CalcPosInPackCache(pack_sn) ((goodtp_pos)((pack_sn) & FEC2_CACHE_CAPACITY_MASK))

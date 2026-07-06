@@ -558,6 +558,19 @@ Mdf history  :
 GOODTP_API uint32_t GetLinkerQuality(GtpHandler_p gtp_hdl, GtpLinkerKey *linker_key, GtpLinkQuality *out_quality);
 
 /*****************************************************************************************************************
+Name     : GetLinkerQualityByAddr
+Function : Get the special linker network quality by GoodTP address. It supports both five-tuple and stream_key.
+In param : GtpHandler_p gtp_hdl
+           GtpAddr *tran_addr
+           uint32_t direction    // 1: sender, 2: receiver.
+Out param: GtpLinkQuality *out_quality
+Return   : u32    // GTP_OK: sucess, the others: failed, call LastGtpErrorInfo() to obtain the detailed information.
+
+*****************************************************************************************************************/
+GOODTP_API uint32_t GetLinkerQualityByAddr(GtpHandler_p gtp_hdl, GtpAddr *tran_addr, uint32_t direction,
+                                           GtpLinkQuality *out_quality);
+
+/*****************************************************************************************************************
 Name     : LastGtpErrorInfo
 Function : Get goodtp module last commont error information when creating goodtp instance faile, when call c3tpt
            interface failedly, it shall be call this function to get last error information, otherwise this error
@@ -660,6 +673,20 @@ GOODTP_API uint32_t PrintSessionWinBitMap(GtpHandler_p gtp_hdl, const uint8_t *s
                                           uint8_t *out_str, uint32_t mem_size);
 
 /*****************************************************************************************************************
+Name     : PrintSessionWinBitMapByAddr
+Function : Print one session's slid window bitmap by GoodTP address. It supports both five-tuple and stream_key.
+In param : GtpHandler_p gtp_hdl
+           GtpAddr *tran_addr
+           uint8_t *out_str
+           uint32_t mem_size
+Out param: uint8_t *out_str
+Return   : uint32_t    // GTP_OK: sucess, the others: failed, call LastGtpErrorInfo() to obtain the detailed information.
+
+*****************************************************************************************************************/
+GOODTP_API uint32_t PrintSessionWinBitMapByAddr(GtpHandler_p gtp_hdl, GtpAddr *tran_addr, uint8_t *out_str,
+                                                uint32_t mem_size);
+
+/*****************************************************************************************************************
 Name     : GetAlgorithmParam
 Function : Get the goodtp algorithm parameters.
 In param : GtpHandler_p gtp_hdl
@@ -678,6 +705,20 @@ Mdf history  :
 *****************************************************************************************************************/
 GOODTP_API uint32_t GetAlgorithmParam(GtpHandler_p gtp_hdl, const uint8_t *src_ip, const uint8_t *dst_ip,
                                       uint8_t *out_str, uint32_t mem_size);
+
+/*****************************************************************************************************************
+Name     : GetAlgorithmParamByAddr
+Function : Get one session's algorithm parameters by GoodTP address. It supports both five-tuple and stream_key.
+In param : GtpHandler_p gtp_hdl
+           GtpAddr *tran_addr
+           uint8_t *out_str
+           uint32_t mem_size
+Out param: uint8_t *out_str
+Return   : uint32_t    // GTP_OK: sucess, the others: failed, call LastGtpErrorInfo() to obtain the detailed information.
+
+*****************************************************************************************************************/
+GOODTP_API uint32_t GetAlgorithmParamByAddr(GtpHandler_p gtp_hdl, GtpAddr *tran_addr, uint8_t *out_str,
+                                            uint32_t mem_size);
 
 /*****************************************************************************************************************
 Name     : ShowTotalLinker
@@ -716,6 +757,20 @@ Mdf history  :
 *****************************************************************************************************************/
 GOODTP_API uint32_t GetSlidWinBitMapInfo(GtpHandler_p gtp_hdl, GtpLinkerKey *linker_key, uint8_t *out_str,
                                          uint32_t mem_size);
+
+/*****************************************************************************************************************
+Name     : GetSlidWinBitMapInfoByAddr
+Function : Get one session's slid window bitmap by GoodTP address. It supports both five-tuple and stream_key.
+In param : GtpHandler_p gtp_hdl
+           GtpAddr *tran_addr
+           uint8_t *out_str
+           uint32_t mem_size
+Out param: uint8_t *out_str
+Return   : uint32_t    // GTP_OK: sucess, the others: failed, call LastGtpErrorInfo() to obtain the detailed information.
+
+*****************************************************************************************************************/
+GOODTP_API uint32_t GetSlidWinBitMapInfoByAddr(GtpHandler_p gtp_hdl, GtpAddr *tran_addr, uint8_t *out_str,
+                                                uint32_t mem_size);
 
 /*****************************************************************************************************************
 Name     : GetPackMemPoolStatus

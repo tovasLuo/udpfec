@@ -27,8 +27,7 @@
 #define ENABLE_INNER_VALID_CHCK   (1)
 #define ENABLE_TRACE_CODE_FLAG    (0)
 #define ENABLE_BOOST_AI_FLAG      (1)
-#define ENABLE_ARQ_BOOST_FLAG     (0)
-#define ENABLE_FRAME_COPY_OUT     (0)
+#define ENABLE_ARQ_BOOST_FLAG     (1)
 #define ENABLE_ARQ                (1)
 #define ENABLE_FEC                (1)
 #define ENABLE_MD_PERF_CHECK      (0)
@@ -62,7 +61,7 @@
 #define C3PTP_STATIC   static
 #endif
 
-#if (_WIN32 || _WIN64 || _SELFANDROID || __APPLE__)
+#if (_WIN32 || _WIN64 || _SELFANDROID || __APPLE__ || defined(__clang__) || (__cplusplus >= 201703L))
 #define REGISTER
 #else
 #define REGISTER register
@@ -119,10 +118,10 @@
 #define INIT_BOOST_TIMES           (0)
 
 #define MAX_RELIABLE_LOSS_THRESHLD (80.00001)
-#define MAX_REALTIME_LOSS_THRESHLD (50.00001)
+#define MAX_REALTIME_LOSS_THRESHLD (25.00001)
 
 #define RMV_RELIABLE_LOSS_THRESHLD (60.00001)
-#define RMV_REALTIME_LOSS_THRESHLD (30.00001)
+#define RMV_REALTIME_LOSS_THRESHLD (15.00001)
 
 #define MAX_SUPPORT_PPS            (20000)
 
@@ -251,8 +250,18 @@
 }
 #endif
 
-#define CalcRightGtpVer(self_ver, peer_ver) ((uint8_t)((0x00 == (self_ver)) ? 0x00:\
-                                             ((0xFF == (peer_ver)) ? GTP_VERSION : (peer_ver))))
+inline uint8_t GtpMakePacketVersion(const uint8_t &peer_ver) {
+    (void)peer_ver;
+    return (uint8_t)GTP_VERSION;
+}
+
+inline uint32_t GtpIsSupportedPacketVersion(const uint8_t &version) {
+    return ((uint8_t)GTP_VERSION == version) ? 1 : 0;
+}
+
+inline uint32_t GtpPacketUsesChangeZone(const uint8_t &version) {
+    return GtpIsSupportedPacketVersion(version);
+}
 
 enum class GtpPackType: uint8_t {
     kGtpDataPackType       = 0x01,

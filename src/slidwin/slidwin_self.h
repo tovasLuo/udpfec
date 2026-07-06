@@ -177,6 +177,8 @@ public:
     u32  ResetWin(const u32 &current_sn, const u64 &ts_us);
     u32  SnEntryWin(const u32 &sn, const u64 &ts_us, const u32 &calc_loss_flag = SELF_YES);
     u32  NackSnEntryWin(const NackData *nack, const u64 &ts_us);
+    u32  NackSnOffsetEntryWin(const u32 &head_sn, const u32 &tail_sn, const u32 &recv_loss, const u32 &rto_sn,
+                              const u16 nack_offset[], const u32 &nack_num, const u64 &ts_us);
 
     u32  BlockSnEntryWin(const u64 &sn_bit_map, const u32 &begin_sn, const u64 &ts_us, const u32 &calc_loss_flag);
     u32  BlockSnEntryWin(const u32 &sn_bit_map, const u32 &begin_sn, const u64 &ts_us, const u32 &calc_loss_flag);
@@ -185,8 +187,11 @@ public:
 
     u32  ObtainNetworkQuality(f32 *loss, u32 *rtt_us, u32 *jitter_us, u32 *congest_rank, u32 *rto_us, u32 *pps,
                               u32 *discard_dir) const;
+    u32  ObtainLossCalcWindow(u32 *loss_num, u32 *total_pack_num) const;
     void SetRttUs(const u32 &rtt_us, const u64 &ts_us, const u32 &report_flag = SELF_YES);
     void SetFeedBackLoss(const u32 &loss, const u64 &ts_us, const u64 &rtt_us = 0);
+    void SetFeedBackLossEx(const u32 &loss, const u64 &ts_us, const u64 &rtt_us,
+                           const u32 &sample_total_pack_num, const u32 &head_sn);
     u32  AdjustFeedbackFactor(const f32 &k, const u64 &ts_us);
     u32  SetRecvRtoDecFactor(const u32 &k, const u64 &ts_us);
     u32  CheckIsRepeatPacketSn(const u32 &sn, const u64 &ts_us);
@@ -206,7 +211,7 @@ PRIVATE:
     u32  GetRtoTmoutPos(const i32 &begin_pos, const i32 &end_pos, const u16 &rto_ts_ms, const u16 &cur_ts_ms) const;
     u32  GetRtoTmoutPos(const i32 &begin_pos, const i32 &end_pos, const i32 &max_sn_pos) const;
     u32  CheckRealExistLoss(const u32 &cur_sn, const u64 &cur_ts);
-    u32  CheckNackIsValid(const NackData *nack, u32 *comb_head_sn, u32 *comb_tail_sn);
+    u32  CheckNackIsValid(const u32 &head_sn, const u32 &tail_sn, u32 *comb_head_sn, u32 *comb_tail_sn);
     u32  CalcFilterWinReserveSize(void);
     u32  CalcTranWinReserveSize(void);
 
@@ -263,6 +268,9 @@ PRIVATE:
     u32 fdbk_loss_;  // feedback loss coming from receiver.
     u32 loss_;       // expanded the 128 multiple.
     u32 report_loss_;
+    u32 feedback_first_head_sn_;
+    u32 feedback_last_head_sn_;
+    u32 feedback_loss_total_pack_num_;
     u32 cur_rtt_us_;
 
     u32 jitter_us_;
@@ -284,6 +292,7 @@ PRIVATE:
     u32 min_stable_us_;
 
     u32 reported_quality_;
+    u32 quality_move_count_;
     u16 bit_map_update_;
     u16 force_calc_num_;
 
@@ -296,6 +305,9 @@ PRIVATE:
     u8  congest_rank_;    // PreCongestRankU32
     u8  learn_rto_sn_std_;
     u8  back_rto_sn_num_;
+    u8  feedback_head_valid_;
+    u8  feedback_loss_trusted_;
+    u8  rsv_quality_flag_[2];
     i32 jitter_arith_sum_;
     i32 last_jitter_;
     f32 ratio_cach_;
@@ -311,6 +323,7 @@ PRIVATE:
 
     u64 calc_loss_num_ts_us_;
     u32 loss_num_in_10s_;
+    u32 loss_total_pack_num_;
     u32 last_ts_us_;
 };
 

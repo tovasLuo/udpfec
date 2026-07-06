@@ -96,7 +96,8 @@ PRIVATE:
     void ProcHasLossNack(const u16_p &nack_sn_offset, const u32 &nack_num, const u32 &head_sn, const u32 &tail_sn,
                          const u32 &rto_sn);
 
-    u32  CheckCurSnIsDiscard(const u32 &head_sn, const u16_p &nack_sn_offset, const u32 &nack_num, const u32 &cur_sn);
+    u32  CheckCurSnSpanIsDiscard(const u64 nack_offset_bitmap[], const u16_p &nack_sn_offset,
+                                  const u32 &nack_num, const u32 &cur_sn_span);
 
     u32  JudgeExhautResendNum(const ArqNode *node);
     u32  JudgeIsTranFailed(const ArqNode *node, const u64 &rto_ts_us);

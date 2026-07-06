@@ -49,7 +49,8 @@ class GtpSession {
 
     ~GtpSession();
 
-    u32 Init(const u64 &ts_us, u8 *win_cache, const u32 &pack_sn = 0, const u32 &sort_sn = 0);
+    u32 Init(const u64 &ts_us, u8 *win_cache, const u32 &pack_sn = 0, const u32 &sort_sn = 0,
+             const u32 &sort_sn_valid = GTP_NO);
 
     static void* operator new(size_t n, void *psp_mem);
     static void operator delete(void *psp_mem, void *placement_mem);
@@ -68,18 +69,16 @@ class GtpSession {
     u32 FramePrepHandlerWithSelfVer(void *frame, const u32 &frame_size, GtpPacket **out_pack, u32 *out_pack_size,
                     const u32 &hash, const u32 &user_id, const u32 &first_pack_sn = 0, const u32 &resend_num = 0);
 
-    u32 FramePrepHandlerWithPeerVer(void *frame, const u32 &frame_size, GtpPacket **out_pack, u32 *out_pack_size,
-                    const u32 &hash, const u32 &user_id, const u32 &first_pack_sn = 0, const u32 &resend_num = 0);
-
-    u32 FramePrepHandlerWith01(void *frame, const u32 &frame_size, GtpPacket **out_pack, u32 *out_pack_size,
-                    const u32 &hash, const u32 &user_id, const u32 &first_pack_sn = 0, const u32 &resend_num = 0);
+    u32 FilterRealtimeNackOffsets(const NackData *nack_data, u16 *out_nack, const u32 &max_nack_num,
+                                  const u64 &ts_us);
 
     u32 FramePostHandler(GtpAddr *tran_addr, GtpPacket *pack, const u32 &pack_size, const u32 &payload_size,
                        const u32 &entry_arq_flag, const u32 &first_pack_sn = 0,
                        const u32 &edge_pack_flag = GTP_YES, const u32 &fec_encoded_flag = GTP_NO);
     u32 FrameFecEncodeHandler(GtpPacket *pack);
 
-    u32 PackPrepHandler(GtpPacket *pack, const u32 &size, u8 **out_frame, u32 *out_frame_size);
+    u32 PackPrepHandler(GtpPacket *pack, const u32 &size, u8 **out_frame, u32 *out_frame_size,
+                        const u32 &first_sn, const u32 &sort_sn_valid);
     u32 PackPostHandler(GtpPacket *pack, const u32 &size, GtpAddr *tran_addr,
                         const u32 &edge_pack_flag = GTP_YES);
     u32 DeliverFrameInOrder(GtpHandler_p gtp_hdl, const u32 &first_sn, const u8 *frame, const u32 &frame_size,
@@ -153,24 +152,30 @@ class GtpSession {
     void UpdateSelfIp(const goodtp_sock &sfd);
     void UpdateSelfIp(u8 sock_addr[], const u32 &sock_addr_len);
     void UpdatePeerIp(u8 sock_addr[], const u32 &sock_addr_len);
+    void UpdateTransportAddressIfChanged(const GtpAddr &tran_addr);
 
 PRIVATE:
     void SendSetRecvRttPacket(void);
     void SendRttTestResPacket(const u64 &ts_us);
-    void ResetSession(const u32 &cur_sn, const u32 &sort_sn, const u32 &chg_status_flag);
+    void ResetSession(const u32 &cur_sn, const u32 &sort_sn, const u32 &sort_sn_valid,
+                      const u32 &chg_status_flag);
     void RttHandler(const u32 &rtt_us);
     u32  CalcHeaderSize(const u32 &hash, const u32 &user_id, const u32 &resend_num);
-    u32  CalcHeaderSizeVersion01(const u32 &hash, const u32 &user_id, const u32 &resend_num);
     u32  PrintHarqParam(u8 *out_str, const u32 &mem_size);
     u32  DeliverFrameNow(GtpHandler_p gtp_hdl, const u8 *frame, const u32 &frame_size, GtpAddr *tran_addr);
+    u32  CalcRealtimeReorderBaseIntervalUs() const;
+    u32  CalcRealtimeReorderDeliverIntervalUs(const u32 &cache_count, const u32 &wait_us,
+                                              const u64 &oldest_age_us) const;
     u32  CalcRealtimeReorderWaitUs() const;
     u32  CalcRealtimeReorderMaxCacheNum() const;
-
+    u32  CalcRealtimeNackFeedbackCap() const;
+    u32  ShouldFeedbackRealtimeNack(const u32 &nack_sn, const u64 &ts_us);
  public:
     const GtpCallBackParam &cb_;
 
     u64 create_ts_us_;
     u64 last_active_ts_us_;
+    u64 last_data_active_ts_us_;
     u64 measure_rtt_ts_us_;
     u64 gen_new_rtt_ts_us_;
     u64 com_cache_ts_us_;
@@ -185,7 +190,17 @@ PRIVATE:
     u32 recv_max_data_sn_;
     u32 rmv_close_alg_ts_us_;
     u32 rmv_close_alg_period_us_;
+    u8 nack_burst_detected_;
     u8 new_gap_detected_;
+    u8 gap_nack_hold_ticks_;
+    // Consecutive 1s windows where the per-second loss peak stayed >=10%. A lone short
+    // burst only ever bumps this to 1 (the very next second is clean again), so gating
+    // the FEC book4 upgrade on streak>=2 in CalcGameFecPolicy() keeps isolated spikes from
+    // triggering a redundancy ramp that always arrives after ARQ has already recovered them.
+    u8 elevated_loss_streak_;
+    #ifdef _SELFDEBUG
+    u8 debug_feedback_reason_;
+    #endif
 
     slid_win_hdl data_win_s_;
     slid_win_hdl data_win_r_;
@@ -243,9 +258,20 @@ PRIVATE:
     u32 pack_sn_;
 
     RealtimeReorderWindow realtime_reorder_win_;
+    u64 realtime_reorder_next_deliver_ts_us_;
+    u64 realtime_reorder_late_rescue_;  // kPushStaleDeliver hit count for late restore observations.
 
 PRIVATE:
     u32 rtt_us_;
+
+    enum {
+        kRealtimeNackFeedbackSlots = 1024,
+        kRealtimeNackFeedbackSlotMask = kRealtimeNackFeedbackSlots - 1
+    };
+
+    u32 realtime_nack_feedback_sn_[kRealtimeNackFeedbackSlots];
+    u16 realtime_nack_feedback_ts_ms_[kRealtimeNackFeedbackSlots];
+    u8  realtime_nack_feedback_count_[kRealtimeNackFeedbackSlots];
 
     u32 max_peak_frame_period_us_;
     u32 slid_win_size_;

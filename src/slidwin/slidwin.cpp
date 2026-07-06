@@ -34,10 +34,59 @@ typedef enum _WinLogLevelEnum {
     kWinLogLevelButt
 }WinLogLevelEnum;
 
+static inline u16 ReadNackOffsetUnaligned(const u16 nack_offset[], const u32 &pos) {
+    u16 offset = 0;
+    memcpy(&offset, ((const u8*)nack_offset) + (pos * sizeof(u16)), sizeof(offset));
+    return offset;
+}
+
 static inline u8* SlidWinAlignCache(u8 *ptr) {
     const size_t align_size = sizeof(void*);
     const size_t addr       = (size_t)ptr;
     return (u8*)((addr + align_size - 1) & (~(align_size - 1)));
+}
+
+static inline u32 SlidWinCtz64(const u64 &value) {
+#if defined(__GNUC__) || defined(__clang__)
+    return (u32)__builtin_ctzll(value);
+#else
+    u32 count = 0;
+    u64 tmp = value;
+    while (0 == (tmp & 1)) {
+        tmp >>= 1;
+        count += 1;
+    }
+    return count;
+#endif
+}
+
+static inline void FillNackOffsets(u16 *dst, const u32 &dst_pos, const u16 &start_offset, const u32 &count) {
+    for (u32 idx = 0; count > idx; ++idx) {
+        dst[dst_pos + idx] = (u16)(start_offset + idx);
+    }
+}
+
+static inline void BuildAckSnBitmap(const u64 src_bitmap[], const u32 &start_pos, const u32 &bit_count, u8 *dst) {
+    const u32 dst_u64_num = (bit_count + 63) >> 6;
+    const u32 block_mask  = SLID_WIN_U64_BUF_SZ - 1;
+
+    for (u32 idx = 0; dst_u64_num > idx; ++idx) {
+        const u32 src_pos   = (start_pos + (idx << 6)) & WIN_POS_MASK;
+        const u32 src_block = src_pos >> 6;
+        const u32 src_shift = src_pos & 0x0000003F;
+        u64 value = src_bitmap[src_block] >> src_shift;
+
+        if (0 != src_shift) {
+            value |= (src_bitmap[(src_block + 1) & block_mask] << (64 - src_shift));
+        }
+
+        const u32 valid_bits = bit_count - (idx << 6);
+        if (64 > valid_bits) {
+            value &= ((((u64)1) << valid_bits) - 1);
+        }
+
+        memcpy(dst + (idx << 3), &value, sizeof(value));
+    }
 }
 
 #define ClearMemory(u16_mem_header, u16_mem_size, begin_pos, end_pos, last_pos_clear_flag) {\
@@ -278,6 +327,9 @@ u32 SlidWin::ResetWin(const u32 &current_sn, const u64 &ts_us) {
     cur_rtt_cache_pos_     = 0;
     cache_rtt_ring_flg_    = SELF_NO;
     loss_                  = 0;
+    feedback_first_head_sn_ = current_sn;
+    feedback_last_head_sn_  = current_sn;
+    feedback_loss_total_pack_num_ = 0;
     cur_rtt_us_            = 0;
     jitter_us_             = 0;
     jiiter_sum_            = 0;
@@ -310,6 +362,7 @@ u32 SlidWin::ResetWin(const u32 &current_sn, const u64 &ts_us) {
     order_counter_         = 0;
     max_rcv_sn_pos_        = 0;
     bit_map_update_        = SELF_NO;
+    quality_move_count_    = 0;
 
     if (kSendSlidWinMode == slid_win_mode_) {
         rto_ts_us_         = DEFAULT_RTO_TS_US;
@@ -324,6 +377,8 @@ u32 SlidWin::ResetWin(const u32 &current_sn, const u64 &ts_us) {
     rtt_dt_sum_            = 0.0;
     avg_rtt_dt_            = 0.0;
     fdbk_loss_             = 0;
+    feedback_head_valid_   = SELF_NO;
+    feedback_loss_trusted_ = SELF_NO;
     last_cache_rtt_ts_us_  = ts_us;
     jitter_arith_sum_      = 0;
     congest_rank_          = kUnknownGenCongest;
@@ -332,6 +387,7 @@ u32 SlidWin::ResetWin(const u32 &current_sn, const u64 &ts_us) {
     expect_next_recv_sn_   = current_sn;
     calc_loss_num_ts_us_   = ts_us;
     loss_num_in_10s_       = 0;
+    loss_total_pack_num_   = 0;
     last_ts_us_            = 0;
     learn_rto_sn_std_      = DEFAULT_DISORDER_NUM;
     disorder_threshold_    = MIN_LEARN_THRESHOLD;
@@ -692,57 +748,57 @@ sn_entry_reset_win_pos_:
     return RESET_WIN_RETURN;
 }
 
-u32 SlidWin::CheckNackIsValid(const NackData *nack, u32 *comb_head_sn, u32 *comb_tail_sn) {
-    *comb_head_sn = nack->head_sn_;
-    *comb_tail_sn = nack->tail_sn_;
+u32 SlidWin::CheckNackIsValid(const u32 &head_sn, const u32 &tail_sn, u32 *comb_head_sn, u32 *comb_tail_sn) {
+    *comb_head_sn = head_sn;
+    *comb_tail_sn = tail_sn;
 
     if (l_border_sn_ <= max_sn_) {
-        if (l_border_sn_ > nack->tail_sn_) {
+        if (l_border_sn_ > tail_sn) {
             return SELF_ERROR;
         }
 
-        if (nack->head_sn_ <= nack->tail_sn_) {
-            if (max_sn_ < nack->head_sn_) {
+        if (head_sn <= tail_sn) {
+            if (max_sn_ < head_sn) {
                 return SELF_ERROR;
             }
 
-            if (l_border_sn_ > nack->head_sn_) {
+            if (l_border_sn_ > head_sn) {
                 *comb_head_sn = l_border_sn_;
             }
-            if (max_sn_ < nack->tail_sn_) {
+            if (max_sn_ < tail_sn) {
                 *comb_tail_sn = max_sn_;
             }
             return SELF_SUCESS;
         }
 
-        if ((max_sn_ < nack->head_sn_) || (l_border_sn_ > nack->head_sn_)) {
+        if ((max_sn_ < head_sn) || (l_border_sn_ > head_sn)) {
             *comb_head_sn = l_border_sn_;
         }
-        if (nack->tail_sn_ > max_sn_) {
+        if (tail_sn > max_sn_) {
             *comb_tail_sn = max_sn_;
         }
         return SELF_SUCESS;
     }
 
-    if (nack->head_sn_ <= nack->tail_sn_) {
-        if ((max_sn_ < nack->head_sn_) && (l_border_sn_ > nack->tail_sn_)) {
+    if (head_sn <= tail_sn) {
+        if ((max_sn_ < head_sn) && (l_border_sn_ > tail_sn)) {
             return SELF_ERROR;
         }
 
-        if ((max_sn_ < nack->head_sn_) && (l_border_sn_ > nack->head_sn_)) {
+        if ((max_sn_ < head_sn) && (l_border_sn_ > head_sn)) {
             *comb_head_sn = l_border_sn_;
         }
-        if ((max_sn_ < nack->tail_sn_) && (l_border_sn_ > nack->tail_sn_)) {
+        if ((max_sn_ < tail_sn) && (l_border_sn_ > tail_sn)) {
             *comb_tail_sn = max_sn_;
         }
         return SELF_SUCESS;
     }
 
-    if (l_border_sn_ > nack->head_sn_) {
+    if (l_border_sn_ > head_sn) {
         *comb_head_sn = l_border_sn_;
     }
 
-    if (max_sn_ < nack->tail_sn_) {
+    if (max_sn_ < tail_sn) {
         *comb_tail_sn = max_sn_;
     }
     return SELF_SUCESS;
@@ -919,7 +975,8 @@ calc_tran_reserve_exit_pos_:
     return std_reserve_size[row_id][column_id];
 }
 
-u32 SlidWin::NackSnEntryWin(const NackData *nack, const u64 &ts_us) {
+u32 SlidWin::NackSnOffsetEntryWin(const u32 &head_sn, const u32 &tail_sn, const u32 &recv_loss, const u32 &rto_sn,
+                                  const u16 nack_offset[], const u32 &nack_num, const u64 &ts_us) {
     if (kSendSlidWinMode != slid_win_mode_) {
         return SELF_SUCESS;
     }
@@ -940,12 +997,15 @@ u32 SlidWin::NackSnEntryWin(const NackData *nack, const u64 &ts_us) {
     u32 comb_head_sn  = 0;
     u32 comb_tail_sn  = 0;
 
-    u32 nret = CheckNackIsValid(nack, &comb_head_sn, &comb_tail_sn);
+    (void)recv_loss;
+    (void)rto_sn;
+
+    u32 nret = CheckNackIsValid(head_sn, tail_sn, &comb_head_sn, &comb_tail_sn);
     if (SELF_SUCESS != nret) {
         #ifdef _SELFDEBUG
         WinLog(kWinLogLevelDebug, slid_win_mode_, "[win_hdl=%p]nack invalid, l_pos=%u l_sn=%u r_pos=%u r_sn=%u "\
                "max_sn=%u max_pos=%u nack: head_sn=%u tail_sn=%u.\r\n", this, l_border_pos_, l_border_sn_,
-               r_border_pos_, r_border_sn_, max_sn_, max_sn_pos_, nack->head_sn_, nack->tail_sn_);
+               r_border_pos_, r_border_sn_, max_sn_, max_sn_pos_, head_sn, tail_sn);
         #endif
         return (u32)(SlidWinErrorCode::kInvalidNackSn);
     }
@@ -1021,13 +1081,13 @@ u32 SlidWin::NackSnEntryWin(const NackData *nack, const u64 &ts_us) {
         } while (64 > move_pos);
     }
 
-    if (0 == nack->nack_num_) {
+    if (0 == nack_num) {
         goto nack_exit_pos_;
     }
 
     block_loop = 0;
     do {
-        nack_sn = nack->head_sn_ + ((u32)(nack->nack_[block_loop].sn_offset_));
+        nack_sn = head_sn + ((u32)ReadNackOffsetUnaligned(nack_offset, block_loop));
 
         if (l_border_sn_ <= nack_sn) {
             sn_span = nack_sn - l_border_sn_;
@@ -1049,12 +1109,17 @@ u32 SlidWin::NackSnEntryWin(const NackData *nack, const u64 &ts_us) {
 
 nack_next_pos_:
         block_loop += 1;
-    } while (((u32)(nack->nack_num_)) > block_loop);
+    } while (nack_num > block_loop);
 
 nack_exit_pos_:
     CalcSndLoss(ts_us);
 
     return SELF_SUCESS;
+}
+
+u32 SlidWin::NackSnEntryWin(const NackData *nack, const u64 &ts_us) {
+    return NackSnOffsetEntryWin(nack->head_sn_, nack->tail_sn_, nack->recv_loss_, nack->rto_sn_,
+                                (const u16*)nack->nack_, (u32)nack->nack_num_, ts_us);
 }
 
 u32 SlidWin::SnTsEntryWin(const u32 &sn, const u64 &ts_us) {
@@ -1158,6 +1223,17 @@ u32 SlidWin::ObtainNetworkQuality(f32 *loss, u32 *rtt_us, u32 *jitter_us, u32 *c
     *pps          = avg_pps_;
     *discard_dir  = (u32)loss_direction_;
     *loss         = (f32)(((f32)report_loss_) / EXPAND_LOSS_FACTOR_FLOAT);
+
+    return SELF_SUCESS;
+}
+
+u32 SlidWin::ObtainLossCalcWindow(u32 *loss_num, u32 *total_pack_num) const {
+    if ((NULL == loss_num) || (NULL == total_pack_num)) {
+        return (u32)(SlidWinErrorCode::kInputParamIsNull);
+    }
+
+    *loss_num       = (u32)loss_num_;
+    *total_pack_num = loss_total_pack_num_;
 
     return SELF_SUCESS;
 }
@@ -1523,10 +1599,34 @@ set_rtt_jit_chg_exit_pos_:
 }
 
 void SlidWin::SetFeedBackLoss(const u32 &loss, const u64 &ts_us, const u64 &rtt_us) {
+    SetFeedBackLossEx(loss, ts_us, rtt_us, 0, 0);
+}
+
+void SlidWin::SetFeedBackLossEx(const u32 &loss, const u64 &ts_us, const u64 &rtt_us,
+                                const u32 &sample_total_pack_num, const u32 &head_sn) {
     u32 delta_loss = 0;
 
     fdbk_loss_           = loss;
     lst_fdbk_loss_ts_us_ = ts_us;
+    feedback_loss_total_pack_num_ = sample_total_pack_num;
+    feedback_loss_trusted_ = SELF_NO;
+
+    if (0 == sample_total_pack_num) {
+        feedback_loss_trusted_ = SELF_YES;
+    } else {
+        if (SELF_YES != feedback_head_valid_) {
+            feedback_first_head_sn_ = head_sn;
+            feedback_head_valid_ = SELF_YES;
+        } else if (0 > ((i32)(head_sn - feedback_last_head_sn_))) {
+            feedback_first_head_sn_ = head_sn;
+        }
+
+        feedback_last_head_sn_ = head_sn;
+
+        if ((32 <= sample_total_pack_num) && (head_sn != feedback_first_head_sn_)) {
+            feedback_loss_trusted_ = SELF_YES;
+        }
+    }
 
     if (0 != rtt_us) {
         SetRttUs((u32)rtt_us, ts_us, SELF_YES);
@@ -1534,6 +1634,10 @@ void SlidWin::SetFeedBackLoss(const u32 &loss, const u64 &ts_us, const u64 &rtt_
         if (ts_us == lst_rpt_quality_ts_us_) {
             return;
         }
+    }
+
+    if (SELF_YES != feedback_loss_trusted_) {
+        return;
     }
 
     if (SELF_NO == reported_quality_) {
@@ -1825,6 +1929,9 @@ calc_real_move_step_pos_:
     l_border_pos_ = new_l_border_pos;
     r_border_sn_ += valid_move_step;
     l_border_sn_ += valid_move_step;
+    if (0xFFFFFFFF > quality_move_count_) {
+        quality_move_count_ += 1;
+    }
 
     #ifdef _SELFDEBUG
     WinLog(kWinLogLevelDebug, slid_win_mode_, "\r\nmove %u step\r\nmoved windows(l_border_pos=%u l_border_block=%u "\
@@ -2060,11 +2167,7 @@ void SlidWin::CalcSndLoss(const u64 &ts_us, const u32 &force_calc) {
         }
 
         if (0 == sn_bit_map_[block_loop]) {
-            loss_pack_num  += 64;
-            move_pos       += 64;
-            move_pos       &= WIN_POS_MASK;  // ring buffer, the buffer's length is 65536
-
-            goto next_block_loop_pos_;
+            goto calc_bit_discard_pos_;
         }
 
 calc_bit_discard_pos_:
@@ -2072,9 +2175,32 @@ calc_bit_discard_pos_:
         bit_loop = 0;
 
         while ((64 > bit_loop) && (cur_sn_span <= max_sn_span)) {
+            if (0 != (sn_bit_map_[block_loop] & bit_mask)) {
+                const u64 block_bits = sn_bit_map_[block_loop] >> bit_loop;
+                u32 skip_bits = (0 == ~block_bits) ? (64 - bit_loop) : SlidWinCtz64(~block_bits);
+                if (skip_bits > (64 - bit_loop)) {
+                    skip_bits = 64 - bit_loop;
+                }
+
+                if (cur_sn_span + skip_bits > max_sn_span + 1) {
+                    skip_bits = max_sn_span + 1 - cur_sn_span;
+                }
+
+                move_pos += skip_bits;
+                bit_loop += skip_bits;
+                if (64 > bit_loop) {
+                    bit_mask <<= skip_bits;
+                } else {
+                    bit_mask = 0;
+                }
+                move_pos &= WIN_POS_MASK;       // ring buffer, the buffer's length is 65536
+                cur_sn_span = SnPosToSpan(l_border_pos_, move_pos);
+                continue;
+            }
+
             if (0 == (sn_bit_map_[block_loop] & bit_mask)) {
                 delta_ms = CalcDeltaTsMs(ts_ms, sn_ts_ms_[move_pos]);
-                if ((rto_ts_ms > delta_ms) && (SELF_NO == force_calc)) {
+                if (rto_ts_ms > delta_ms) {
                     // temp avoid loss = 0.0% for disconnect linker by iptables.
                     break_flag = SELF_YES;
                     break;
@@ -2122,10 +2248,12 @@ next_block_loop_pos_:
         total_pack_num = (WIN_BUF_SIZE - l_border_pos_) + move_pos;
     }
 
-    loss_num_ = (u16)loss_pack_num;
+    loss_num_            = (u16)loss_pack_num;
+    loss_total_pack_num_ = total_pack_num;
 
     if ((calc_loss_num_ts_us_ + 10000000) <= ts_us) {
-        loss_num_in_10s_ = 0;
+        calc_loss_num_ts_us_ = ts_us;
+        loss_num_in_10s_     = 0;
     }
 
     if (0 == loss_pack_num) {
@@ -2277,7 +2405,6 @@ void SlidWin::CalcRcvLoss(const u64 &ts_us, const u32 &force_calc) {
     u16 sv_loss_sn_pos = 0;
     u16 delta_pos      = 0;
 
-    u32 loss_sn_loop   = 0;
     f32 report_loss    = 0.0;
 
     if (SELF_YES != filter_win_flag_) {
@@ -2373,15 +2500,14 @@ void SlidWin::CalcRcvLoss(const u64 &ts_us, const u32 &force_calc) {
                 delta_pos = move_pos + (WIN_POS_MASK - l_border_pos_) + 1;
             }
 
-            loss_sn_loop = 0;
-            while ((MAX_SAVE_LOSS_SN_NUM > sv_loss_sn_pos) && (cach_pos > loss_sn_loop)) {
-                if (SELF_YES != filter_win_flag_) {
-                    lss_sn_offset[sv_loss_sn_pos] = delta_pos;
+            if (MAX_SAVE_LOSS_SN_NUM > sv_loss_sn_pos) {
+                const u32 save_num = ((u32)(MAX_SAVE_LOSS_SN_NUM - sv_loss_sn_pos) < cach_pos) ?
+                                     (u32)(MAX_SAVE_LOSS_SN_NUM - sv_loss_sn_pos) : cach_pos;
+                if ((SELF_YES != filter_win_flag_) && (0 != save_num)) {
+                    FillNackOffsets(lss_sn_offset, sv_loss_sn_pos, delta_pos, save_num);
                 }
 
-                sv_loss_sn_pos += 1;
-                delta_pos      += 1;
-                loss_sn_loop   += 1;
+                sv_loss_sn_pos = (u16)(sv_loss_sn_pos + save_num);
             }
 
             loss_pack_num  += cach_pos;
@@ -2411,6 +2537,38 @@ calc_bit_discard_pos_:
 
         // while ((64 > bit_loop) && (tmp_max_sn_pos != move_pos)) {
         while ((64 > bit_loop) && (cur_sn_span < max_sn_span)) {
+            if (0 != (sn_bit_map_[block_loop] & bit_mask)) {
+                const u64 block_bits = sn_bit_map_[block_loop] >> bit_loop;
+                u32 skip_bits = (0 == ~block_bits) ? (64 - bit_loop) : SlidWinCtz64(~block_bits);
+                if (skip_bits > (64 - bit_loop)) {
+                    skip_bits = 64 - bit_loop;
+                }
+
+                if (cur_sn_span + skip_bits > max_sn_span) {
+                    skip_bits = max_sn_span - cur_sn_span;
+                }
+
+                const u32 last_rcv_pos = (move_pos + skip_bits - 1) & WIN_POS_MASK;
+                delta_ms = CalcDeltaTsMs(ts_ms, sn_ts_ms_[last_rcv_pos]);
+                rto_tmout_pos = last_rcv_pos;  // if not loss packet, rto_sn == max_sn.
+
+                move_pos += skip_bits;
+                bit_loop += skip_bits;
+                if (64 > bit_loop) {
+                    bit_mask <<= skip_bits;
+                } else {
+                    bit_mask = 0;
+                }
+                move_pos &= WIN_POS_MASK;
+
+                if (l_border_pos_ <= move_pos) {
+                    cur_sn_span = move_pos - l_border_pos_;
+                } else {
+                    cur_sn_span = move_pos + (WIN_BUF_SIZE - l_border_pos_);
+                }
+                continue;
+            }
+
             if (0 == (sn_bit_map_[block_loop] & bit_mask)) {
                 if (move_pos <= tmp_max_sn_pos) {
                     delta_pos = (u16)(tmp_max_sn_pos - move_pos);
@@ -2562,10 +2720,12 @@ adjust_max_move_pos_:
         total_pack_num = rto_tmout_pos + WIN_BUF_SIZE - l_border_pos_ + 1;
     }
 
-    loss_num_ = (u16)loss_pack_num;
+    loss_num_            = (u16)loss_pack_num;
+    loss_total_pack_num_ = total_pack_num;
 
     if ((calc_loss_num_ts_us_ + 10000000) <= ts_us) {
-        loss_num_in_10s_ = 0;
+        calc_loss_num_ts_us_ = ts_us;
+        loss_num_in_10s_     = 0;
     }
 
     if (0 == loss_pack_num) {
@@ -2694,12 +2854,7 @@ calc_rcv_loss_rsp_ack_nack_pos_:
     ack_sn_bitmap->sn_bit_map_ = tmp_mem;
     memset(tmp_mem, 0x00, ack_sn_bitmap->mem_size_);
 
-    for (u32 ack_offset = 0; ack_span >= ack_offset; ++ack_offset) {
-        u32 win_pos = (l_border_pos_ + ack_offset) & WIN_POS_MASK;
-        if (0 != (sn_bit_map_[win_pos >> 6] & (((u64)1) << (win_pos & 0x0000003F)))) {
-            tmp_mem[ack_offset >> 3] |= (u8)(0x01 << (ack_offset & 0x00000007));
-        }
-    }
+    BuildAckSnBitmap(sn_bit_map_, l_border_pos_, ack_span + 1, tmp_mem);
     }
 
     #ifdef _SELFDEBUG
@@ -2741,6 +2896,10 @@ calc_rcv_loss_move_win_pos_:
     #endif
 
     MoveWin(move_win_step, ts_us);
+
+    if ((32 > total_pack_num) || (0 == quality_move_count_)) {
+        return;
+    }
 
     if (SELF_NO == reported_quality_) {
         goto calc_rcv_loss_report_quality_pos_;
@@ -3551,6 +3710,22 @@ u32 NackSnEntrySlidWin(const slid_win_hdl &win_hdl, const NackData *nack, const 
     return ((SlidWin*)win_hdl)->NackSnEntryWin(nack, ts_us);
 }
 
+u32 NackSnOffsetEntrySlidWin(const slid_win_hdl &win_hdl, const u32 &head_sn, const u32 &tail_sn,
+                             const u32 &recv_loss, const u32 &rto_sn, const u16 nack_offset[],
+                             const u32 &nack_num, const u64 &ts_us) {
+    #if (1 == ENABLE_SECURE_PROTECT)
+    unordered_map<SlidWin*, WinContext>::const_iterator itr = g_win_hdl_mgr.find((SlidWin*)win_hdl);
+    if (g_win_hdl_mgr.end() == itr) {
+        snprintf(g_com_error, MAX_ERR_INFO_SZ, "the 0x%p isn't slid window handler", win_hdl);
+        return (u32)(SlidWinErrorCode::kInvalidSlidWinHdl);
+    }
+    #endif
+
+    g_com_error[0] = '\0';
+
+    return ((SlidWin*)win_hdl)->NackSnOffsetEntryWin(head_sn, tail_sn, recv_loss, rto_sn, nack_offset, nack_num, ts_us);
+}
+
 
 /*****************************************************************************************************************
 Name     : BlockU64SnEntrySlidWin
@@ -3729,6 +3904,21 @@ u32 SetLinkerLoss(const slid_win_hdl &win_hdl, const u32 &loss, const u64 &ts_us
     #endif
 
     ((SlidWin*)win_hdl)->SetFeedBackLoss(loss, ts_us, rtt_us);
+
+    return SELF_SUCESS;
+}
+
+u32 SetLinkerLossEx(const slid_win_hdl &win_hdl, const u32 &loss, const u64 &ts_us, const u32 &rtt_us,
+                    const u32 &sample_total_pack_num, const u32 &head_sn) {
+    #if (1 == ENABLE_SECURE_PROTECT)
+    unordered_map<SlidWin*, WinContext>::const_iterator itr = g_win_hdl_mgr.find((SlidWin*)win_hdl);
+    if (g_win_hdl_mgr.end() == itr) {
+        snprintf(g_com_error, MAX_ERR_INFO_SZ, "the 0x%p isn't slid window handler", win_hdl);
+        return (u32)(SlidWinErrorCode::kInvalidSlidWinHdl);
+    }
+    #endif
+
+    ((SlidWin*)win_hdl)->SetFeedBackLossEx(loss, ts_us, rtt_us, sample_total_pack_num, head_sn);
 
     return SELF_SUCESS;
 }
@@ -4046,6 +4236,24 @@ u32 ObtainNetworkQuality(const slid_win_hdl &win_hdl, f32 *loss, u32 *rtt_us, u3
     #endif
 
     return ((SlidWin*)win_hdl)->ObtainNetworkQuality(loss, rtt_us, jitter_us, congest_rank, rto_us, pps, discard_dir);
+}
+
+u32 ObtainLossCalcWindow(const slid_win_hdl &win_hdl, u32 *loss_num, u32 *total_pack_num) {
+    #ifdef _SELFDEBUG
+    if ((NULL == loss_num) || (NULL == total_pack_num)) {
+        return (u32)(SlidWinErrorCode::kInputParamIsNull);
+    }
+    #endif
+
+    #if (1 == ENABLE_SECURE_PROTECT)
+    unordered_map<SlidWin*, WinContext>::const_iterator itr = g_win_hdl_mgr.find((SlidWin*)win_hdl);
+    if (g_win_hdl_mgr.end() == itr) {
+        snprintf(g_com_error, MAX_ERR_INFO_SZ, "the 0x%p isn't slid window handler", win_hdl);
+        return (u32)(SlidWinErrorCode::kInvalidSlidWinHdl);
+    }
+    #endif
+
+    return ((SlidWin*)win_hdl)->ObtainLossCalcWindow(loss_num, total_pack_num);
 }
 
 /*****************************************************************************************************************

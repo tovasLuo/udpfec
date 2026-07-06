@@ -1448,8 +1448,23 @@ u32 GoodTp::Init(void) {
 }
 
 GtpSession* GoodTp::GetSession(GtpAddr *tran_addr, GtpHandler_p app_gtp_hdl, const u32 &mode, const u32 &pack_sn,
-                               const u32 &sort_sn) {
+                               const u32 &sort_sn, const u32 &sort_sn_valid, const u32 &create_session) {
     goodtp_sock sfd = (goodtp_sock)(tran_addr->sfd_);
+
+    unordered_map<GtpSessionKey, GtpSession*, GtpSessionKeyHash>::iterator itr;
+
+    if (GTP_YES == tran_addr->enable_key_) {
+        GtpSessionKey stream_key(tran_addr->stream_key_);
+
+        itr = session_map_.find(stream_key);
+        if (session_map_.end() != itr) {
+            return itr->second;
+        }
+
+        if (GTP_YES != create_session) {
+            return NULL;
+        }
+    }
 
     u8  peer_bin_ip[IPV6_BIN_IP_SIZE] = {0};
     u8  self_bin_ip[IPV6_BIN_IP_SIZE] = {0};
@@ -1468,8 +1483,6 @@ GtpSession* GoodTp::GetSession(GtpAddr *tran_addr, GtpHandler_p app_gtp_hdl, con
         memset(self_bin_ip, 0x00, sizeof(self_bin_ip));
     }
 
-    unordered_map<GtpSessionKey, GtpSession*, GtpSessionKeyHash>::iterator itr;
-
     if (GTP_NO == tran_addr->enable_key_) {
         GtpSessionKey session_key(sfd, &(peer_bin_ip[0]), peer_bin_ip_size, peer_bin_port,
                                   &(self_bin_ip[0]), self_bin_ip_size, self_bin_port);
@@ -1479,7 +1492,11 @@ GtpSession* GoodTp::GetSession(GtpAddr *tran_addr, GtpHandler_p app_gtp_hdl, con
             return itr->second;
         }
 
-        return BuildNewSession(session_key, tran_addr, app_gtp_hdl, mode, pack_sn, sort_sn, sfd);
+        if (GTP_YES != create_session) {
+            return NULL;
+        }
+
+        return BuildNewSession(session_key, tran_addr, app_gtp_hdl, mode, pack_sn, sort_sn, sort_sn_valid, sfd);
     }
 
     GtpSessionKey out_key(tran_addr->stream_key_, sfd, &(peer_bin_ip[0]), peer_bin_ip_size, peer_bin_port,
@@ -1490,7 +1507,11 @@ GtpSession* GoodTp::GetSession(GtpAddr *tran_addr, GtpHandler_p app_gtp_hdl, con
         return itr->second;
     }
 
-    return BuildNewSession(out_key, tran_addr, app_gtp_hdl, mode, pack_sn, sort_sn, sfd);
+    if (GTP_YES != create_session) {
+        return NULL;
+    }
+
+    return BuildNewSession(out_key, tran_addr, app_gtp_hdl, mode, pack_sn, sort_sn, sort_sn_valid, sfd);
 }
 
 u32 GoodTp::CheckSingleThreadCalling(void) {
@@ -1505,7 +1526,8 @@ u32 GoodTp::CheckSingleThreadCalling(void) {
 }
 
 GtpSession* GoodTp::BuildNewSession(const GtpSessionKey &key, GtpAddr *tran_addr, GtpHandler_p app_gtp_hdl,
-                                    const u32 &mode, const u32 &pack_sn, const u32 &sort_sn, const goodtp_sock &sfd) {
+                                    const u32 &mode, const u32 &pack_sn, const u32 &sort_sn,
+                                    const u32 &sort_sn_valid, const goodtp_sock &sfd) {
     GtpSession *session = NULL;
 
     try {
@@ -1542,7 +1564,7 @@ create_new_session_pos_:
                             app_gtp_hdl, &(fec_mode_book_[0]),  mode);
         #endif
 
-        u32 nret = new_session->Init(current_ts_us_, &(win_cache_[0]), l_border_sn, next_out_sn);
+        u32 nret = new_session->Init(current_ts_us_, &(win_cache_[0]), l_border_sn, next_out_sn, sort_sn_valid);
         if (GTP_OK != nret) {
             delete new_session;
             new_session = NULL;
@@ -1697,7 +1719,7 @@ void GoodTp::CheckResourceActiveStatus(GtpHandler_p app_gtp_hdl) {
         }
         #endif
 
-        if ((itr->second->last_active_ts_us_ + session_ttl_us_) <= current_ts_us_) {
+        if ((itr->second->last_data_active_ts_us_ + session_ttl_us_) <= current_ts_us_) {
             if (((u8)(SessionHealthState::kHealthNoraml)) != itr->second->session_health_) {
                 GtpLog(cb_.write_log_cb_, kGtpInterfaceMd, kGtpLogLevelWarning, "%s:%u<-->%s:%u(key=%llu) the "\
                        "current session is deleted at now(health_status=%s pid=%d tid=%d)\r\n",
@@ -1724,9 +1746,10 @@ void GoodTp::CheckResourceActiveStatus(GtpHandler_p app_gtp_hdl) {
             itr->second->fec2_obj_.PopAllPack(current_ts_us_);
             #endif
 
-            GtpLog(cb_.write_log_cb_, kGtpSessionMd, kGtpLogLevelWarning, "deleted session%s:%u<--->%s:%u.\r\n",
+            GtpLog(cb_.write_log_cb_, kGtpSessionMd, kGtpLogLevelWarning, "deleted session%s:%u<--->%s:%u(key=%llu).\r\n",
                    itr->second->pb_dt_.self_ip_, (u32)(itr->second->pb_dt_.self_port_),
-                   itr->second->pb_dt_.peer_ip_, (u32)(itr->second->pb_dt_.peer_port_));
+                   itr->second->pb_dt_.peer_ip_, (u32)(itr->second->pb_dt_.peer_port_),
+                   (unsigned long long)(itr->second->pb_dt_.tran_addr_.stream_key_));
 
             delete (itr->second);
             itr = session_map_.erase(itr);
@@ -2006,8 +2029,6 @@ u32 GtpSendPackCallBack(GtpHandler_p gtp_hdl, void *pack, u32 size, GtpAddr *tra
     tran_addr->timestamp_ = goodtp_obj->current_ts_us_;
 
     u32 nret = GTP_OK;
-
-    GtpHeaderNewToOld(pack, session->pb_dt_.peer_version_);
 
     #if (1 == ENABLE_MD_PERF_CHECK)
     {

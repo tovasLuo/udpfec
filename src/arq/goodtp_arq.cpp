@@ -32,6 +32,26 @@ static inline u32 GtpArqSnSpan(const u32 &head_sn, const u32 &sn) {
     return sn + (0xFFFFFFFF - head_sn) + 1;
 }
 
+static inline u16 GtpArqReadNackOffset(const u16 *nack_sn_offset, const u32 &pos) {
+    return GtpReadU16Unaligned(((const u8*)nack_sn_offset) + (pos * sizeof(u16)));
+}
+
+#define GTP_ARQ_NACK_OFFSET_BITMAP_U64_NUM (((SLID_WIN_SIZE) + 64) >> 6)
+
+static inline void GtpArqBuildNackOffsetBitmap(const u16 *nack_sn_offset, const u32 &nack_num,
+                                               u64 nack_offset_bitmap[]) {
+    memset(nack_offset_bitmap, 0x00, GTP_ARQ_NACK_OFFSET_BITMAP_U64_NUM * sizeof(u64));
+
+    for (u32 loop = 0; nack_num > loop; ++loop) {
+        const u32 offset = (u32)GtpArqReadNackOffset(nack_sn_offset, loop);
+        if (SLID_WIN_SIZE < offset) {
+            continue;
+        }
+
+        nack_offset_bitmap[offset >> 6] |= (((u64)1) << (offset & 0x0000003F));
+    }
+}
+
 static inline u32 GtpArqAckedIn32Bitmap(const u32 *ack_bitmap, const u32 &bitmap_sz, const u32 &sn_span) {
     const u32 idx = sn_span >> 5;
     if (((idx + 1) * sizeof(u32)) > bitmap_sz) {
@@ -167,19 +187,27 @@ u32 GtpArq::PacketEntryList(GtpPacket *pack, GtpAddr *tran_addr, const u32 &firs
     PushPack(arq_list_, node);
 
     if ((GTP_OFF == boost_switch_) || (0 == max_boost_times_)) {
-        // good network.
         return GTP_OK;
     }
 
-    if (MIN_ENHANCE_BOOST_PPS < pb_dt_->send_stat_.data_pack_pps_) {
-        return GTP_OK;
+    // Guard against boosting during quiet periods after an intermittent burst.
+    // After PushPack, node_num_ includes the just-added original.
+    // A small backlog means ACKs are flowing and the network is currently healthy.
+    // Only clone when backlog >= 1+2*max_boost_times_, requiring at least
+    // max_boost_times_ consecutive losses to build up before boosting kicks in.
+    u32 boost_backlog_thresh = 1u + 2u * (u32)max_boost_times_;
+    if (kRealTimeStream == pb_dt_->tran_addr_.stream_type_) {
+        u32 observe_us = rto_timeout_us_;
+        if (observe_us < pb_dt_->rtt_us_) {
+            observe_us = pb_dt_->rtt_us_;
+        }
+
+        const u32 normal_inflight = (u32)((((u64)(pb_dt_->send_stat_.data_pack_pps_)) * observe_us
+                                       + 999999ULL) / 1000000ULL);
+        boost_backlog_thresh += normal_inflight + 1u;
     }
 
-    if ((kRealTimeStream == pb_dt_->tran_addr_.stream_type_) && (FLOAT_ZERO >= s_cur_loss_rate_)) {
-        return GTP_OK;
-    }
-
-    if ((kRealTimeStream == pb_dt_->tran_addr_.stream_type_) && (0 == pb_dt_->recv_stat_.ack_sum_)) {
+    if (arq_list_.node_num_ < boost_backlog_thresh) {
         return GTP_OK;
     }
 
@@ -200,13 +228,6 @@ void GtpArq::CheckRtoRetran(const u64 &cur_ts_us) {
 
     if (GTP_OFF == pb_dt_->alg_top_switch_) {
         ClearArqList();
-        return;
-    }
-
-    const u64 min_retran_period_us = (GTP_ON == boost_switch_ && boost_period_us_ < rto_timeout_us_)
-                                   ? (u64)boost_period_us_
-                                   : (u64)rto_timeout_us_;
-    if ((cur_head->last_send_ts_us_ + min_retran_period_us) > cur_ts_us) {
         return;
     }
 
@@ -440,8 +461,10 @@ arq_32bit_quick_resend_pos_:
                 ack_resend_counter_ += 1;
 
                 #ifdef _SELFDEBUG
-                GtpLog(cb_.write_log_cb_, kGtpArqMd, kGtpLogLevelInfo, "quick retraned packet(pack_sn=%u "\
-                       "first_sn=%u)\r\n", del_node->pack_sn_, del_node->first_pack_sn_);
+                GtpLog(cb_.write_log_cb_, kGtpArqMd, kGtpLogLevelInfo, "quick retraned packet(source=ack_bitmap "
+                       "pack_sn=%u first_sn=%u head_sn=%u tail_sn=%u rto_sn=%u cur_span=%u recv_loss=%u)\r\n",
+                       del_node->pack_sn_, del_node->first_pack_sn_, head_sn, tail_sn, rto_sn,
+                       head_curr_sn_span, recv_loss);
                 #endif
 
                 #if (1 == ENABLE_ARQ_BOOST_FLAG)
@@ -597,8 +620,10 @@ arq_64bit_quick_resend_pos_:
                 ack_resend_counter_ += 1;
 
                 #ifdef _SELFDEBUG
-                GtpLog(cb_.write_log_cb_, kGtpArqMd, kGtpLogLevelInfo, "quick retraned packet(pack_sn=%u "\
-                       "first_sn=%u)\r\n", del_node->pack_sn_, del_node->first_pack_sn_);
+                GtpLog(cb_.write_log_cb_, kGtpArqMd, kGtpLogLevelInfo, "quick retraned packet(source=ack_bitmap "
+                       "pack_sn=%u first_sn=%u head_sn=%u tail_sn=%u rto_sn=%u cur_span=%u recv_loss=%u)\r\n",
+                       del_node->pack_sn_, del_node->first_pack_sn_, head_sn, tail_sn, rto_sn,
+                       head_curr_sn_span, recv_loss);
                 #endif
 
                 #if (1 == ENABLE_ARQ_BOOST_FLAG)
@@ -819,7 +844,9 @@ void GtpArq::ProcHasLossNack(const u16_p &nack_sn_offset, const u32 &nack_num, c
 
     u32 head_curr_sn_span = 0;
     u32 head_rto_sn_span  = 0;
+    u32 first_sn_span      = 0;
     u32 first_sn          = 0;
+    u64 nack_offset_bitmap[GTP_ARQ_NACK_OFFSET_BITMAP_U64_NUM];
 
     if (head_sn <= rto_sn) {
         head_rto_sn_span = rto_sn - head_sn;
@@ -827,11 +854,14 @@ void GtpArq::ProcHasLossNack(const u16_p &nack_sn_offset, const u32 &nack_num, c
         head_rto_sn_span = rto_sn + (0xFFFFFFFF - head_sn) + 1;
     }
 
+    GtpArqBuildNackOffsetBitmap(nack_sn_offset, nack_num, nack_offset_bitmap);
+
     #ifdef _SELFDEBUG
     GtpLog(cb_.write_log_cb_, kGtpArqMd, kGtpLogLevelInfo, "head_rto_sn_span=%u\r\n", head_rto_sn_span);
 
     for (u32 i = 0; nack_num > i; ++i) {
-        GtpLog(cb_.write_log_cb_, kGtpArqMd, kGtpLogLevelInfo, "nack_sn=%u\r\n", head_sn + ((u32)nack_sn_offset[i]));
+        GtpLog(cb_.write_log_cb_, kGtpArqMd, kGtpLogLevelInfo, "nack_sn=%u\r\n",
+               head_sn + ((u32)GtpArqReadNackOffset(nack_sn_offset, i)));
     }
     #endif
 
@@ -858,9 +888,16 @@ void GtpArq::ProcHasLossNack(const u16_p &nack_sn_offset, const u32 &nack_num, c
             goto nack_quick_resend_pos_;
         }
 
-        if ((GTP_YES == CheckCurSnIsDiscard(head_sn, (u16_p)nack_sn_offset, nack_num, cur_node->pack_sn_))
+        first_sn_span = 0;
+        if (cur_node->first_pack_sn_ != cur_node->pack_sn_) {
+            first_sn_span = GtpArqSnSpan(head_sn, cur_node->first_pack_sn_);
+        }
+
+        if ((GTP_YES == CheckCurSnSpanIsDiscard(nack_offset_bitmap, (u16_p)nack_sn_offset,
+                                                nack_num, head_curr_sn_span))
          || ((cur_node->first_pack_sn_ != cur_node->pack_sn_)
-          && (GTP_YES == CheckCurSnIsDiscard(head_sn, (u16_p)nack_sn_offset, nack_num, cur_node->first_pack_sn_)))) {
+          && (GTP_YES == CheckCurSnSpanIsDiscard(nack_offset_bitmap, (u16_p)nack_sn_offset,
+                                                 nack_num, first_sn_span)))) {
             if (head_rto_sn_span >= head_curr_sn_span) {
 nack_quick_resend_pos_:
                 // current list is harq list.
@@ -892,8 +929,10 @@ nack_quick_resend_pos_:
                 ack_resend_counter_ += 1;
 
                 #ifdef _SELFDEBUG
-                GtpLog(cb_.write_log_cb_, kGtpArqMd, kGtpLogLevelInfo, "quick retraned packet(pack_sn=%u "\
-                       "first_sn=%u)\r\n", del_node->pack_sn_, del_node->first_pack_sn_);
+                GtpLog(cb_.write_log_cb_, kGtpArqMd, kGtpLogLevelInfo, "quick retraned packet(source=nack "
+                       "pack_sn=%u first_sn=%u head_sn=%u tail_sn=%u rto_sn=%u cur_span=%u nack_num=%u)\r\n",
+                       del_node->pack_sn_, del_node->first_pack_sn_, head_sn, tail_sn, rto_sn,
+                       head_curr_sn_span, nack_num);
                 #endif
 
                 #if (1 == ENABLE_ARQ_BOOST_FLAG)
@@ -1025,13 +1064,18 @@ void GtpArq::GetStat(u32 *ack_resend_num, u32 *rto_resend_num, u32 *ack_err_num,
     return;
 }
 
-u32 GtpArq::CheckCurSnIsDiscard(const u32 &head_sn, const u16_p &nack_sn_offset, const u32 &nack_num,
-                                const u32 &cur_sn) {
+u32 GtpArq::CheckCurSnSpanIsDiscard(const u64 nack_offset_bitmap[], const u16_p &nack_sn_offset,
+                                    const u32 &nack_num, const u32 &cur_sn_span) {
+    if (SLID_WIN_SIZE >= cur_sn_span) {
+        return (0 != (nack_offset_bitmap[cur_sn_span >> 6] & (((u64)1) << (cur_sn_span & 0x0000003F))))
+             ? GTP_YES : GTP_NO;
+    }
+
     u32 loop    = 0;
     u32 ret_val = GTP_NO;
 
     while (nack_num > loop) {
-        if (cur_sn == (head_sn + ((u32)(nack_sn_offset[loop])))) {
+        if (cur_sn_span == ((u32)GtpArqReadNackOffset(nack_sn_offset, loop))) {
             ret_val = GTP_YES;
             break;
         }
@@ -1180,12 +1224,13 @@ void GtpArq::TranFailedPostHandler(ArqNode *node, const u64 &cur_ts_us) {
     }
 
     #ifdef _SELFDEBUG
-    ChangeZone *chg_zone = (ChangeZone*)(node->pack_ + node->payload_offset_);
+    const ChangeZone *chg_zone = GtpGetPacketChangeZone((GtpPacket*)node->pack_);
+    const u32 sort_sn = (NULL == chg_zone) ? 0 : chg_zone->sort_sn_;
 
     GtpLog(cb_.write_log_cb_, kGtpArqMd, kGtpLogLevelNotice, "%s:%u<-->%s:%u the packet resends failedly, now send again"\
            "because of reliable stream(pack_sn=%u first_sn=%u sort_sn=%u rto=%uus)\r\n", pb_dt_->self_ip_,
            (u32)(pb_dt_->self_port_), pb_dt_->peer_ip_, (u32)(pb_dt_->peer_port_),
-           node->pack_sn_, node->first_pack_sn_, chg_zone->sort_sn_, rto_timeout_us_);
+           node->pack_sn_, node->first_pack_sn_, sort_sn, rto_timeout_us_);
     #endif
 
     if ((GTP_YES == node->has_boost_node_)

@@ -95,6 +95,7 @@ class GtpFec2 {
     u32  Decode(Fec2CodePack *fec_code, const u64 &ts_us);
     u32  CacheDataPack(GtpPacket *pack, const u64 &ts_us);
     void ChangeFecMode(const u32 &new_code_book_id);
+    u8   RecvFecBookId(void) const;
     u32  PrintFec2Param(u8 *out_str, const u32 &mem_size);
     void ClearResource(const f32 &loss, const u64 &ts_us);
 
@@ -107,7 +108,7 @@ PRIVATE:
                     const encode_pos &fec_encode_pos, const encode_pos &bit_pos,
                     const encode_pos &bit_num, u8 *data, const u32 &data_size);
     void SendFecCodePacket(Fec2CodePackMgr &fec_code_mgr, u32 *capacity);
-    void CachedFecEncodePack(Fec2CodePackMgr *fec_code_mgr, Fec2CodePack *fec_code_pack);
+    u32  CachedFecEncodePack(Fec2CodePackMgr *fec_code_mgr, Fec2CodePack *fec_code_pack, u32 *repeat_flag);
 
     u32  RestoreDataByHDir(const goodtp_pos &h_start_pos, const goodtp_pos &res_pos, const u8 &h_size,
                            Fec2CodePackMgr &fec_code_mgr, const Fec2EnDeCodeMatrix &decode_matrix);
@@ -122,6 +123,7 @@ PRIVATE:
                                   Fec2EnDeCodeMatrix &decode_matrix);
     void TryRecoveryPackByDataPack(const goodtp_pos &cache_pos, Fec2EnDeCodeMatrix &decode_matrix,
                                    const Fec2TryRestoreType &restored_type);
+    void ClearReceiveMatrixIfStale(const u32 &matrix_id, const goodtp_pos &current_pos_in_cache, const u32 &cur_sn);
     void ClearReceiveUnUsedResource(const goodtp_pos &current_pos_in_cache);
 
     goodtp_pos CalcRestorePosByHDir(const goodtp_pos &start_cache_pos, const encode_pos &h_pos,

@@ -170,6 +170,11 @@ Mdf history  :
 *****************************************************************************************************************/
 uint32_t NackSnEntrySlidWin(const slid_win_hdl &win_hdl, const NackData *nack, const uint64_t &ts_us);
 
+uint32_t NackSnOffsetEntrySlidWin(const slid_win_hdl &win_hdl, const uint32_t &head_sn,
+                                  const uint32_t &tail_sn, const uint32_t &recv_loss,
+                                  const uint32_t &rto_sn, const uint16_t nack_offset[],
+                                  const uint32_t &nack_num, const uint64_t &ts_us);
+
 /*****************************************************************************************************************
 Name     : BlockU64SnEntrySlidWin
 Function : push a block received sn to slid window.
@@ -345,6 +350,10 @@ Mdf history  :
 uint32_t SetLinkerLoss(const slid_win_hdl &win_hdl, const uint32_t &loss, const uint64_t &ts_us,
                        const uint32_t &rtt_us);
 
+uint32_t SetLinkerLossEx(const slid_win_hdl &win_hdl, const uint32_t &loss, const uint64_t &ts_us,
+                         const uint32_t &rtt_us, const uint32_t &sample_total_pack_num,
+                         const uint32_t &head_sn);
+
 /*****************************************************************************************************************
 Name     : AdjustOptimizeLossFactor
 Function : when occurs single director loss, calling this function to adjust optimizing factor to decress loss.
@@ -424,6 +433,8 @@ Mdf history  :
 *****************************************************************************************************************/
 uint32_t ObtainNetworkQuality(const slid_win_hdl &win_hdl, float *loss, uint32_t *rtt_us, uint32_t *jitter_us,
                               uint32_t *pre_congest_rank, uint32_t *rto_us, uint32_t *pps, uint32_t *discard_dir);
+
+uint32_t ObtainLossCalcWindow(const slid_win_hdl &win_hdl, uint32_t *loss_num, uint32_t *total_pack_num);
 
 /*****************************************************************************************************************
 Name     : SlidwinInstanceSize
