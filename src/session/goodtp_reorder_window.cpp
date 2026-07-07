@@ -100,7 +100,9 @@ RealtimeReorderWindow::RealtimeReorderWindow() :
     last_arrival_ts_us_(0),
     last_arrival_sn_(0),
     avg_interval_us_(0),
-    inited_(false) {
+    inited_(false),
+    reset_watermark_sn_(0),
+    has_reset_watermark_(false) {
 }
 
 u32 RealtimeReorderWindow::Count(void) const {
@@ -151,6 +153,15 @@ RealtimeReorderWindow::State RealtimeReorderWindow::Snapshot(const u64 &ts_us) c
 }
 
 void RealtimeReorderWindow::Reset(void) {
+    // Record where delivery had gotten to before wiping it: every sn this window has ever handed
+    // to the app (in-order or via kPushStaleDeliver) was strictly before expect_sn_ at the time,
+    // so this is a precise boundary Push() can still check after the reset re-seeds expect_sn_ to
+    // the post-gap sn. Deliberately not reset alongside the fields below -- see the header comment.
+    if (inited_) {
+        reset_watermark_sn_ = expect_sn_;
+        has_reset_watermark_ = true;
+    }
+
     for (u32 i = 0; i < slots_.size(); ++i) {
         slots_[i].frame_.Release();
     }
@@ -275,6 +286,21 @@ RealtimeReorderWindow::PushResult RealtimeReorderWindow::Push(const u32 &sn, con
     }
 
     if (SnBefore(sn, expect_sn_)) {
+        // sn is provably already delivered (in-order or via a previous stale-rescue) if it falls
+        // at or before the boundary recorded by the last Reset() -- everything this window has
+        // ever handed to the app came from strictly before expect_sn_ at the time it was handed
+        // out, so reset_watermark_sn_ (== expect_sn_ just before the reset) is a precise cutoff,
+        // not a guess. Without this check, a straggler/retransmission of a packet delivered
+        // *before* a GtpSession::ResetSession() resync (which wipes filter_win_'s dedup memory
+        // along with this window) looks identical to a genuine one-time late arrival and gets
+        // redelivered. sn strictly after the watermark was never delivered -- it's either within
+        // the outage gap itself or a recent genuine straggler -- and must still go through
+        // kPushStaleDeliver (see commit history: dropping those unconditionally by distance alone
+        // was tried and made things worse, since most far-behind stragglers after a big resync
+        // are first deliveries, not duplicates).
+        if (has_reset_watermark_ && ((sn == reset_watermark_sn_) || SnBefore(sn, reset_watermark_sn_))) {
+            return kPushDrop;
+        }
         return kPushStaleDeliver;
     }
 

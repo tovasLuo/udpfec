@@ -87,6 +87,16 @@ class RealtimeReorderWindow {
     u32 last_arrival_sn_;
     u32 avg_interval_us_;
     bool inited_;
+
+    // expect_sn_ at the moment of the most recent Reset() (GtpSession::ResetSession(), called
+    // after a gap too large to bridge incrementally forces a resync). Every delivery path here
+    // -- in-order via PopReady/kPushDirect, or out-of-order via kPushStaleDeliver -- only ever
+    // hands out an sn strictly before expect_sn_ at the time, so this is a precise "everything
+    // before this point was already delivered" watermark that Push() can still consult after
+    // Reset() wipes expect_sn_/the cache. Not cleared by Reset() itself -- it needs to survive
+    // the very reset it's recorded from. See Push() for how it's used.
+    u32  reset_watermark_sn_;
+    bool has_reset_watermark_;
 };
 
 #endif
