@@ -1246,6 +1246,7 @@ GtpSession::GtpSession(const goodtp_sock &sfd, const u8 dst_sock_addr[], const u
     memset(realtime_nack_feedback_sn_, 0xFF, sizeof(realtime_nack_feedback_sn_));
     memset(realtime_nack_feedback_ts_ms_, 0x00, sizeof(realtime_nack_feedback_ts_ms_));
     memset(realtime_nack_feedback_count_, 0x00, sizeof(realtime_nack_feedback_count_));
+    memset(realtime_nack_first_seen_ts_ms_, 0x00, sizeof(realtime_nack_first_seen_ts_ms_));
 
     send_session_stat_ = (u8)(GtpSessStat::kInitReq);
     recv_session_stat_ = (u8)(GtpSessStat::kInitRes);
@@ -1336,6 +1337,7 @@ GtpSession::GtpSession(GtpAddr *tran_addr, const GtpHandler &gtp_hdl, GtpMemPool
     memset(realtime_nack_feedback_sn_, 0xFF, sizeof(realtime_nack_feedback_sn_));
     memset(realtime_nack_feedback_ts_ms_, 0x00, sizeof(realtime_nack_feedback_ts_ms_));
     memset(realtime_nack_feedback_count_, 0x00, sizeof(realtime_nack_feedback_count_));
+    memset(realtime_nack_first_seen_ts_ms_, 0x00, sizeof(realtime_nack_first_seen_ts_ms_));
 
     send_session_stat_ = (u8)(GtpSessStat::kInitReq);
     recv_session_stat_ = (u8)(GtpSessStat::kInitRes);
@@ -1916,8 +1918,34 @@ u32 GtpSession::ShouldFeedbackRealtimeNack(const u32 &nack_sn, const u64 &ts_us)
     if (realtime_nack_feedback_sn_[slot] != nack_sn) {
         realtime_nack_feedback_sn_[slot] = nack_sn;
         realtime_nack_feedback_ts_ms_[slot] = now_ms;
+        realtime_nack_first_seen_ts_ms_[slot] = now_ms;
         realtime_nack_feedback_count_[slot] = 1;
         return GTP_YES;
+    }
+
+    // Give up on a real elapsed-time budget, not a feedback round count: CalcRcvLoss can recompute
+    // (and thus call this) far more often than the sender actually retries (paced by rto_timeout_us_,
+    // which can be up to 500ms), especially at low pps. An earlier round-count cutoff raced ahead of
+    // the sender's own schedule and abandoned SNs the sender hadn't even finished retrying yet,
+    // pushing them onto the much slower/costlier RTO retransmission fallback instead of fast NACK
+    // recovery. Sizing the window off arq_.rto_timeout_us_ keeps it correct regardless of pps.
+    u32 effective_rto_us = arq_.rto_timeout_us_;
+    if (effective_rto_us < pb_dt_.rtt_us_) {
+        effective_rto_us = pb_dt_.rtt_us_;
+    }
+    u64 giveup_window_us = (u64)((u32)arq_.max_retran_times_ + (u32)REALTIME_NACK_GIVEUP_MARGIN)
+                         * (u64)effective_rto_us;
+    u16 giveup_window_ms = (u16)(giveup_window_us / 1000);
+    if (0 == giveup_window_ms) {
+        giveup_window_ms = 1;
+    }
+
+    if (giveup_window_ms <= GtpSessionCalcDeltaMs(now_ms, realtime_nack_first_seen_ts_ms_[slot])) {
+        // Sender's own retry budget for this SN is certainly exhausted by now (kRealTimeStream
+        // packets are dropped for good once ARQ's max_retran_times_ is reached) -- stop the
+        // window from re-scanning/re-offering it every CalcRcvLoss tick.
+        MarkSnAbandonedSlidWin(data_win_r_, nack_sn);
+        return GTP_NO;
     }
 
     const u32 feedback_cap = CalcRealtimeNackFeedbackCap();

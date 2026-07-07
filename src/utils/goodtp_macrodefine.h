@@ -179,6 +179,18 @@
 #define MAX_FEEDBACK_NACK_PERIOD_US    (110000)
 #endif
 
+// After the initial fast-retry burst (CalcRealtimeNackFeedbackCap(), itself derived from ARQ's
+// max_retran_times_), allow this many more throttled retry rounds -- scaled by rto_timeout_us_ in
+// ShouldFeedbackRealtimeNack() -- before assuming the sender has exhausted its own retry budget and
+// given up on this SN (kRealTimeStream packets are dropped for good in TranFailedPostHandler once
+// max_retran_times_ is reached). Empirically tuned: a small margin (3, ~600ms at the 100ms default
+// RTO) still measurably increased ARQ RTO-fallback resends versus no-giveup-at-all baseline (up to
+// ~170 per 60s @ 5% loss/150pps with margin=10) -- some SNs genuinely take longer than a few hundred
+// ms to resolve via NACK alone even though they're not truly dead. Margin=30 (~3.3s at 100ms RTO)
+// was the smallest value that brought RTO-fallback resend counts back down to the no-giveup baseline
+// (0) across repeated runs of that same scenario -- verify against that reproduction before lowering.
+#define REALTIME_NACK_GIVEUP_MARGIN    (30)
+
 #define MIN_FRAME_PERIOD_US     (30)
 
 #define GTP_INST_COM_CACHE_SIZE (3072)

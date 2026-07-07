@@ -16,11 +16,19 @@
  *     指标：无 "fec restore abnormal" 错误日志，接收帧数与发送帧数匹配。
  *
  * 运行方式：
- *   cd udp_echo/build && ./fec_loss_test [loss_percent] [pps] [seconds] [book_id]
+ *   cd udp_echo/build && ./fec_loss_test [loss_percent] [pps] [seconds] [book_id] [use_key] [outage_sec] [outage_at_sec]
  *   示例：
  *     ./fec_loss_test 20 50 10 4    # 20% 丢包，50 PPS，10s，book4(H+V 2x2)
  *     ./fec_loss_test 25 50 10 3    # 25% 丢包，50 PPS，10s，book3(全向 2x2) [TEST 2]
  *     ./fec_loss_test 20 200 15 4   # 20% 丢包，200 PPS，15s，测缓冲绕回 [TEST 3]
+ *
+ *   TEST 4 — 单向长时间网络中断注入（REALTIME_NACK_GIVEUP_MARGIN 验证用）
+ *     outage_sec/outage_at_sec：从第 outage_at_sec 秒开始，双向 100% 丢包
+ *     持续 outage_sec 秒（模拟真实 WiFi/信号盲区式的连续中断，而不是独立随机
+ *     丢包）。用于复现"同一个 SN 反馈几百到几千次"的场景，验证放弃机制
+ *     （goodtp_session.cpp:ShouldFeedbackRealtimeNack）在真实长中断下是否
+ *     按预期触发、以及中断结束后能否正常恢复。
+ *     ./fec_loss_test 5 150 30 4 0 8 10   # 5%基线丢包，第10秒起完全中断8秒
  */
 
 #include <stdio.h>
@@ -86,6 +94,12 @@ static int g_book_id   = 4;     /* FEC codebook */
 static int g_use_key   = 0;     /* 1=enable_key_模式，测试FEC包stream_key_嵌入 */
 static volatile int g_running = 1;
 
+/* 单向/双向长时间网络中断注入：模拟真实 WiFi 掉线/信号盲区，而不是独立随机丢包。
+ * 从 g_outage_at_sec 秒起，双向 100% 丢包，持续 g_outage_sec 秒。0 = 不注入。 */
+static int      g_outage_sec    = 0;
+static int      g_outage_at_sec = 0;
+static uint64_t g_test_start_us = 0;
+
 #define TEST_STREAM_KEY  0x1234567890ABCDEFULL
 
 /* ───────────────────── 时间戳 ───────────────────── */
@@ -93,6 +107,16 @@ static uint64_t now_us(void) {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return (uint64_t)ts.tv_sec * 1000000ULL + (uint64_t)(ts.tv_nsec / 1000);
+}
+
+/* true 期间：双向 100% 丢包（真实网络长中断，而非独立随机丢包） */
+static int in_outage(void) {
+    if (0 == g_outage_sec) {
+        return 0;
+    }
+    uint64_t elapsed_s = (now_us() - g_test_start_us) / 1000000ULL;
+    return (elapsed_s >= (uint64_t)g_outage_at_sec)
+        && (elapsed_s < (uint64_t)(g_outage_at_sec + g_outage_sec));
 }
 
 /* ───────────────────── 实例上下文 ───────────────────── */
@@ -116,6 +140,9 @@ static pthread_mutex_t g_lock_b = PTHREAD_MUTEX_INITIALIZER;
 
 /* ───────────────────── 随机丢包 ───────────────────── */
 static int should_drop(void) {
+    if (in_outage()) {
+        return 1;
+    }
     return (rand() % 100) < g_loss_pct;
 }
 
@@ -132,12 +159,24 @@ static uint32_t SendPackCbA(GtpHandler_p hdl, void *pack, uint32_t size, GtpAddr
     return GTP_OK;
 }
 
+/* 重复/异常投递检测：记录每个 seq 被应用层收到的次数。recv_frames > sent_frames
+ * (帧丢失率结果溢出成荒谬大的数字) 就是这里能抓到的重复投递问题的信号。 */
+#include <unordered_map>
+static std::unordered_map<uint32_t,int> g_seq_count;
+static pthread_mutex_t g_seq_count_lock = PTHREAD_MUTEX_INITIALIZER;
+
 static uint32_t RecvFrameCbB(GtpHandler_p hdl, void *frame, uint32_t size, GtpAddr *addr) {
     (void)hdl; (void)addr;
     if (size >= sizeof(TestFrame)) {
         TestFrame *f = (TestFrame *)frame;
         if (f->magic == 0xDEADBEEF) {
             g_stats.recv_frames.fetch_add(1);
+            pthread_mutex_lock(&g_seq_count_lock);
+            int c = ++g_seq_count[f->seq];
+            if (c > 1) {
+                fprintf(stderr, "[dup-detect] duplicate delivery seq=%u count=%d size=%u\n", f->seq, c, size);
+            }
+            pthread_mutex_unlock(&g_seq_count_lock);
         }
     }
     return GTP_OK;
@@ -302,21 +341,35 @@ static const char *book_name(int id) {
 
 /* ───────────────────── main ───────────────────── */
 int main(int argc, char *argv[]) {
-    if (argc >= 2) g_loss_pct = atoi(argv[1]);
-    if (argc >= 3) g_pps      = atoi(argv[2]);
-    if (argc >= 4) g_duration = atoi(argv[3]);
-    if (argc >= 5) g_book_id  = atoi(argv[4]);
-    if (argc >= 6) g_use_key  = atoi(argv[5]);
+    if (argc >= 2) g_loss_pct      = atoi(argv[1]);
+    if (argc >= 3) g_pps           = atoi(argv[2]);
+    if (argc >= 4) g_duration      = atoi(argv[3]);
+    if (argc >= 5) g_book_id       = atoi(argv[4]);
+    if (argc >= 6) g_use_key       = atoi(argv[5]);
+    if (argc >= 7) g_outage_sec    = atoi(argv[6]);
+    if (argc >= 8) g_outage_at_sec = atoi(argv[7]);
+    unsigned seed = (unsigned)time(NULL);
+    if (argc >= 9) seed = (unsigned)atoi(argv[8]);
 
     if (g_loss_pct < 0 || g_loss_pct > 90) { fprintf(stderr, "loss_pct 0-90\n"); return 1; }
     if (g_pps < 1 || g_pps > 5000)         { fprintf(stderr, "pps 1-5000\n");    return 1; }
     if (g_book_id < 0 || g_book_id > 5)    { fprintf(stderr, "book_id 0-5\n");   return 1; }
+    if (g_outage_sec < 0)                  { fprintf(stderr, "outage_sec >= 0\n"); return 1; }
+    if (g_outage_at_sec < 0 || (g_outage_sec > 0 && g_outage_at_sec + g_outage_sec > g_duration)) {
+        fprintf(stderr, "outage_at_sec must be >= 0 and outage window must fit within duration\n");
+        return 1;
+    }
 
-    srand((unsigned)time(NULL));
+    srand(seed);
+    fprintf(stderr, "seed=%u\n", seed);
 
     printf("=== fec_loss_test ===\n");
-    printf("loss=%d%%  pps=%d  duration=%ds  book_id=%d(%s)  use_key=%d\n\n",
+    printf("loss=%d%%  pps=%d  duration=%ds  book_id=%d(%s)  use_key=%d\n",
            g_loss_pct, g_pps, g_duration, g_book_id, book_name(g_book_id), g_use_key);
+    if (g_outage_sec > 0) {
+        printf("outage: 100%% 双向丢包，第%d秒起持续%d秒\n", g_outage_at_sec, g_outage_sec);
+    }
+    printf("\n");
 
     /* goodtp 模块加载 */
     if (GTP_OK != InsLoadGtpModule()) {
@@ -382,9 +435,10 @@ int main(int argc, char *argv[]) {
     pthread_create(&tid_timer, NULL, timer_thread, &ta);
 
     /* 发送循环 */
+    g_test_start_us      = now_us();
     uint64_t interval_us = 1000000ULL / (uint64_t)g_pps;
-    uint64_t deadline    = now_us() + (uint64_t)g_duration * 1000000ULL;
-    uint64_t next_send   = now_us();
+    uint64_t deadline    = g_test_start_us + (uint64_t)g_duration * 1000000ULL;
+    uint64_t next_send   = g_test_start_us;
     uint32_t seq         = 0;
 
     while (now_us() < deadline) {
@@ -449,12 +503,19 @@ int main(int argc, char *argv[]) {
     uint32_t fec_ok   = g_stats.fec_key_ok.load();
     uint32_t fec_bad  = g_stats.fec_key_bad.load();
 
+    uint32_t unique_seq = 0, dup_total = 0, max_seq = 0;
+    for (auto &kv : g_seq_count) {
+        unique_seq += 1;
+        if (kv.second > 1) dup_total += (uint32_t)(kv.second - 1);
+        if (kv.first > max_seq) max_seq = kv.first;
+    }
     printf("\n========== 结果 ==========\n");
     printf("发送帧:      %u\n", sent);
     printf("接收帧:      %u\n", recvd);
+    printf("去重后帧数:  %u  重复投递次数: %u  (max_seq=%u)\n", unique_seq, dup_total, max_seq);
     printf("模拟丢包:    %u  (%.1f%%)\n", drops, sent ? drops * 100.0 / (sent + drops) : 0.0);
     printf("FEC异常日志: %u  (期望: 0)\n", anom);
-    printf("帧丢失率:    %.1f%%\n", sent ? (sent - recvd) * 100.0 / sent : 0.0);
+    printf("帧丢失率:    %.1f%%\n", (sent && recvd <= sent) ? (sent - recvd) * 100.0 / sent : 0.0);
     if (g_use_key) {
         printf("FEC包key正确: %u  key错误: %u  (use_key=1时统计)\n", fec_ok, fec_bad);
     }
@@ -486,10 +547,17 @@ int main(int argc, char *argv[]) {
         }
     }
 
+    /* recvd > sent 说明应用层重复收到了同一帧（见 g_seq_count 的去重统计），这本身就是
+     * 一个需要 FAIL 的正确性问题，不能被下面的丢失率判定悄悄吞掉。 */
+    if (recvd > sent) {
+        printf("[FAIL] 应用层收到的帧数(%u)超过发送帧数(%u)，存在重复投递（详见上面 dup-detect 日志）\n",
+               recvd, sent);
+    }
+
     /* TEST 1/2/3：帧丢失率不超过理论 FEC 恢复能力上限 */
     /* 2x2 H+V(book4)  可恢复任意 1 包/4 包，理论上 25% 丢包不应有帧丢失 */
     /* 实际因 ARQ 补足，丢帧率应明显低于原始丢包率 */
-    float frame_loss_pct = sent ? (sent - recvd) * 100.0f / sent : 0.0f;
+    float frame_loss_pct = (sent && recvd <= sent) ? (sent - recvd) * 100.0f / sent : 0.0f;
     float theoretical_fec_recovery = (g_book_id == 4 || g_book_id == 3) ? 25.0f : 0.0f;
     if (g_loss_pct <= (int)theoretical_fec_recovery && frame_loss_pct > 5.0f) {
         printf("[FAIL] 丢包率 %d%% 应在 FEC 可恢复范围内，但帧丢失 %.1f%%\n",

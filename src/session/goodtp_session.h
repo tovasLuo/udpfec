@@ -272,6 +272,10 @@ PRIVATE:
     u32 realtime_nack_feedback_sn_[kRealtimeNackFeedbackSlots];
     u16 realtime_nack_feedback_ts_ms_[kRealtimeNackFeedbackSlots];
     u8  realtime_nack_feedback_count_[kRealtimeNackFeedbackSlots];
+    // When this SN was first seen missing (independent of realtime_nack_feedback_ts_ms_, which
+    // is overwritten on every feedback). Used to give up on a real elapsed-time budget instead of
+    // a round count -- see ShouldFeedbackRealtimeNack().
+    u16 realtime_nack_first_seen_ts_ms_[kRealtimeNackFeedbackSlots];
 
     u32 max_peak_frame_period_us_;
     u32 slid_win_size_;

@@ -198,6 +198,12 @@ public:
     u32  CalcQualityByHandler(const u64 &ts_us, const u32 &must_calc_flag);
     u32  PrintBitMap(u8 *out_str, const u32 &mem_size);
 
+    // Tell the receive window to stop treating 'sn' as a NACK candidate: the sender's own
+    // realtime-stream retry budget (ARQ max_retran_times_) has already been exhausted for it
+    // upstream, so re-scanning/re-requesting it every CalcRcvLoss tick is pure waste until the
+    // window naturally moves past it. No-op if sn is already received or outside the window.
+    u32  MarkSnAbandoned(const u32 &sn);
+
 PRIVATE:
     void MoveWin(const u32 &move_step, const u64 &cur_ts_us = 0);
     void CalcRcvLoss(const u64 &ts_us, const u32 &force_calc = SELF_NO);
@@ -226,6 +232,11 @@ PRIVATE:
 
     u64 sn_bit_map_[SLID_WIN_U64_BUF_SZ];
     u16 sn_ts_ms_[WIN_BUF_SIZE];
+
+    // Positions the receiver has given up asking for (see MarkSnAbandoned()). Kept as a
+    // separate bitmap rather than folded into sn_bit_map_ so loss-ratio accounting (loss_pack_num_)
+    // still counts these as real losses; only NACK candidate generation skips them.
+    u64 sn_abandoned_map_[SLID_WIN_U64_BUF_SZ];
 
     u32 max_sn_span_;
     u32 cur_win_size_;

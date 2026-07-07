@@ -170,6 +170,24 @@ Mdf history  :
 *****************************************************************************************************************/
 uint32_t NackSnEntrySlidWin(const slid_win_hdl &win_hdl, const NackData *nack, const uint64_t &ts_us);
 
+/*****************************************************************************************************************
+Name     : MarkSnAbandonedSlidWin
+Function : tell a receive slid window to stop generating NACK candidates for 'sn' -- the sender's own
+           realtime-stream retry budget is already known to be exhausted for it upstream. No-op if sn has
+           already arrived or has fallen outside the current window.
+In param : const slid_win_hdl &win_hdl
+           const uint32_t &sn
+Out param: void
+Return   : uint32_t  // 0: sucess, the others: failed, call WinErrorInfo() to get the error information.
+
+Mdf history  :
+1.Date       : 2026.07.06
+  Author     : Albert.Feng
+  Mdf context: new function
+
+*****************************************************************************************************************/
+uint32_t MarkSnAbandonedSlidWin(const slid_win_hdl &win_hdl, const uint32_t &sn);
+
 uint32_t NackSnOffsetEntrySlidWin(const slid_win_hdl &win_hdl, const uint32_t &head_sn,
                                   const uint32_t &tail_sn, const uint32_t &recv_loss,
                                   const uint32_t &rto_sn, const uint16_t nack_offset[],

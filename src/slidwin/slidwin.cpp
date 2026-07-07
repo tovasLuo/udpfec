@@ -66,6 +66,23 @@ static inline void FillNackOffsets(u16 *dst, const u32 &dst_pos, const u16 &star
     }
 }
 
+// Same as FillNackOffsets(), but skips positions marked in 'abandoned_block' (bit 0 of the block
+// corresponds to start_offset). Only used for a fully-missing 64-bit block that also has at least
+// one abandoned bit; the common case (abandoned_block == 0) keeps using the plain fast fill above.
+// Returns the number of entries actually written so callers can advance their write index by the
+// real count instead of assuming it always equals 'count'.
+static inline u32 FillNackOffsetsSkipAbandoned(u16 *dst, const u32 &dst_pos, const u16 &start_offset,
+                                               const u32 &count, const u64 &abandoned_block) {
+    u32 written = 0;
+    for (u32 idx = 0; count > idx; ++idx) {
+        if (0 == (abandoned_block & (((u64)1) << idx))) {
+            dst[dst_pos + written] = (u16)(start_offset + idx);
+            written += 1;
+        }
+    }
+    return written;
+}
+
 static inline void BuildAckSnBitmap(const u64 src_bitmap[], const u32 &start_pos, const u32 &bit_count, u8 *dst) {
     const u32 dst_u64_num = (bit_count + 63) >> 6;
     const u32 block_mask  = SLID_WIN_U64_BUF_SZ - 1;
@@ -393,6 +410,15 @@ u32 SlidWin::ResetWin(const u32 &current_sn, const u64 &ts_us) {
     disorder_threshold_    = MIN_LEARN_THRESHOLD;
 
     memset(sn_bit_map_, 0x00, (MIN_WIN_SZ >> 3));  // (MIN_WIN_SZ >> 6) << 3
+    // Full clear, not the partial MIN_WIN_SZ-sized clear sn_bit_map_ uses above: a stale bit
+    // left over here isn't self-healing like a stale "received" bit is. Once a ring position is
+    // marked abandoned it permanently blocks NACK generation for whatever SN reuses that position
+    // next -- if that position falls in the half ResetWin doesn't touch and gets reused by an
+    // unrelated, genuinely-recoverable packet before MoveWin's incremental clearing reaches it,
+    // that packet silently never gets NACK'd again. Reproduced via udp_echo/fec_loss_test's
+    // outage injection (20s two-way blackout forces this exact reset path): frame loss jumped
+    // from the ~50% theoretical floor to 87.5% intermittently before this fix.
+    memset(sn_abandoned_map_, 0x00, sizeof(sn_abandoned_map_));
     // memset(sn_ts_ms_, 0x00, (MIN_WIN_SZ << 3));
     memset(jitter_cache_buf_, 0x00, sizeof(jitter_cache_buf_));
     memset(pps_cache_buf_, 0x00, sizeof(pps_cache_buf_));
@@ -1978,8 +2004,10 @@ calc_real_move_step_pos_:
  
     if (new_r_border_pos >= begin_pos) {
         memset(&(sn_bit_map_[begin_pos]), 0x00, (new_r_border_pos - begin_pos) << 3);
+        memset(&(sn_abandoned_map_[begin_pos]), 0x00, (new_r_border_pos - begin_pos) << 3);
     } else {
         ClearMemory(&(sn_bit_map_[0]), SLID_WIN_U64_BUF_SZ, begin_pos, new_r_border_pos, SELF_YES);
+        ClearMemory(&(sn_abandoned_map_[0]), SLID_WIN_U64_BUF_SZ, begin_pos, new_r_border_pos, SELF_YES);
     }
 
     if (l_border_pos_ <= r_border_pos_) {
@@ -2504,10 +2532,17 @@ void SlidWin::CalcRcvLoss(const u64 &ts_us, const u32 &force_calc) {
                 const u32 save_num = ((u32)(MAX_SAVE_LOSS_SN_NUM - sv_loss_sn_pos) < cach_pos) ?
                                      (u32)(MAX_SAVE_LOSS_SN_NUM - sv_loss_sn_pos) : cach_pos;
                 if ((SELF_YES != filter_win_flag_) && (0 != save_num)) {
-                    FillNackOffsets(lss_sn_offset, sv_loss_sn_pos, delta_pos, save_num);
+                    if (0 == sn_abandoned_map_[block_loop]) {
+                        FillNackOffsets(lss_sn_offset, sv_loss_sn_pos, delta_pos, save_num);
+                        sv_loss_sn_pos = (u16)(sv_loss_sn_pos + save_num);
+                    } else {
+                        const u32 written = FillNackOffsetsSkipAbandoned(lss_sn_offset, sv_loss_sn_pos, delta_pos,
+                                                                         save_num, sn_abandoned_map_[block_loop]);
+                        sv_loss_sn_pos = (u16)(sv_loss_sn_pos + written);
+                    }
+                } else {
+                    sv_loss_sn_pos = (u16)(sv_loss_sn_pos + save_num);
                 }
-
-                sv_loss_sn_pos = (u16)(sv_loss_sn_pos + save_num);
             }
 
             loss_pack_num  += cach_pos;
@@ -2604,13 +2639,17 @@ bit_loss_continue_pos_:
                     delta_pos = move_pos + (WIN_POS_MASK - l_border_pos_) + 1;
                 }
 
-                if (MAX_SAVE_LOSS_SN_NUM > sv_loss_sn_pos) {
-                    if (SELF_YES != filter_win_flag_) {
-                        lss_sn_offset[sv_loss_sn_pos] = delta_pos;
+                if (0 == (sn_abandoned_map_[block_loop] & bit_mask)) {
+                    if (MAX_SAVE_LOSS_SN_NUM > sv_loss_sn_pos) {
+                        if (SELF_YES != filter_win_flag_) {
+                            lss_sn_offset[sv_loss_sn_pos] = delta_pos;
+                        }
+                        sv_loss_sn_pos += 1;
                     }
-                    sv_loss_sn_pos += 1;
                 }
 
+                // Still counted as a real loss for loss_/quality reporting even when abandoned:
+                // only NACK candidate generation (above) is skipped for it.
                 loss_pack_num += 1;
 
                 goto calc_bit_discard_next_pos_;
@@ -2804,7 +2843,11 @@ calc_rcv_loss_rsp_ack_nack_pos_:
         nack_sn_bitmap->head_sn_     = l_border_sn_;
         nack_sn_bitmap->tail_sn_     = max_sn_;
         nack_sn_bitmap->recv_loss_   = loss_;
-        nack_sn_bitmap->nack_num_    = (u16)loss_pack_num;
+        // sv_loss_sn_pos, not loss_pack_num: it's the number of entries actually written into
+        // lss_sn_offset (loss_pack_num also counts SNs abandoned via MarkSnAbandoned(), which are
+        // deliberately excluded from the array so nack_num_ must match what's really there --
+        // otherwise callers would read past the populated entries into stale cache_ bytes).
+        nack_sn_bitmap->nack_num_    = (u16)sv_loss_sn_pos;
         nack_sn_bitmap->cache_ts_us_ = ts_us;
 
         if (l_border_pos_ <= rto_tmout_pos) {
@@ -3198,6 +3241,38 @@ u32 SlidWin::CheckIsRepeatPacketSn(const u32 &cur_sn, const u64 &ts_us) {
     }
 
     return ISNT_REPEAT_SN;
+}
+
+u32 SlidWin::MarkSnAbandoned(const u32 &sn) {
+    if (kRecvSlidWinMode != slid_win_mode_) {
+        return (u32)(SlidWinErrorCode::kSnIsInvalid);
+    }
+
+    if (SELF_SUCESS != SnIsValid(sn)) {
+        // Already outside [l_border_sn_, r_border_sn_]: either long gone (window moved on,
+        // nothing left to mark) or not yet opened. Either way there's nothing to do.
+        return SELF_SUCESS;
+    }
+
+    u32 cur_sn_pos = 0;
+    if (l_border_sn_ <= sn) {
+        cur_sn_pos = l_border_pos_ + sn - l_border_sn_;
+    } else {
+        cur_sn_pos = l_border_pos_ + sn + 0xFFFFFFFF - l_border_sn_ + 1;
+    }
+    cur_sn_pos &= WIN_POS_MASK;
+
+    u32 block_pos      = cur_sn_pos >> 6;
+    u64 bit_one_value  = ((u64)1) << (cur_sn_pos & 0x0000003F);
+
+    if (0 != (sn_bit_map_[block_pos] & bit_one_value)) {
+        // Arrived in the meantime; nothing to abandon.
+        return SELF_SUCESS;
+    }
+
+    sn_abandoned_map_[block_pos] |= bit_one_value;
+
+    return SELF_SUCESS;
 }
 
 u32 SlidWin::CalcQualityByHandler(const u64 &ts_us, const u32 &must_calc_flag) {
@@ -3708,6 +3783,36 @@ u32 NackSnEntrySlidWin(const slid_win_hdl &win_hdl, const NackData *nack, const 
     g_com_error[0] = '\0';
 
     return ((SlidWin*)win_hdl)->NackSnEntryWin(nack, ts_us);
+}
+
+/*****************************************************************************************************************
+Name     : MarkSnAbandonedSlidWin
+Function : tell a receive slid window to stop generating NACK candidates for 'sn' -- the sender's own
+           realtime-stream retry budget is already known to be exhausted for it upstream. No-op if sn has
+           already arrived or has fallen outside the current window.
+In param : const slid_win_hdl &win_hdl
+           const u32 &sn
+Out param: void
+Return   : u32  // 0: sucess, the others: failed, call WinErrorInfo() to get the error information.
+
+Mdf history  :
+1.Date       : 2026.07.06
+  Author     : Albert.Feng
+  Mdf context: new function
+
+*****************************************************************************************************************/
+u32 MarkSnAbandonedSlidWin(const slid_win_hdl &win_hdl, const u32 &sn) {
+    #if (1 == ENABLE_SECURE_PROTECT)
+    unordered_map<SlidWin*, WinContext>::const_iterator itr = g_win_hdl_mgr.find((SlidWin*)win_hdl);
+    if (g_win_hdl_mgr.end() == itr) {
+        snprintf(g_com_error, MAX_ERR_INFO_SZ, "the 0x%p isn't slid window handler", win_hdl);
+        return (u32)(SlidWinErrorCode::kInvalidSlidWinHdl);
+    }
+    #endif
+
+    g_com_error[0] = '\0';
+
+    return ((SlidWin*)win_hdl)->MarkSnAbandoned(sn);
 }
 
 u32 NackSnOffsetEntrySlidWin(const slid_win_hdl &win_hdl, const u32 &head_sn, const u32 &tail_sn,
