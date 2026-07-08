@@ -701,8 +701,23 @@ u32 GtpPacketReceive(GtpHandler_p gtp_hdl, void *pack, u32 pack_sz, GtpAddr *tra
         if (0 == gtp_pack->repeat_counter_) {
             packet_first_sn = gtp_pack->pack_sn_;
         } else {
+            // Retransmission: the packet's own pack_sn_ is its transport-level resend counter,
+            // not the frame's original application-level sn -- that's read separately from the
+            // embedded u32 right after the header. packet_first_sn is just as meaningful here as
+            // in the change-zone branch above, so sort_sn_valid must be set too. Without this,
+            // GoodTp::BuildNewSession()/GtpSession::ResetSession() fall back to seeding filter_win_
+            // with pack_sn_ instead of this frame-space sn whenever the packet that happens to
+            // (re)create/resync a session is a retransmission -- which after a long outage, when
+            // the sender's retry backlog and fresh sends drain in whatever order the network
+            // delivers them, is close to a coin flip. Once filter_win_'s left border lands in the
+            // wrong (transport-level, much larger) sn space, every subsequent real frame looks
+            // "impossibly far behind" and RepeatPacketFilter() rejects it as a duplicate forever --
+            // reproduced via udp_echo/fec_loss_test's outage injection as ~50% of long-outage runs
+            // permanently losing all delivery from the outage onward (87.5% frame loss) despite the
+            // session and ARQ/FEC layers continuing to process every packet correctly.
             packet_first_sn = GtpReadU32Unaligned(((u8*)gtp_pack) + sizeof(GtpPacket));
         }
+        sort_sn_valid = GTP_YES;
     }
 
     const u32 create_session = (((u8)(GtpPackType::kGtpDataPackType)) == gtp_pack->pack_type_) ? GTP_YES : GTP_NO;
