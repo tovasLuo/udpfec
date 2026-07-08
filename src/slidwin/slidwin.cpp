@@ -2158,18 +2158,7 @@ void SlidWin::CalcSndLoss(const u64 &ts_us, const u32 &force_calc) {
     u16 rto_ts_ms      = TsUsU32ToU16Ms(rto_ts_us_);
     u16 ts_ms          = TsUsU64ToU16Ms(ts_us);
     u16 delta_ms       = 0xFFFF;
-    // resolved_pack_num counts only positions with a definitive outcome (confirmed acked, or
-    // confirmed lost after exceeding RTO) -- it excludes still-pending gaps (bit=0, not yet past
-    // RTO). This is the denominator for the loss ratio below. safe_move_pos is a SEPARATE boundary:
-    // the first still-pending gap encountered, which is as far as MoveWin() may ever advance the
-    // window (a still-pending SN's slot cannot be recycled before its fate is known). Previously a
-    // single still-pending gap anywhere in the window aborted the whole scan at that point --
-    // head-of-line-blocking every position behind it, resolved or not, out of the loss count too.
-    // Now the scan keeps going past pending gaps for counting purposes; only window advancement
-    // stays capped at the first one, same as before.
-    u32 resolved_pack_num = 0;
-    u32 safe_move_pos     = l_border_pos_;
-    u32 found_pending_gap = SELF_NO;
+    u16 break_flag     = SELF_NO;
 
     f32 report_loss    = 0.0;
 
@@ -2192,6 +2181,8 @@ void SlidWin::CalcSndLoss(const u64 &ts_us, const u32 &force_calc) {
            min_calc_loss_span_us_ / 1000, rto_ts_us_/1000, force_calc);
     #endif
 
+    break_flag = SELF_NO;
+
     do {
         #ifdef _SELFDEBUG
         WinLog(kWinLogLevelDebug, slid_win_mode_, "[win_hdl=%p]bit_map=0x%016lx block_loop=%u move_pos=%u\r\n", this,
@@ -2204,7 +2195,6 @@ void SlidWin::CalcSndLoss(const u64 &ts_us, const u32 &force_calc) {
         }
 
         if (0xFFFFFFFFFFFFFFFF == sn_bit_map_[block_loop]) {
-            resolved_pack_num += 64;         // whole block confirmed acked -- all resolved.
             move_pos += 64;
             move_pos &= WIN_POS_MASK;        // ring buffer, the buffer's length is 65536
 
@@ -2231,7 +2221,6 @@ calc_bit_discard_pos_:
                     skip_bits = max_sn_span + 1 - cur_sn_span;
                 }
 
-                resolved_pack_num += skip_bits;  // this run is all confirmed acked -- all resolved.
                 move_pos += skip_bits;
                 bit_loop += skip_bits;
                 if (64 > bit_loop) {
@@ -2247,22 +2236,12 @@ calc_bit_discard_pos_:
             if (0 == (sn_bit_map_[block_loop] & bit_mask)) {
                 delta_ms = CalcDeltaTsMs(ts_ms, sn_ts_ms_[move_pos]);
                 if (rto_ts_ms > delta_ms) {
-                    // Still within RTO -- ambiguous (could still be in flight, or its ack could
-                    // still be in flight), not yet a confirmed loss. Record this as the first
-                    // still-pending gap if it's the first one found (MoveWin must never advance
-                    // past it -- see the comment above on safe_move_pos), then skip past it and
-                    // keep scanning: one recent in-flight packet says nothing about whether the
-                    // (possibly many) other positions ahead of it in the window are resolved or
-                    // not, so it must not stop the whole scan from seeing them.
-                    if (SELF_NO == found_pending_gap) {
-                        safe_move_pos     = move_pos;
-                        found_pending_gap = SELF_YES;
-                    }
-                    goto calc_bit_discard_next_pos_;
+                    // temp avoid loss = 0.0% for disconnect linker by iptables.
+                    break_flag = SELF_YES;
+                    break;
                 }
 
-                loss_pack_num     += 1;
-                resolved_pack_num += 1;
+                loss_pack_num += 1;
                 goto calc_bit_discard_next_pos_;
             }
 
@@ -2275,7 +2254,7 @@ calc_bit_discard_next_pos_:
             cur_sn_span = SnPosToSpan(l_border_pos_, move_pos);
         }
 
-        if (cur_sn_span > max_sn_span) {
+        if ((cur_sn_span > max_sn_span) || (SELF_YES == break_flag)) {
             break;
         }
 
@@ -2298,21 +2277,14 @@ next_block_loop_pos_:
            this, move_pos, l_border_pos_, delta_ms);
     #endif
 
-    // safe_move_pos caps window advancement at the first still-pending gap (unchanged safety
-    // property: never recycle a slot whose SN's fate isn't known yet). If no pending gap was
-    // found, the whole scanned range is safe to advance past, same as the original behavior.
-    if (SELF_NO == found_pending_gap) {
-        safe_move_pos = move_pos;
-    }
-
-    if (l_border_pos_ <= safe_move_pos) {
-        total_pack_num = safe_move_pos - l_border_pos_;
+    if (l_border_pos_ <= move_pos) {
+        total_pack_num = move_pos - l_border_pos_;
     } else {
-        total_pack_num = (WIN_BUF_SIZE - l_border_pos_) + safe_move_pos;
+        total_pack_num = (WIN_BUF_SIZE - l_border_pos_) + move_pos;
     }
 
     loss_num_            = (u16)loss_pack_num;
-    loss_total_pack_num_ = resolved_pack_num;
+    loss_total_pack_num_ = total_pack_num;
 
     if ((calc_loss_num_ts_us_ + 10000000) <= ts_us) {
         calc_loss_num_ts_us_ = ts_us;
@@ -2322,7 +2294,7 @@ next_block_loop_pos_:
     if (0 == loss_pack_num) {
         loss_ = 0;
     } else {
-        loss_ = ((loss_pack_num * 100) << 7) / resolved_pack_num;  // expand 128 multiple.
+        loss_ = ((loss_pack_num * 100) << 7) / total_pack_num;  // expand 128 multiple.
         if (12800 < loss_) {
             loss_ = 12800;
         }
