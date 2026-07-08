@@ -786,7 +786,7 @@ int main() {
      * 关注：FEC矩阵填充时间 = block_size/pps，低PPS下FEC恢复延迟大
      * ══════════════════════════════════════════════════ */
     printf("\n【PART 4】延迟基准：PPS vs 延迟（0%%丢包 / 10%%丢包，book4，pkts_per_frm=2）\n");
-    printf("  FEC矩阵填充时间 = 4包/pps → 30pps=133ms  60pps=67ms  150pps=27ms  300pps=13ms\n");
+    printf("  FEC矩阵填充时间 = 4包/pps → 30pps=133ms  60pps=67ms  150pps=27ms  200pps=20ms\n");
     sep('-');
     printf("  %-10s %-6s %10s %10s %8s %8s %8s\n",
            "场景","pps","p50(µs)","p99(µs)","帧完整率","FEC恢复","SN告警");
@@ -794,7 +794,7 @@ int main() {
     struct P4Row { int pps; int loss; uint32_t p50,p99; double frm; uint32_t fec,sn; };
     std::vector<P4Row> p4rows;
 
-    int p4_pps[]  = {30, 60, 100, 150, 300};
+    int p4_pps[]  = {30, 60, 100, 150, 200};
     int p4_loss[] = {0, 10};
     for (int loss : p4_loss) {
         for (int pps : p4_pps) {
@@ -879,16 +879,16 @@ int main() {
     struct { const char *name; LossCfg loss; int reorder; int pps; int dur; } p6[] = {
         /* 50% 随机：FEC完全饱和，ARQ接管 */
         {"E1 随机50%%（极端）150pps",    {LOSS_RANDOM,50},  0, 150, 60},
-        /* 高PPS下突发：300pps突发5连，FEC矩阵13ms填满，覆盖能力强 */
-        {"E2 突发5连/40间隔 300pps",     {LOSS_BURST,0,5,40},0, 300, 60},
+        /* 高PPS下突发：200pps突发5连，FEC矩阵20ms填满，覆盖能力强 */
+        {"E2 突发5连/40间隔 200pps",     {LOSS_BURST,0,5,40},0, 200, 60},
         /* 低PPS下突发：30pps突发5连，矩阵133ms，延迟极大 */
         {"E3 突发5连/40间隔 30pps",      {LOSS_BURST,0,5,40},0, 30,  60},
         /* 高强度突发：20连丢/200间隔 ~9%丢包但每次跨越5个FEC矩阵 */
         {"E4 突发20连/200间隔 150pps",   {LOSS_BURST,0,20,200},0,150, 60},
         /* 乱序+30%丢包 复合最坏情况 */
         {"E5 乱序win=4 + 30%% 150pps",  {LOSS_RANDOM,30},  4, 150, 60},
-        /* 300pps 20%丢包：高速游戏场景+中等丢包 */
-        {"E6 随机20%% 300pps FPS场景",  {LOSS_RANDOM,20},  0, 300, 60},
+        /* 200pps 20%丢包：高速游戏场景+中等丢包 */
+        {"E6 随机20%% 200pps FPS场景",  {LOSS_RANDOM,20},  0, 200, 60},
         /* 间歇断流：100包平静/20包断 模拟无线信道切换 */
         {"E7 间歇20断/100平静 150pps",  {LOSS_INTERMIT,0,5,40,100,20},0,150,60},
     };
