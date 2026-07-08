@@ -55,6 +55,54 @@
 #pragma comment(lib, "ws2_32.lib")
 #endif
 
+// Cross-platform atomic read-modify-write helpers for the two GtpInstMgr fields
+// (inst_num_/runing_flag_) that get read-modify-written (|=, &=, +=/-=) from whichever thread
+// happens to be driving each GoodTp instance -- and instances are explicitly designed to run
+// concurrently from different threads (see CLAUDE.md), with no lock protecting these particular
+// fields. Confirmed as a genuine data race with ThreadSanitizer. Implemented as free functions
+// taking volatile u32/u64* rather than switching the fields to std::atomic: GtpInstMgr is
+// memset() and returned by value in InitGtpInstMgr(), which std::atomic's deleted copy/move
+// constructor would break.
+static inline void GtpAtomicOr64(volatile u64 *target, const u64 &bits) {
+#if (_WIN32 || _WIN64)
+    InterlockedOr64((volatile LONG64*)target, (LONG64)bits);
+#else
+    __sync_fetch_and_or(target, bits);
+#endif
+}
+
+static inline void GtpAtomicAnd64(volatile u64 *target, const u64 &bits) {
+#if (_WIN32 || _WIN64)
+    InterlockedAnd64((volatile LONG64*)target, (LONG64)bits);
+#else
+    __sync_fetch_and_and(target, bits);
+#endif
+}
+
+static inline u64 GtpAtomicLoad64(volatile u64 *target) {
+#if (_WIN32 || _WIN64)
+    return (u64)InterlockedOr64((volatile LONG64*)target, 0);
+#else
+    return __sync_fetch_and_or(target, (u64)0);
+#endif
+}
+
+static inline void GtpAtomicInc32(volatile u32 *target) {
+#if (_WIN32 || _WIN64)
+    InterlockedIncrement((volatile LONG*)target);
+#else
+    __sync_fetch_and_add(target, (u32)1);
+#endif
+}
+
+static inline void GtpAtomicDec32(volatile u32 *target) {
+#if (_WIN32 || _WIN64)
+    InterlockedDecrement((volatile LONG*)target);
+#else
+    __sync_fetch_and_sub(target, (u32)1);
+#endif
+}
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -290,7 +338,7 @@ GoodTp* GtpHandlerToObj(GtpHandler hdl) {
 
     u64 running_bit = 1;
 
-    g_goodtp_inst_mgr.runing_flag_ |= (running_bit << pos);
+    GtpAtomicOr64(&(g_goodtp_inst_mgr.runing_flag_), (running_bit << pos));
 
     return g_goodtp_inst_mgr.goodtp_inst_[pos];
 }
@@ -513,7 +561,7 @@ GtpHandler_p CreateGtpInstance(u32 system_id, uint32_t session_ttl_us, GtpCallBa
 
     g_goodtp_inst_mgr.goodtp_inst_[pos] = goodtp_obj;
 
-    g_goodtp_inst_mgr.inst_num_ += 1;
+    GtpAtomicInc32(&(g_goodtp_inst_mgr.inst_num_));
     g_goodtp_inst_mgr.sys_id_    = system_id;
 
     gtp_hdl = pos + g_goodtp_handler_base;
@@ -592,10 +640,10 @@ u32 DeleteGtpInstance(GtpHandler_p gtp_hdl) {
 
     gtp_obj->SendArqCachedPackWhenDead();
 
-    g_goodtp_inst_mgr.runing_flag_ &= (~(using_bit << pos));
+    GtpAtomicAnd64(&(g_goodtp_inst_mgr.runing_flag_), (~(using_bit << pos)));
 
     if (0 < g_goodtp_inst_mgr.inst_num_) {
-        g_goodtp_inst_mgr.inst_num_ -= 1;
+        GtpAtomicDec32(&(g_goodtp_inst_mgr.inst_num_));
     }
 
     if (0 == g_goodtp_inst_mgr.inst_num_) {
@@ -698,7 +746,7 @@ u32 RmLoadGtpModule(void) {
     u64 current_ts_us       = GtpSysTimestampUs();
     u64 exit_deadline_ts_us = current_ts_us + 100000;
 
-    while ((0 != g_goodtp_inst_mgr.runing_flag_) && (exit_deadline_ts_us > current_ts_us)) {
+    while ((0 != GtpAtomicLoad64(&(g_goodtp_inst_mgr.runing_flag_))) && (exit_deadline_ts_us > current_ts_us)) {
         #if (__linux__ || __APPLE__)
         usleep(1000);
         #endif

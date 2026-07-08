@@ -192,7 +192,14 @@ extern "C" {
 
 static unordered_map<SlidWin*, WinContext> g_win_hdl_mgr(1024);
 
-static char g_com_error[MAX_ERR_INFO_SZ] = {0};
+// thread_local, not a plain static: this is written (unsynchronized) by every SlidWin wrapper
+// function below on essentially every call, and those wrappers are called concurrently from
+// whichever thread drives each SlidWin/GtpSession instance -- multiple instances running in
+// different threads is the library's own documented concurrency model (see CLAUDE.md), so a
+// single shared buffer here is a genuine data race (confirmed with ThreadSanitizer). thread_local
+// also happens to be semantically correct: "the last error my call produced" should be scoped to
+// the calling thread, not clobbered by an unrelated concurrent call from another thread/instance.
+static thread_local char g_com_error[MAX_ERR_INFO_SZ] = {0};
 
 #if (_WIN32 || _WIN64)
 void SlidWinGettimeofday(struct timeval *tp, void *tzp)

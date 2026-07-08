@@ -283,6 +283,13 @@ typedef struct _GtpInstMgr {
 
     ErrorInfoMgr *error_info_;
 
+    // volatile only prevents compiler caching/reordering, not atomicity. inst_num_/runing_flag_ are
+    // read-modify-written (|=, &=, -=) from whichever thread happens to be driving each GoodTp
+    // instance -- and instances are explicitly designed to run concurrently from different threads
+    // (see CLAUDE.md) -- with no lock protecting the shared updates. Confirmed as a genuine data
+    // race with ThreadSanitizer. Fixed at the call sites with __sync_fetch_and_*() builtins rather
+    // than switching these fields to std::atomic: this struct is memset() and returned by value in
+    // InitGtpInstMgr(), which std::atomic's deleted copy/move constructor would break.
     volatile u32 inst_num_;
     u32 sys_id_;
     volatile u64 runing_flag_;  // bit = 1, it means that position goodtp instance is used, eg: bit0=1,
