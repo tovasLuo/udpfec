@@ -495,11 +495,22 @@ u64_block_sn_full_one_pos_:
     u64 bit_1_value = 1;
     u32 nloop       = 0;
 
+    // bit_1_value must advance one bit per iteration to check sn_bit_map's successive bits
+    // (begin_sn+0, +1, +2, ...). Without the shift below, every iteration re-checks bit 0: if
+    // begin_sn's own bit happens to be set, the whole 64-SN block gets marked acked regardless of
+    // what bits 1-63 actually say (and vice versa if it's clear) -- ignoring the other 63 bits'
+    // true ack/loss status entirely. Found while investigating why data_win_s_'s measured send-side
+    // loss stayed far below actual injected loss (e.g. ~1-2% measured at 19% injected): the ack
+    // bitmap data itself was correct on the wire (~16-19% of bits genuinely clear), but this loop
+    // was applying it as "block acked" a large majority of the time (P(bit 0 set) is high even at
+    // significant loss), so most 64-SN blocks ended up fully marked acked no matter what the other
+    // 63 bits said.
     while (64 > nloop) {
         if (0 != (sn_bit_map & bit_1_value)) {
             SnEntryWin(begin_sn + nloop, ts_us, calc_loss_flag);
         }
-        nloop += 1;
+        bit_1_value <<= 1;
+        nloop        += 1;
     }
     goto block_64_exit_pos_;
     }
@@ -601,11 +612,14 @@ u32_block_sn_full_one_pos_:
     u32 bit_1_value = 1;
     u32 nloop       = 0;
 
+    // Same missing-shift bug as the u64 variant above (BlockSnEntryWin(u64,...)) -- see that
+    // function's comment for the full explanation.
     while (32 > nloop) {
         if (0 != (sn_bit_map & bit_1_value)) {
             SnEntryWin(begin_sn + nloop, ts_us, calc_loss_flag);
         }
-        nloop += 1;
+        bit_1_value <<= 1;
+        nloop        += 1;
     }
     goto block_32_exit_pos_;
     }
@@ -2291,10 +2305,50 @@ next_block_loop_pos_:
         loss_num_in_10s_     = 0;
     }
 
-    if (0 == loss_pack_num) {
+    // Read-only lookahead purely for a more complete loss_ ratio: the scan above stops for
+    // good reason at the first unresolved-but-not-yet-timed-out bit (break_flag), and MoveWin()
+    // below must keep using the conservative total_pack_num/move_pos it produced -- retiring the
+    // window past an unresolved SN risks a late ACK landing on a reused ring-buffer slot, which is
+    // what caused the duplicate-delivery regression in the earlier (reverted) attempt at this fix.
+    // But stopping the SCAN there too means any real loss further down stays invisible to loss_
+    // until the blocking SN itself times out, which is what made book-switching lag far behind the
+    // advertised 2s hysteresis. This pass looks past the blocking region without touching move_pos,
+    // sn_bit_map_, or total_pack_num, so window/ARQ state is provably unaffected by it.
+    u32 look_total_num = 0;
+    u32 look_loss_num  = 0;
+
+    if (SELF_YES == break_flag) {
+        u32 look_pos     = move_pos;
+        u32 look_sn_span = cur_sn_span;
+
+        while (look_sn_span <= max_sn_span) {
+            u32 blk  = look_pos >> 6;
+            u32 bit  = look_pos & 63;
+            u64 mask = ((u64)1) << bit;
+
+            if (0 != (sn_bit_map_[blk] & mask)) {
+                look_total_num += 1;  // acked further down -> resolved, not a loss
+            } else {
+                u16 look_delta_ms = CalcDeltaTsMs(ts_ms, sn_ts_ms_[look_pos]);
+                if (rto_ts_ms <= look_delta_ms) {
+                    look_total_num += 1;
+                    look_loss_num  += 1;
+                }
+                // else: still unresolved & not timed out -- skip silently, keep looking further.
+            }
+
+            look_pos     = (look_pos + 1) & WIN_POS_MASK;
+            look_sn_span = SnPosToSpan(l_border_pos_, look_pos);
+        }
+    }
+
+    u32 loss_calc_pack_num = total_pack_num + look_total_num;
+    u32 loss_calc_loss_num = loss_pack_num  + look_loss_num;
+
+    if (0 == loss_calc_loss_num) {
         loss_ = 0;
     } else {
-        loss_ = ((loss_pack_num * 100) << 7) / total_pack_num;  // expand 128 multiple.
+        loss_ = ((loss_calc_loss_num * 100) << 7) / loss_calc_pack_num;  // expand 128 multiple.
         if (12800 < loss_) {
             loss_ = 12800;
         }
