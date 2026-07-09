@@ -220,6 +220,9 @@ typedef struct _GtpAckPacketLoad {
     u16 rto_sn_offset_;
     u32 head_sn_;
     u32 recv_loss_;
+    #if (2 == APPLICATION_TYPE)
+    u32 raw_recv_loss_;  // recv_loss_ plus what this book's FEC already masked, see CalcGameFecPolicy.
+    #endif
 
     // there is this memory field for windows, it's only for passing compiling.
     #if (__linux__ || __APPLE__)
@@ -235,6 +238,9 @@ typedef struct _GtpAckPacket {
     u16 rto_sn_offset_;
     u32 head_sn_;
     u32 recv_loss_;
+    #if (2 == APPLICATION_TYPE)
+    u32 raw_recv_loss_;
+    #endif
 
     // there is this memory field for windows, it's only for passing compiling.
     #if (__linux__ || __APPLE__)
@@ -249,6 +255,9 @@ typedef struct _GtpNackPacketLoad {
     u16 rto_sn_offset_;
     u32 head_sn_;
     u32 recv_loss_;
+    #if (2 == APPLICATION_TYPE)
+    u32 raw_recv_loss_;
+    #endif
 
     // there is this memory field for windows, it's only for passing compiling.
     #if (__linux__ || __APPLE__)
@@ -264,6 +273,9 @@ typedef struct _GtpNackPacket {
     u16 rto_sn_offset_;
     u32 head_sn_;
     u32 recv_loss_;
+    #if (2 == APPLICATION_TYPE)
+    u32 raw_recv_loss_;
+    #endif
 
     // there is this memory field for windows, it's only for passing compiling.
     #if (__linux__ || __APPLE__)
@@ -1071,6 +1083,10 @@ typedef struct _SessionPublicData {
         max_send_loss_per_s_(FLOAT_ZERO),
         bakeup_send_loss_(FLOAT_ZERO),
         game_fec_policy_loss_(FLOAT_ZERO),
+        fec_recovered_cnt_raw_(0),
+        raw_loss_extra_pct_(FLOAT_ZERO),
+        game_fec_raw_loss_(FLOAT_ZERO),
+        bakeup_raw_send_loss_(FLOAT_ZERO),
         session_(NULL),
         send_consume_("gtp_send"),
         recv_consume_("gtp_recv"),
@@ -1100,6 +1116,10 @@ typedef struct _SessionPublicData {
         max_send_loss_per_s_(a.max_send_loss_per_s_),
         bakeup_send_loss_(a.bakeup_send_loss_),
         game_fec_policy_loss_(a.game_fec_policy_loss_),
+        fec_recovered_cnt_raw_(a.fec_recovered_cnt_raw_),
+        raw_loss_extra_pct_(a.raw_loss_extra_pct_),
+        game_fec_raw_loss_(a.game_fec_raw_loss_),
+        bakeup_raw_send_loss_(a.bakeup_raw_send_loss_),
         session_(a.session_),
         send_consume_(a.send_consume_),
         recv_consume_(a.recv_consume_),
@@ -1132,6 +1152,10 @@ typedef struct _SessionPublicData {
         this->max_send_loss_per_s_ = a.max_send_loss_per_s_;
         this->bakeup_send_loss_    = a.bakeup_send_loss_;
         this->game_fec_policy_loss_ = a.game_fec_policy_loss_;
+        this->fec_recovered_cnt_raw_ = a.fec_recovered_cnt_raw_;
+        this->raw_loss_extra_pct_  = a.raw_loss_extra_pct_;
+        this->game_fec_raw_loss_   = a.game_fec_raw_loss_;
+        this->bakeup_raw_send_loss_ = a.bakeup_raw_send_loss_;
         this->bit_rsv_             = a.bit_rsv_;
         this->send_consume_        = a.send_consume_;
         this->recv_consume_        = a.recv_consume_;
@@ -1214,6 +1238,14 @@ typedef struct _SessionPublicData {
         bakeup_send_loss_    = FLOAT_ZERO;
 
         #if (2 == APPLICATION_TYPE)
+        // Same hold-the-second's-peak treatment as max_send_loss_per_s_ above -- see
+        // bakeup_raw_send_loss_'s comment at its declaration for why this can't be a
+        // direct per-packet overwrite.
+        game_fec_raw_loss_    = bakeup_raw_send_loss_;
+        bakeup_raw_send_loss_ = FLOAT_ZERO;
+        #endif
+
+        #if (2 == APPLICATION_TYPE)
         if (max_send_loss_per_s_ > game_fec_policy_loss_) {
             game_fec_policy_loss_ = (max_send_loss_per_s_ * 0.80f) + (game_fec_policy_loss_ * 0.20f);
         } else {
@@ -1223,6 +1255,17 @@ typedef struct _SessionPublicData {
             // the redundancy up for a couple seconds after a spike as a safety margin.
             game_fec_policy_loss_ = (max_send_loss_per_s_ * 0.42f) + (game_fec_policy_loss_ * 0.58f);
         }
+
+        // Fraction of this second's delivered data packets that only arrived because FEC
+        // reconstructed them (recv_stat_.data_pack_pps_ only counts direct arrivals -- see
+        // PackPrepHandler's kGtpDataPackType case -- recovered packets never pass through
+        // there). This gets added on top of the recv_loss_ figure embedded in outgoing
+        // ACK/NACK so the peer's book-policy decision sees loss the current book already
+        // masked, not just what's left over after it.
+        u32 raw_total = recv_stat_.data_pack_pps_ + fec_recovered_cnt_raw_;
+        raw_loss_extra_pct_ = (0 == raw_total) ? FLOAT_ZERO
+                            : ((100.0f * (f32)fec_recovered_cnt_raw_) / (f32)raw_total);
+        fec_recovered_cnt_raw_ = 0;
         #endif
 
         #if (1 == ENABLE_MD_PERF_CHECK)
@@ -1261,6 +1304,26 @@ typedef struct _SessionPublicData {
     f32 max_send_loss_per_s_;
     f32 bakeup_send_loss_;
     f32 game_fec_policy_loss_;
+
+    // Raw (pre-FEC-recovery) loss tracking. max_send_loss_per_s_/game_fec_policy_loss_ are
+    // derived from the peer's data_win_r_ bitmap, which FEC recovery marks as "received" --
+    // so a link recovered well by the CURRENT book looks artificially healthy and never
+    // signals a need to escalate to a stronger book. fec_recovered_cnt_raw_ counts packets
+    // this session's FEC layer had to reconstruct (recv side); raw_loss_extra_pct_ is the
+    // per-second rate derived from it, embedded in outgoing ACK/NACK on top of recv_loss_;
+    // game_fec_raw_loss_ is the peer-reported counterpart (send side), consumed only by
+    // CalcGameFecPolicy() so RTO/disconnect/general quality logic is untouched.
+    u32 fec_recovered_cnt_raw_;
+    f32 raw_loss_extra_pct_;
+    f32 game_fec_raw_loss_;
+    // CalcGameFecBookId()/CalcGameFecPolicy() run on every incoming ACK/NACK (LinkQualityCallback),
+    // not once a second. game_fec_raw_loss_ must therefore be updated the same way
+    // max_send_loss_per_s_/bakeup_send_loss_ already are -- hold the second's peak in
+    // bakeup_raw_send_loss_, only publish it into game_fec_raw_loss_ once a second in
+    // SecondTimerHandler. A direct overwrite per packet let a single lower-than-average
+    // ACK/NACK reading flip the book decision for a fraction of a second before the next
+    // packet corrected it -- that's the book5<->4 flicker seen in testing.
+    f32 bakeup_raw_send_loss_;
 
     void *session_;
 

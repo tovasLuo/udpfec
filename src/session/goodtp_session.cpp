@@ -957,6 +957,14 @@ void WinSnBitmapCallback(slid_win_hdl win_hdl, void *cntxt_hdl, const void *bit_
         nack_pack->rto_sn_offset_  = rto_sn_offset;
         nack_pack->head_sn_        = nack_data->head_sn_;
         nack_pack->recv_loss_      = nack_data->recv_loss_;
+        #if (2 == APPLICATION_TYPE)
+        {
+            // recv_loss_ is already ack-bitmap loss expanded 128x (see slidwin.cpp); add back
+            // the FEC-recovery-masked fraction in the same fixed-point units.
+            u32 raw = nack_data->recv_loss_ + (u32)(session->pb_dt_.raw_loss_extra_pct_ * 128.0f);
+            nack_pack->raw_recv_loss_ = (12800 < raw) ? 12800 : raw;
+        }
+        #endif
 
         chg_len_zone = ((u8*)nack_pack) + sizeof(GtpNackPacketLoad);
 
@@ -1020,6 +1028,12 @@ void WinSnBitmapCallback(slid_win_hdl win_hdl, void *cntxt_hdl, const void *bit_
     ack->rto_sn_offset_  = rto_sn_offset;
     ack->head_sn_        = ack_data->head_sn_;
     ack->recv_loss_      = ack_data->recv_loss_;
+    #if (2 == APPLICATION_TYPE)
+    {
+        u32 raw = ack_data->recv_loss_ + (u32)(session->pb_dt_.raw_loss_extra_pct_ * 128.0f);
+        ack->raw_recv_loss_ = (12800 < raw) ? 12800 : raw;
+    }
+    #endif
 
     chg_len_zone = ((u8*)ack) + sizeof(GtpAckPacketLoad);
 
@@ -1187,6 +1201,8 @@ GtpSession::GtpSession(const goodtp_sock &sfd, const u8 dst_sock_addr[], const u
     new_gap_detected_(0),
     gap_nack_hold_ticks_(0),
     elevated_loss_streak_(0),
+    low_loss_streak_(0),
+    elevated_book_latched_(0),
     #ifdef _SELFDEBUG
     debug_feedback_reason_(kGtpFeedbackDebugUnknown),
     #endif
@@ -1283,6 +1299,8 @@ GtpSession::GtpSession(GtpAddr *tran_addr, const GtpHandler &gtp_hdl, GtpMemPool
     new_gap_detected_(0),
     gap_nack_hold_ticks_(0),
     elevated_loss_streak_(0),
+    low_loss_streak_(0),
+    elevated_book_latched_(0),
     #ifdef _SELFDEBUG
     debug_feedback_reason_(kGtpFeedbackDebugUnknown),
     #endif
@@ -1665,6 +1683,12 @@ u32 GtpSession::Fec2RestoreFrameReceive(void *session, GtpHandler gtp_hdl, GtpPa
     } else {
         #ifdef _SELFDEBUG
         s_obj->debug_feedback_reason_ = kGtpFeedbackDebugFecRestore;
+        #endif
+        #if (2 == APPLICATION_TYPE)
+        // This SN only shows up here because it never physically arrived -- data_win_r_'s
+        // bitmap is about to mark it "received" same as a direct arrival, which is what
+        // makes recv_loss_ under-report actual link loss. Track it separately.
+        s_obj->pb_dt_.fec_recovered_cnt_raw_ += 1;
         #endif
         ret_value = CalcQualityByHandler(s_obj->data_win_r_, s_obj->last_active_ts_us_, GTP_YES);
         if (GTP_OK != ret_value) {
@@ -2447,6 +2471,20 @@ u32 GtpSession::PackPostHandler(GtpPacket *pack, const u32 &size, GtpAddr *tran_
                 }
             }
 
+            #if (2 == APPLICATION_TYPE)
+            // Peer's raw (pre-FEC-recovery) loss -- feeds CalcGameFecPolicy() only, so it
+            // never influences RTO/disconnect/general quality decisions above. Hold this
+            // second's peak rather than overwriting game_fec_raw_loss_ directly: CalcGameFecPolicy
+            // runs on every ACK/NACK, so a bare overwrite let one lower-than-average packet
+            // flip the book decision until the next packet corrected it.
+            {
+                f32 raw = ((f32)(ack_load->raw_recv_loss_)) / 128.0f;
+                if (raw > pb_dt_.bakeup_raw_send_loss_) {
+                    pb_dt_.bakeup_raw_send_loss_ = raw;
+                }
+            }
+            #endif
+
             run_result = ProcAckSnBitMap(chg_len_zone, ack_load->sn_size_, ack_load->head_sn_, tail_sn, rto_sn);
             #if (1 == ENABLE_ARQ)
             arq_.ProcAck(chg_len_zone, ack_load->sn_size_, ack_load->head_sn_, tail_sn, rto_sn,
@@ -2621,6 +2659,15 @@ u32 GtpSession::PackPostHandler(GtpPacket *pack, const u32 &size, GtpAddr *tran_
                     return_code = run_result;
                 }
             }
+
+            #if (2 == APPLICATION_TYPE)
+            {
+                f32 raw = ((f32)(nack_load->raw_recv_loss_)) / 128.0f;
+                if (raw > pb_dt_.bakeup_raw_send_loss_) {
+                    pb_dt_.bakeup_raw_send_loss_ = raw;
+                }
+            }
+            #endif
 
             u32 head_sn        = nack_load->head_sn_;
             u32 rcv_loss       = nack_load->recv_loss_;
@@ -3238,13 +3285,25 @@ void GtpSession::SecondTimerHandler(const u64 &cur_ts_us, ConsumeTime *wheel_con
     #if (2 == APPLICATION_TYPE)
     // pb_dt_.max_send_loss_per_s_ now holds the peak loss seen in the second that just
     // ended. A single isolated burst only pushes this past 10% for the one second it
-    // happened in; a genuinely degrading link keeps doing it every second.
-    if (10.0f <= pb_dt_.max_send_loss_per_s_) {
+    // happened in; a genuinely degrading link keeps doing it every second. game_fec_raw_loss_
+    // is checked too so a link the current book is already masking well still counts toward
+    // the streak instead of looking artificially healthy.
+    if ((10.0f <= pb_dt_.max_send_loss_per_s_) || (10.0f <= pb_dt_.game_fec_raw_loss_)) {
         if (250 > elevated_loss_streak_) {
             elevated_loss_streak_ += 1;
         }
+        low_loss_streak_ = 0;
+        if (2 <= elevated_loss_streak_) {
+            elevated_book_latched_ = GTP_YES;
+        }
     } else {
         elevated_loss_streak_ = 0;
+        if (250 > low_loss_streak_) {
+            low_loss_streak_ += 1;
+        }
+        if (2 <= low_loss_streak_) {
+            elevated_book_latched_ = GTP_NO;
+        }
     }
     #endif
 
@@ -3494,6 +3553,12 @@ u8 GtpSession::CalcGameFecPolicy(void) const {
     if (policy_loss < pb_dt_.max_send_loss_per_s_) {
         policy_loss = pb_dt_.max_send_loss_per_s_;
     }
+    // game_fec_raw_loss_ is the peer-reported pre-recovery loss: what the link would show if
+    // the CURRENT book weren't already masking part of it. Without this floor, a book that's
+    // "working" suppresses the very signal that would tell it to escalate.
+    if (policy_loss < pb_dt_.game_fec_raw_loss_) {
+        policy_loss = pb_dt_.game_fec_raw_loss_;
+    }
     if ((50 <= policy_pps) && ((create_ts_us_ + 2000000) > last_active_ts_us_) && (1.0f > policy_loss)) {
         policy_loss = 1.0f;
     }
@@ -3511,6 +3576,16 @@ u8 GtpSession::CalcGameFecPolicy(void) const {
     // normally after the second consecutive high-loss second.
     if ((2 == loss_idx) && (2 > elevated_loss_streak_)) {
         loss_idx = 1;
+    }
+
+    // Symmetric guard for the downgrade direction (book4->book5). Once elevated_book_latched_
+    // is set (link genuinely escalated to book4), a single noisy second dropping below 10%
+    // isn't enough to give it back -- hold book4 until low_loss_streak_ confirms 2 straight
+    // clean seconds. Only gated by the latch, not unconditionally: a session that has never
+    // escalated must stay free to pick book5 immediately, otherwise every fresh low-loss
+    // session would spend its first couple of seconds incorrectly pinned to book4.
+    if ((1 == loss_idx) && (GTP_YES == elevated_book_latched_) && (2 > low_loss_streak_)) {
+        loss_idx = 2;
     }
 
     return game_fec_policy_table[loss_idx][pps_idx];

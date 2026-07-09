@@ -198,6 +198,22 @@ PRIVATE:
     // the FEC book4 upgrade on streak>=2 in CalcGameFecPolicy() keeps isolated spikes from
     // triggering a redundancy ramp that always arrives after ARQ has already recovered them.
     u8 elevated_loss_streak_;
+    // Mirror of elevated_loss_streak_ for the downgrade direction: consecutive 1s windows
+    // where the per-second loss peak stayed <10%. Without this, a link sitting on book4 that
+    // dips below 10% for a single noisy second drops straight back to book5, then needs
+    // elevated_loss_streak_ to rebuild from 0 to re-escalate -- observed in testing as a
+    // ~0.5s book5<->4 bounce-back around the threshold. Gating the book5 downgrade on this
+    // streak>=2 in CalcGameFecPolicy() requires the link to actually stay clean, not just
+    // report one good second, before giving up book4's redundancy.
+    u8 low_loss_streak_;
+    // Latches to 1 the moment elevated_loss_streak_ actually reaches the escalation
+    // threshold (book5->4), latches back to 0 once low_loss_streak_ reaches the downgrade
+    // threshold. CalcGameFecPolicy()'s downgrade guard only applies while this is set --
+    // otherwise a brand-new session with a naturally quiet link (low_loss_streak_ still
+    // ramping up from 0) would get incorrectly forced onto book4 for its first couple of
+    // seconds, since low_loss_streak_ alone can't tell "never escalated" apart from
+    // "escalated, now recovering".
+    u8 elevated_book_latched_;
     #ifdef _SELFDEBUG
     u8 debug_feedback_reason_;
     #endif
