@@ -9,7 +9,7 @@
  * 覆盖维度：
  *   PART 1 — 9 种丢包/乱序场景（pkts_per_frm=1 均匀发包，150pps）
  *   PART 2 — FEC 自适应策略观测（15% 丢包）
- *   PART 3 — 随机波动丢包 2%-25% — book 自适应切换正确性验证
+ *   PART 3 — 随机波动丢包 2%-30% — book 自适应切换正确性验证
  *   PART 7 — 发包节奏对比（pkts_per_frm=1/2/3/4，10% 丢包，量化改善）
  *
  * 关键指标：
@@ -771,12 +771,15 @@ int main() {
     }
 
     /* ══════════════════════════════════════════════════
-     * PART 3: 随机波动丢包（2%-25%区间）— book 自适应切换正确性
-     * 丢包率不是固定档位，而是每隔 step_ms 就在 [2,25]% 区间内重新随机一次，
-     * 用来验证 FEC book 自适应在持续波动的真实网络下能否跟得上、切得对
+     * PART 3: 随机波动丢包（2%-30%区间）— book 自适应切换正确性
+     * 丢包率不是固定档位，而是每隔 step_ms 就在 [2,30]% 区间内做有界随机游走
+     * （每步漂移最多 ±max_step_pct 个百分点），用来验证 FEC book 自适应在
+     * 持续波动、覆盖低/中/高全档位的真实网络下能否跟得上、切得对
      * （而不是像 book2 vs book4 静态对比那样只看两个固定点位）。
+     * max_step_pct 取得比默认(5)更大，是为了让 60s 内的有限步数也能真正
+     * 走到 2%/30% 两端附近，而不是被夹在区间中段。
      * ══════════════════════════════════════════════════ */
-    printf("\n【PART 3】随机波动丢包 2%%-25%% — book 自适应切换正确性（150pps）\n");
+    printf("\n【PART 3】随机波动丢包 2%%-30%% — book 自适应切换正确性（150pps）\n");
     printf("  参考策略表：0-2%% auto关闭FEC | 2-10%% book2/5 | 10-20%% book4 | 20-35%% book4/3\n");
 
     struct RwScene { const char *name; int step_ms; int dur_s; };
@@ -788,7 +791,7 @@ int main() {
     for (auto &sc : rw_scenes) {
         SceneCfg cfg{};
         cfg.name = sc.name;
-        cfg.loss = LossCfg::RandomWalk(2, 25, sc.step_ms);
+        cfg.loss = LossCfg::RandomWalk(2, 30, sc.step_ms, /*max_step_pct=*/10);
         cfg.pps = 150; cfg.pkts_per_frm = 1; cfg.duration_s = sc.dur_s; cfg.track_book = true;
         auto r = run_scene(cfg);
         sep(); print_result(r, r.book_id_actual, 150);
