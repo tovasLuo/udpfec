@@ -42,3 +42,7 @@ target_link_libraries(game_net_test PRIVATE ${COMMON_LIBS})
 # ── FEC book 切换滞回观测 ──
 add_executable(loss_transition_test loss_transition_test.cpp)
 target_link_libraries(loss_transition_test PRIVATE ${COMMON_LIBS})
+
+# ── 卡头阻塞修复快速验证（S1/S2/L15/L25 定向复现） ──
+add_executable(quick_repro_test quick_repro_test.cpp)
+target_link_libraries(quick_repro_test PRIVATE ${COMMON_LIBS})

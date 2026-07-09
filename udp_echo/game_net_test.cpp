@@ -9,7 +9,7 @@
  * 覆盖维度：
  *   PART 1 — 9 种丢包/乱序场景（pkts_per_frm=1 均匀发包，150pps）
  *   PART 2 — FEC 自适应策略观测（15% 丢包）
- *   PART 3 — 带宽效率扫描（book2 vs book4，0-35% loss）
+ *   PART 3 — 随机波动丢包 2%-25% — book 自适应切换正确性验证
  *   PART 7 — 发包节奏对比（pkts_per_frm=1/2/3/4，10% 丢包，量化改善）
  *
  * 关键指标：
@@ -79,7 +79,7 @@ static uint32_t pkt_crc(const GamePkt *p) {
 }
 
 /* ─────────── 丢包模型 ─────────── */
-enum LossModel { LOSS_NONE, LOSS_RANDOM, LOSS_BURST, LOSS_INTERMIT };
+enum LossModel { LOSS_NONE, LOSS_RANDOM, LOSS_BURST, LOSS_INTERMIT, LOSS_RANDOM_WALK };
 
 struct LossCfg {
     LossModel model     = LOSS_NONE;
@@ -88,6 +88,10 @@ struct LossCfg {
     int  burst_gap      = 40;
     int  intermit_gap   = 100;
     int  intermit_len   = 8;
+    int  rw_min_pct     = 2;     /* LOSS_RANDOM_WALK: 丢包率下界 */
+    int  rw_max_pct     = 25;    /* LOSS_RANDOM_WALK: 丢包率上界 */
+    int  rw_step_ms     = 2000;  /* LOSS_RANDOM_WALK: 每隔多久走一步 */
+    int  rw_max_step_pct = 5;    /* LOSS_RANDOM_WALK: 每步最多漂移多少个百分点 */
 
     LossCfg() = default;
     LossCfg(LossModel m)                                   : model(m) {}
@@ -95,15 +99,30 @@ struct LossCfg {
     LossCfg(LossModel m, int, int bl, int bg)              : model(m), burst_len(bl), burst_gap(bg) {}
     LossCfg(LossModel m, int, int bl, int bg, int ig, int il)
         : model(m), burst_len(bl), burst_gap(bg), intermit_gap(ig), intermit_len(il) {}
+    /* [min_pct, max_pct] 区间内做有界随机游走：每 step_ms 走一步，每步漂移
+     * [-max_step_pct, +max_step_pct] 个百分点（钳制在区间内）。用平滑漂移而非
+     * 瞬间跳变，是因为真实网络丢包率是渐变的，瞬间跳变（如 0%→23%）会触发
+     * goodtp_session.cpp 里为"长时间中断后重连"设计的会话重建逻辑，产生的
+     * 瞬时重复包是那条独立路径的已知行为，不是本测试想验证的对象。
+     * 用于验证 FEC book 自适应切换在持续波动的丢包环境下是否跟得上、切得对。 */
+    static LossCfg RandomWalk(int min_pct, int max_pct, int step_ms, int max_step_pct = 5) {
+        LossCfg c; c.model = LOSS_RANDOM_WALK;
+        c.rw_min_pct = min_pct; c.rw_max_pct = max_pct; c.rw_step_ms = step_ms;
+        c.rw_max_step_pct = max_step_pct;
+        return c;
+    }
 };
 
 struct LossState {
-    const LossCfg *cfg = nullptr;
-    bool  in_drop = false;
-    int   phase   = 0;
+    const LossCfg *cfg   = nullptr;
+    bool  in_drop         = false;
+    int   phase           = 0;
+    int   rw_cur_pct       = -1;     /* LOSS_RANDOM_WALK: 当前生效丢包率，-1=未初始化 */
+    uint64_t rw_next_roll_us = 0;
 
     void reset(const LossCfg *c) {
         cfg = c; in_drop = false; phase = 0;
+        rw_cur_pct = -1; rw_next_roll_us = 0;
     }
 
     bool drop() {
@@ -111,6 +130,22 @@ struct LossState {
         switch (cfg->model) {
         case LOSS_NONE:   return false;
         case LOSS_RANDOM: return (rand() % 100) < cfg->loss_pct;
+        case LOSS_RANDOM_WALK: {
+            uint64_t now = now_us();
+            if (now >= rw_next_roll_us) {
+                if (0 > rw_cur_pct) {
+                    rw_cur_pct = (cfg->rw_min_pct + cfg->rw_max_pct) / 2;  /* 起点：区间中点 */
+                } else {
+                    int step = cfg->rw_max_step_pct;
+                    int delta = step > 0 ? (rand() % (2 * step + 1)) - step : 0;
+                    rw_cur_pct += delta;
+                    if (rw_cur_pct < cfg->rw_min_pct) rw_cur_pct = cfg->rw_min_pct;
+                    if (rw_cur_pct > cfg->rw_max_pct) rw_cur_pct = cfg->rw_max_pct;
+                }
+                rw_next_roll_us = now + (uint64_t)cfg->rw_step_ms * 1000ULL;
+            }
+            return (rand() % 100) < rw_cur_pct;
+        }
         case LOSS_BURST:
         case LOSS_INTERMIT: {
             int total = in_drop ? (cfg->model == LOSS_BURST ? cfg->burst_len : cfg->intermit_len)
@@ -215,6 +250,7 @@ struct SceneCfg {
     int  pkts_per_frm = 3;
     int  duration_s   = 60;
     int  book_id      = 4;
+    bool track_book   = false;  /* 运行期间轮询 book_id，变化时打印时间线（诊断用） */
 };
 
 struct SceneResult {
@@ -424,6 +460,17 @@ SceneResult run_scene(const SceneCfg &cfg) {
     g_hdl_a = CreateGtpInstance(1, 10000000, &cb_a, &mem);
     g_hdl_b = CreateGtpInstance(2, 10000000, &cb_b, &mem);
 
+    /* book_id 时间线追踪（诊断用，仅 track_book=true 时启用） */
+    uint8_t  track_ip_a[64]={}, track_ip_b[64]={};
+    uint64_t scene_start_us   = now_us();
+    uint64_t next_book_poll   = scene_start_us;
+    uint32_t last_book_id     = 0xFFFFFFFF;
+    if (cfg.track_book) {
+        inet_ntop(AF_INET, &g_addr_a.sin_addr, (char*)track_ip_a, 64);
+        inet_ntop(AF_INET, &g_addr_b.sin_addr, (char*)track_ip_b, 64);
+        printf("  ── book_id 时间线（丢包 model=%d 变化时打印）──\n", (int)cfg.loss.model);
+    }
+
     /* 主循环（单线程，严格遵守单线程约束） */
     /* frame_interval = pkts_per_frm / pps（例：3pkt/帧 ÷ 150pps = 20ms → 50fps） */
     uint64_t interval_us  = 1000000ULL * (uint64_t)cfg.pkts_per_frm / (uint64_t)cfg.pps;
@@ -435,6 +482,21 @@ SceneResult run_scene(const SceneCfg &cfg) {
 
     while (now_us() < deadline) {
         uint64_t t = now_us();
+
+        /* ⓪ book_id 时间线轮询（每 200ms，仅变化时打印） */
+        if (cfg.track_book && t >= next_book_poll) {
+            next_book_poll = t + 200000ULL;
+            uint8_t alg_probe[8192] = {};
+            GetAlgorithmParam(g_hdl_a, track_ip_a, track_ip_b, alg_probe, sizeof(alg_probe));
+            const char *bp = strstr((char*)alg_probe, "book_id=");
+            uint32_t cur_book = 0;
+            if (bp) sscanf(bp, "book_id= %u", &cur_book);
+            if (cur_book != last_book_id) {
+                last_book_id = cur_book;
+                printf("    t=%5.2fs  book实=%u  当前注入丢包=%d%%\n",
+                       (t - scene_start_us) / 1e6, cur_book, g_loss.rw_cur_pct);
+            }
+        }
 
         /* ① timer A（hdl_a 专属） */
         if (t >= next_timer_a) {
@@ -709,45 +771,28 @@ int main() {
     }
 
     /* ══════════════════════════════════════════════════
-     * PART 3: 带宽效率扫描
+     * PART 3: 随机波动丢包（2%-25%区间）— book 自适应切换正确性
+     * 丢包率不是固定档位，而是每隔 step_ms 就在 [2,25]% 区间内重新随机一次，
+     * 用来验证 FEC book 自适应在持续波动的真实网络下能否跟得上、切得对
+     * （而不是像 book2 vs book4 静态对比那样只看两个固定点位）。
      * ══════════════════════════════════════════════════ */
-    printf("\n【PART 3】带宽效率扫描（book2 vs book4，0/5/15/25/35%% 丢包，100pps）\n");
+    printf("\n【PART 3】随机波动丢包 2%%-25%% — book 自适应切换正确性（150pps）\n");
+    printf("  参考策略表：0-2%% auto关闭FEC | 2-10%% book2/5 | 10-20%% book4 | 20-35%% book4/3\n");
 
-    struct SwRow { int loss,book; double fec_pct,ovhd,delivery; uint32_t fec_rec,arq_rto; };
-    std::vector<SwRow> sw_rows;
+    struct RwScene { const char *name; int step_ms; int dur_s; };
+    RwScene rw_scenes[] = {
+        {"RW1 快速波动（每2s重随机）", 2000, 60},
+        {"RW2 慢速波动（每6s重随机）", 6000, 60},
+    };
 
-    int losses[] = {0,5,15,25,35};
-    int sw_books[] = {2,4};
-    for (int loss : losses) {
-        for (int bk : sw_books) {
-            SceneCfg cfg{};
-            cfg.loss.model = LOSS_RANDOM; cfg.loss.loss_pct = loss;
-            cfg.pps = 100; cfg.pkts_per_frm = 2; cfg.duration_s = 60; cfg.book_id = bk;
-            char nm[64]; snprintf(nm,sizeof(nm),"loss=%d%% book=%d", loss, bk);
-            cfg.name = nm;
-            auto r = run_scene(cfg);
-            SwRow row{};
-            row.loss = loss; row.book = bk;
-            row.fec_pct  = r.bw_a.total_b > 0 ? r.bw_a.fec_b*100.0/r.bw_a.total_b : 0;
-            uint64_t tt  = r.bw_a.total_b + r.bw_b.total_b;
-            row.ovhd     = r.app_payload > 0 ? (tt-r.app_payload)*100.0/r.app_payload : 0;
-            row.delivery = r.sent_pkt > 0 ? r.recv_pkt*100.0/r.sent_pkt : 0;
-            row.fec_rec  = r.fec_rec;
-            row.arq_rto  = r.arq_rto;
-            sw_rows.push_back(row);
-        }
+    for (auto &sc : rw_scenes) {
+        SceneCfg cfg{};
+        cfg.name = sc.name;
+        cfg.loss = LossCfg::RandomWalk(2, 25, sc.step_ms);
+        cfg.pps = 150; cfg.pkts_per_frm = 1; cfg.duration_s = sc.dur_s; cfg.track_book = true;
+        auto r = run_scene(cfg);
+        sep(); print_result(r, r.book_id_actual, 150);
     }
-
-    sep('=');
-    printf("  PART 3 带宽效率汇总\n");
-    sep('-',80);
-    printf("  %-8s %-6s %8s %9s %10s %8s %8s\n",
-           "丢包率","book","FEC占比","总开销","包交付率","FEC恢复","ARQ-RTO");
-    sep('-',80);
-    for (auto &row : sw_rows)
-        printf("  %-8d %-6d %7.1f%% %8.1f%% %9.2f%% %8u %8u\n",
-               row.loss, row.book, row.fec_pct, row.ovhd,
-               row.delivery, row.fec_rec, row.arq_rto);
 
     /* ══════════════════════════════════════════════════
      * 综合分析
