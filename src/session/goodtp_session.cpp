@@ -2800,7 +2800,7 @@ u32 GtpSession::CalcRealtimeReorderWaitUs() const {
             const u64 density_ref_us = 8000ULL;
             const u64 density_wait_us = (density_ref_us * density_ref_us * book_scale_num)
                                       / (((u64)interval_us) * book_scale_den);
-            fec_wait_us = (24000ULL < density_wait_us) ? 24000U : (u32)density_wait_us;
+            fec_wait_us = (12000ULL < density_wait_us) ? 12000U : (u32)density_wait_us;
         }
 
         if (wait_us < fec_wait_us) {
@@ -2809,28 +2809,34 @@ u32 GtpSession::CalcRealtimeReorderWaitUs() const {
     }
     #endif
 
-    u32 max_wait_us = 30000;
+    u32 max_wait_us = 15000;
     if (170 <= pps) {
-        max_wait_us = 24000;
+        max_wait_us = 12000;
     } else if (110 <= pps) {
-        max_wait_us = 20000;
+        max_wait_us = 10000;
     } else if (50 <= pps) {
-        max_wait_us = 20000;
+        max_wait_us = 10000;
     }
 
     /* The fixed caps above follow FEC fill timing and do not reflect actual RTT.
        On WiFi or public networks, one NACK plus retransmission round trip can often
        exceed 20-30ms. If the wait window is too short, skip-ahead may create avoidable
        out-of-order delivery. Use the continuously updated RTT measurement to raise the
-       cap enough for roughly one NACK/retransmit round trip; loopback/LAN RTT is low,
-       so this usually has no effect there. */
+       cap enough for a fraction of one NACK/retransmit round trip; loopback/LAN RTT is low,
+       so this usually has no effect there.
+       Deliberately tuned to about half of the previous margin (was 1.5x RTT / 60ms ceiling):
+       real WiFi testing (CS2, ~9% loss) showed this wait ceiling was routinely maxed out by
+       RTT (~60ms), producing 40-70ms delivery-gap spikes that read as game stutter/frame
+       jumps. Traded ~1% extra late/lost frames (skip-ahead fires sooner) for roughly halved
+       worst-case jitter, since occasional low-rate loss is far less noticeable in-game than
+       large jitter spikes. */
     if (0 != pb_dt_.rtt_us_) {
-        const u32 rtt_based_wait_us = (pb_dt_.rtt_us_ * 3) / 2;
+        const u32 rtt_based_wait_us = (pb_dt_.rtt_us_ * 3) / 4;
         if (max_wait_us < rtt_based_wait_us) {
             max_wait_us = rtt_based_wait_us;
         }
     }
-    const u32 kAbsoluteWaitCeilingUs = 60000;
+    const u32 kAbsoluteWaitCeilingUs = 30000;
     if (max_wait_us > kAbsoluteWaitCeilingUs) {
         max_wait_us = kAbsoluteWaitCeilingUs;
     }
