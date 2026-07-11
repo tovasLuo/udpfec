@@ -1415,14 +1415,30 @@ inline u32 GtpInsertStreamKeyHeader(GtpPacket *pack, const u64 &stream_key) {
     const u32 old_header_offset = pack->header_offset_;
     const u32 old_pack_size = pack->pack_size_;
 
-    memmove(((u8*)pack) + old_header_offset + key_size, ((u8*)pack) + old_header_offset,
-            old_pack_size - old_header_offset);
+    // The key lives at the FRONT of the variable header (right after the fixed GtpPacket
+    // struct, after first_pack_sn_ if repeat_counter_ != 0) -- must match
+    // GtpReadPacketStreamKey()/GtpWriteStreamKeyHeader()'s field order exactly. The old code
+    // opened the memmove gap at old_header_offset (right before payload) while writing the key
+    // at sizeof(GtpPacket) (right after the fixed header) -- those only coincide when there are
+    // no other extension fields, corrupting ChangeZone/ts_us_/rtt_us_/loss_ whenever any of them
+    // were already present (confirmed via streamkey_changezone_test.cpp).
+    u32 key_pos = sizeof(GtpPacket);
+    if (0 != ((u8)(pack->repeat_counter_))) {
+        key_pos += sizeof(u32);
+    }
+
+    if (key_pos > old_header_offset) {
+        return 0;
+    }
+
+    memmove(((u8*)pack) + key_pos + key_size, ((u8*)pack) + key_pos,
+            old_pack_size - key_pos);
 
     u32 hash = 0;
     u32 user_id = 0;
     GtpSplitStreamKey(stream_key, &hash, &user_id);
 
-    u8 *move = ((u8*)pack) + sizeof(GtpPacket);
+    u8 *move = ((u8*)pack) + key_pos;
     GtpWriteU32Unaligned(move, hash);
     move += sizeof(u32);
     GtpWriteU32Unaligned(move, user_id);
@@ -1463,12 +1479,22 @@ inline u32 GtpRemoveStreamKeyHeader(GtpPacket *pack) {
     const u32 old_header_offset = pack->header_offset_;
     const u32 old_pack_size = pack->pack_size_;
 
-    if ((sizeof(GtpPacket) + key_size) > old_header_offset) {
+    // Mirror of GtpInsertStreamKeyHeader()'s fix: the key sits at the FRONT of the variable
+    // header (after first_pack_sn_ if repeat_counter_ != 0), not at old_header_offset - key_size
+    // (right before payload). The old code assumed the latter, which only happened to be correct
+    // when the key was the sole extension field -- it silently corrupted any ChangeZone/ts_us_/
+    // rtt_us_/loss_ field placed after the key by closing the gap in the wrong spot.
+    u32 key_pos = sizeof(GtpPacket);
+    if (0 != ((u8)(pack->repeat_counter_))) {
+        key_pos += sizeof(u32);
+    }
+
+    if ((key_pos + key_size) > old_header_offset) {
         return 0;
     }
 
-    memmove(((u8*)pack) + old_header_offset - key_size, ((u8*)pack) + old_header_offset,
-            old_pack_size - old_header_offset);
+    memmove(((u8*)pack) + key_pos, ((u8*)pack) + key_pos + key_size,
+            old_pack_size - key_pos - key_size);
 
     pack->has_check_flag_ = GTP_NO;
     pack->header_offset_  = (u8)(old_header_offset - key_size);
