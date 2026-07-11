@@ -10,10 +10,11 @@ class TranMemPool;
 class RealtimeReorderWindow {
  public:
     enum PushResult {
-        kPushDrop = 0,      // Duplicate packet already in cache; keep silent-drop semantics.
+        kPushDrop = 0,      // Already-delivered duplicate (pre-dates reset_watermark_sn_); silent, uncounted.
         kPushDirect,
         kPushCached,
-        kPushStaleDeliver   // Late FEC/ARQ restored packet; bypass cache and deliver now.
+        kPushStaleDeliver,  // Late FEC/ARQ rescue arriving after its slot was skipped; delivered anyway, out of order.
+        kPushGiveUpDrop     // Late FEC/ARQ rescue past stale_drop_us; dropped instead of delivered stale.
     };
 
     struct Frame {
@@ -51,7 +52,7 @@ class RealtimeReorderWindow {
     State Snapshot(const u64 &ts_us) const;
 
     PushResult Push(const u32 &sn, const u8 *frame, const u32 &frame_size, const GtpAddr &tran_addr,
-                    const u64 &ts_us, TranMemPool *pack_mem_pool = NULL);
+                    const u64 &ts_us, TranMemPool *pack_mem_pool = NULL, const u32 &stale_drop_us = 0);
     bool PopReady(const u64 &ts_us, const u32 &target_cache_num, const u32 &wait_us, Frame *out_frame);
 
  private:
@@ -89,12 +90,12 @@ class RealtimeReorderWindow {
     bool inited_;
 
     // expect_sn_ at the moment of the most recent Reset() (GtpSession::ResetSession(), called
-    // after a gap too large to bridge incrementally forces a resync). Every delivery path here
-    // -- in-order via PopReady/kPushDirect, or out-of-order via kPushStaleDeliver -- only ever
-    // hands out an sn strictly before expect_sn_ at the time, so this is a precise "everything
-    // before this point was already delivered" watermark that Push() can still consult after
-    // Reset() wipes expect_sn_/the cache. Not cleared by Reset() itself -- it needs to survive
-    // the very reset it's recorded from. See Push() for how it's used.
+    // after a gap too large to bridge incrementally forces a resync). Every delivery path here --
+    // in-order via PopReady/kPushDirect, or out-of-order via kPushStaleDeliver -- only ever hands
+    // out an sn strictly before expect_sn_ at the time, so this is a precise "everything before
+    // this point was already delivered" watermark that Push() can still consult after Reset()
+    // wipes expect_sn_/the cache. Not cleared by Reset() itself -- it needs to survive the very
+    // reset it's recorded from. See Push() for how it's used.
     u32  reset_watermark_sn_;
     bool has_reset_watermark_;
 };

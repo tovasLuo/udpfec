@@ -963,6 +963,15 @@ void WinSnBitmapCallback(slid_win_hdl win_hdl, void *cntxt_hdl, const void *bit_
             // the FEC-recovery-masked fraction in the same fixed-point units.
             u32 raw = nack_data->recv_loss_ + (u32)(session->pb_dt_.raw_loss_extra_pct_ * 128.0f);
             nack_pack->raw_recv_loss_ = (12800 < raw) ? 12800 : raw;
+            #ifdef _SELFDEBUG
+            GtpLog(session->cb_.write_log_cb_, kGtpSessionMd, kGtpLogLevelDebug,
+                   "raw_loss_compose(nack): %s:%u recv_loss_=%u(%.2f%%) raw_loss_extra_pct_=%.2f%% "
+                   "-> raw=%u(%.2f%%) capped=%u(%.2f%%).\r\n",
+                   session->pb_dt_.self_ip_, (u32)(session->pb_dt_.self_port_),
+                   nack_data->recv_loss_, nack_data->recv_loss_ / 128.0f,
+                   session->pb_dt_.raw_loss_extra_pct_, raw, raw / 128.0f,
+                   nack_pack->raw_recv_loss_, nack_pack->raw_recv_loss_ / 128.0f);
+            #endif
         }
         #endif
 
@@ -1032,6 +1041,15 @@ void WinSnBitmapCallback(slid_win_hdl win_hdl, void *cntxt_hdl, const void *bit_
     {
         u32 raw = ack_data->recv_loss_ + (u32)(session->pb_dt_.raw_loss_extra_pct_ * 128.0f);
         ack->raw_recv_loss_ = (12800 < raw) ? 12800 : raw;
+        #ifdef _SELFDEBUG
+        GtpLog(session->cb_.write_log_cb_, kGtpSessionMd, kGtpLogLevelDebug,
+               "raw_loss_compose(ack): %s:%u recv_loss_=%u(%.2f%%) raw_loss_extra_pct_=%.2f%% "
+               "-> raw=%u(%.2f%%) capped=%u(%.2f%%).\r\n",
+               session->pb_dt_.self_ip_, (u32)(session->pb_dt_.self_port_),
+               ack_data->recv_loss_, ack_data->recv_loss_ / 128.0f,
+               session->pb_dt_.raw_loss_extra_pct_, raw, raw / 128.0f,
+               ack->raw_recv_loss_, ack->raw_recv_loss_ / 128.0f);
+        #endif
     }
     #endif
 
@@ -1199,7 +1217,7 @@ GtpSession::GtpSession(const goodtp_sock &sfd, const u8 dst_sock_addr[], const u
     rmv_close_alg_period_us_(0),
     nack_burst_detected_(0),
     new_gap_detected_(0),
-    gap_nack_hold_ticks_(0),
+    gap_nack_hold_start_us_(0),
     elevated_loss_streak_(0),
     low_loss_streak_(0),
     elevated_book_latched_(0),
@@ -1241,7 +1259,8 @@ GtpSession::GtpSession(const goodtp_sock &sfd, const u8 dst_sock_addr[], const u
     pack_mem_pool_(pack_mem_pool),
     realtime_reorder_win_(),
     realtime_reorder_next_deliver_ts_us_(0),
-    realtime_reorder_late_rescue_(0) {
+    realtime_reorder_late_rescue_(0),
+    realtime_reorder_giveup_drop_(0) {
     win_mem_s_  = GtpAlignSessionMem(((u8*)this) + sizeof(GtpSession));
     win_mem_r_  = GtpAlignSessionMem(win_mem_s_ + SlidwinInstanceSize());
     filter_mem_ = GtpAlignSessionMem(win_mem_r_ + SlidwinInstanceSize());
@@ -1297,7 +1316,7 @@ GtpSession::GtpSession(GtpAddr *tran_addr, const GtpHandler &gtp_hdl, GtpMemPool
     rmv_close_alg_period_us_(0),
     nack_burst_detected_(0),
     new_gap_detected_(0),
-    gap_nack_hold_ticks_(0),
+    gap_nack_hold_start_us_(0),
     elevated_loss_streak_(0),
     low_loss_streak_(0),
     elevated_book_latched_(0),
@@ -1339,7 +1358,8 @@ GtpSession::GtpSession(GtpAddr *tran_addr, const GtpHandler &gtp_hdl, GtpMemPool
     pack_mem_pool_(pack_mem_pool),
     realtime_reorder_win_(),
     realtime_reorder_next_deliver_ts_us_(0),
-    realtime_reorder_late_rescue_(0) {
+    realtime_reorder_late_rescue_(0),
+    realtime_reorder_giveup_drop_(0) {
     win_mem_s_  = GtpAlignSessionMem(((u8*)this) + sizeof(GtpSession));
     win_mem_r_  = GtpAlignSessionMem(win_mem_s_ + SlidwinInstanceSize());
     filter_mem_ = GtpAlignSessionMem(win_mem_r_ + SlidwinInstanceSize());
@@ -2407,7 +2427,7 @@ u32 GtpSession::PackPostHandler(GtpPacket *pack, const u32 &size, GtpAddr *tran_
 
             #if (2 == APPLICATION_TYPE)
             if ((0 != recv_max_data_sn_) && (1 < ((i32)(pack->pack_sn_ - recv_max_data_sn_)))) {
-                gap_nack_hold_ticks_ = 2;
+                gap_nack_hold_start_us_ = last_active_ts_us_;
             }
 
             if ((0 == recv_max_data_sn_) || (0 < ((i32)(pack->pack_sn_ - recv_max_data_sn_)))) {
@@ -2806,46 +2826,169 @@ u32 GtpSession::CalcRealtimeReorderWaitUs() const {
         if (wait_us < fec_wait_us) {
             wait_us = fec_wait_us;
         }
+
+        // Floor wait_us at CalcFecMatrixIntervalMultiplier() packet intervals: the sibling/parity
+        // packet a decode needs can't physically arrive sooner than that, no matter how the
+        // density estimate above scales. At low pps this floor DOMINATES -- e.g. Apex-range 40pps
+        // has a 25ms interval, so FEC genuinely needs multiple of those to have a fair chance,
+        // while the density calc above (inversely proportional to interval_us) actually shrinks at
+        // low pps and would starve exactly the range that needs the most room. Without this floor,
+        // low-pps sessions would skip-ahead (and, since late arrivals are only delivered up to
+        // CalcRealtimeReorderStaleDropUs()'s budget, at risk of being lost) FEC-recoverable packets
+        // before decode ever had a chance to complete. Book-aware, not a flat x2: see
+        // CalcFecMatrixIntervalMultiplier() for why book4's 2x2 needs x3, not x2 like book5's 2x1.
+        const u32 kMatrixIntervalFloorUs = interval_us * CalcFecMatrixIntervalMultiplier();
+        if (wait_us < kMatrixIntervalFloorUs) {
+            wait_us = kMatrixIntervalFloorUs;
+        }
     }
     #endif
 
-    u32 max_wait_us = 15000;
-    if (170 <= pps) {
-        max_wait_us = 12000;
-    } else if (110 <= pps) {
-        max_wait_us = 10000;
-    } else if (50 <= pps) {
-        max_wait_us = 10000;
-    }
-
-    /* The fixed caps above follow FEC fill timing and do not reflect actual RTT.
-       On WiFi or public networks, one NACK plus retransmission round trip can often
-       exceed 20-30ms. If the wait window is too short, skip-ahead may create avoidable
-       out-of-order delivery. Use the continuously updated RTT measurement to raise the
-       cap enough for a fraction of one NACK/retransmit round trip; loopback/LAN RTT is low,
-       so this usually has no effect there.
-       Deliberately tuned to about half of the previous margin (was 1.5x RTT / 60ms ceiling):
-       real WiFi testing (CS2, ~9% loss) showed this wait ceiling was routinely maxed out by
-       RTT (~60ms), producing 40-70ms delivery-gap spikes that read as game stutter/frame
-       jumps. Traded ~1% extra late/lost frames (skip-ahead fires sooner) for roughly halved
-       worst-case jitter, since occasional low-rate loss is far less noticeable in-game than
-       large jitter spikes. */
-    if (0 != pb_dt_.rtt_us_) {
-        const u32 rtt_based_wait_us = (pb_dt_.rtt_us_ * 3) / 4;
-        if (max_wait_us < rtt_based_wait_us) {
-            max_wait_us = rtt_based_wait_us;
-        }
-    }
-    const u32 kAbsoluteWaitCeilingUs = 30000;
-    if (max_wait_us > kAbsoluteWaitCeilingUs) {
-        max_wait_us = kAbsoluteWaitCeilingUs;
-    }
-
-    if (max_wait_us < wait_us) {
-        return max_wait_us;
+    /* Hard safety ceiling -- NOT a latency-tuning knob, a correctness bound. A prior version of
+       this function removed the ceiling entirely (reasoning: since late arrivals are now dropped
+       rather than delivered out of order, "wait longer" seemed strictly better -- catches more
+       recoveries in-window instead of losing them). That broke badly under sustained loss:
+       AvgIntervalUs() (this function's wait_us baseline) is an EWMA of observed packet spacing,
+       and under real loss it can itself balloon arbitrarily large, which fed straight back into
+       an ever-growing wait -- skip-ahead stopped firing, everything piled up undelivered, and
+       fec_loss_test's high-loss scenarios saw single delivery gaps over a second and up to 100%
+       apparent loss (nothing left the cache before the test ended). This ceiling exists purely to
+       guarantee skip-ahead always fires within a bounded time regardless of how bad the link gets;
+       80ms was chosen to clear the low-pps FEC floor above (50ms at 40pps) with margin, not to hit
+       any particular jitter target. */
+    const u32 kWaitSafetyCeilingUs = 80000;
+    if (wait_us > kWaitSafetyCeilingUs) {
+        wait_us = kWaitSafetyCeilingUs;
     }
 
     return wait_us;
+}
+
+u32 GtpSession::CalcFecMatrixIntervalMultiplier() const {
+    /* How many packet intervals a decode's own row/column group needs to physically finish
+       arriving, worst case across all positions in the block -- shared by CalcRealtimeReorderWaitUs()
+       (how long to wait before skip-ahead) and CalcGapNackHoldUs() (how long before firing the
+       gap-triggered NACK). The two MUST use the same value: if NACK's hold is longer than the wait
+       ceiling, NACK fires after skip-ahead already gave up on the gap, and the resend it triggers
+       is doomed before it's even requested (measured regression, see CalcGapNackHoldUs()'s history).
+
+       Traced from goodtp_fec2.cpp's actual encode/send order (HorizontalEncode()/VerticalEncode(),
+       which send a row/column's parity packet the moment that row/column's last element has been
+       encoded, not once the whole block is done):
+         - book5 (2x1, H-only): a 2-wide single row. The row parity is sent right after the row's
+           2nd (last) element -- worst case for any position in the row is ~2 intervals.
+         - book4 (2x2, H+V): row/col parities for the *second* row/column aren't sent until the
+           block's *last* element is processed (position 3 of 4), one full interval later than
+           book4's own naive 2x estimate would suggest. Confirmed empirically: measured FEC's
+           actual share of recoveries (28-46%) was roughly half the ~97% independent-XOR-paths
+           theory predicts for book4, with the gap traced to exactly this -- the "second row"
+           positions were being skip-ahead'd before their parity had a chance to even be sent.
+           3x covers that worst case.
+       book0/1/3 (4x4-class, not currently reachable via CalcGameFecPolicy()'s game-mode table,
+       which only ever selects 4 or 5) are given a conservative 4x by the same row-width logic,
+       untested since the policy table can't actually select them in game mode. */
+    switch (fec2_obj_.RecvFecBookId()) {
+        case 0:
+        case 1:
+        case 3:
+            return 4;
+        case 4:
+        case 6:
+        case 7:
+            return 3;
+        case 2:
+        case 5:
+        default:
+            return 2;
+    }
+}
+
+u32 GtpSession::CalcGapNackHoldUs() const {
+    /* How long to sit on a newly-detected gap before firing the gap-triggered NACK burst
+       (new_gap_detected_ = 3). Was a fixed 2 timer ticks (~20ms at a typical 10ms app timer
+       cadence), independent of pps or book. That's tuned for CS2-range pps on book4 (128pps: FEC's
+       row/column completion floor is ~15.6ms, see CalcRealtimeReorderWaitUs()), so a fixed 20ms
+       hold lets FEC go first most of the time in that one specific case. At Apex-range pps
+       (40-60pps) FEC's floor stretches well past a fixed 20ms hold -- NACK fires and wins the race
+       on essentially every loss, spending a retransmit (and eating into max_retran_times_'s budget)
+       on packets FEC would have recovered for free.
+
+       Scaled to CalcFecMatrixIntervalMultiplier() packet intervals -- matching
+       CalcRealtimeReorderWaitUs()'s own FEC floor exactly (same helper, same multiplier), NOT
+       beyond it and NOT a flat number independent of book. A flat 2x was tried first when the
+       floor above was still flat 2x for every book; once the floor became book-aware (3x for
+       book4), this needed to move with it -- holding NACK to the old flat 2x while wait_us's own
+       floor moved to 3x for book4 would have reintroduced the exact bug this function's history
+       already flags: NACK firing before wait_us gives up is required for its resend to have any
+       chance of counting once it lands. No safety ceiling needed here (unlike
+       CalcRealtimeReorderWaitUs()'s 80ms cap): computed fresh from current pps/book on every
+       TimerHandler tick against gap_nack_hold_start_us_ (not accumulated via an EWMA, so it can't
+       run away unbounded), NOT snapshotted once at gap-detection time -- a book switch mid-hold
+       must be picked up immediately so this keeps tracking CalcRealtimeReorderWaitUs()'s own live
+       floor, the same way that floor tracks it (see gap_nack_hold_start_us_'s declaration for the
+       bug this fixes: a frozen deadline computed under book4's 3x could still be sitting there
+       after a mid-hold switch down to book5's 2x, firing NACK *after* wait_us's now-shorter floor
+       already gave up on the gap -- exactly the doomed-resend scenario this function exists to
+       avoid. The reverse switch, book5's 2x -> book4's 3x, is the harmless direction: NACK just
+       fires earlier than the new floor needs, racing FEC instead of missing the deadline). */
+    u32 pps = pb_dt_.recv_stat_.data_pack_pps_;
+    if (pps < pb_dt_.send_stat_.data_pack_pps_) {
+        pps = pb_dt_.send_stat_.data_pack_pps_;
+    }
+
+    if (0 == pps) {
+        return 20000;
+    }
+
+    const u32 interval_us = 1000000U / pps;
+    u32 hold_us = interval_us * CalcFecMatrixIntervalMultiplier();
+
+    const u32 kGapNackHoldFloorUs = 10000;
+    if (hold_us < kGapNackHoldFloorUs) {
+        hold_us = kGapNackHoldFloorUs;
+    }
+
+    return hold_us;
+}
+
+u32 GtpSession::CalcRealtimeReorderStaleDropUs() const {
+    /* Give-up gate for RealtimeReorderWindow::Push()'s late-rescue path -- SRT calls the
+       equivalent mechanism TLPKTDROP (too-late packet drop): a hard deadline past which a
+       recovered packet is dropped instead of delivered late/out-of-order.
+
+       Restored (was briefly disabled -- see git history/this session's earlier turns -- after
+       measuring ~92% completion at 20% loss, with only 12/154 lost frames at 128pps being
+       legitimately-recovered-but-dropped-as-stale; that made the gate look like it was costing
+       more than it was worth). Re-enabled because the real driver of that 92% ceiling turned out
+       to be the separate game_fec_policy_table 25%-50%-bracket book-flapping bug (see that
+       table's comment), not this gate -- with the flapping bug fixed, the gate's actual cost is
+       small and the ordering/staleness guarantee it buys back is worth it.
+
+       Deadline is exactly 1x measured RTT (not 2x, not floored/scaled): within a single RTT, a
+       NACK-triggered fast resend can complete; a recovery that needed more than one round trip is
+       unlikely to still be useful and is better counted as loss than delivered very stale.
+
+       Gated on book4 being active (RecvFecBookId() == 4), not a separate loss estimator like the
+       earlier IsLowModerateLossRegime() version -- book4 only activates above the game policy
+       table's 10% threshold (CalcGameFecPolicy()), so this directly reuses that decision instead
+       of re-deriving "high loss" from a second signal. Below that threshold (book5/off), skip the
+       gate entirely and always deliver late rescues: loss is low enough there that stale rescues
+       are rare, and paying an ordering-guarantee completion-rate cost isn't worth it when the
+       thing it's guarding against barely happens. Only above the threshold, where the reorder
+       window is more likely to see genuinely stale recoveries, does the tradeoff favor dropping
+       them over delivering out of order.
+
+       Gated only on having a real RTT sample, so a brand-new session's first few frames are never
+       dropped before there's been time to establish steady state. */
+    if (0 == pb_dt_.rtt_us_) {
+        return 0;
+    }
+
+    if (4 != fec2_obj_.RecvFecBookId()) {
+        return 0;
+    }
+
+    return pb_dt_.rtt_us_;
 }
 
 u32 GtpSession::CalcRealtimeReorderMaxCacheNum() const {
@@ -2976,8 +3119,24 @@ u32 GtpSession::DeliverFrameInOrder(GtpHandler_p gtp_hdl, const u32 &first_sn, c
     }
 
     const u64 ts_us = last_active_ts_us_;
+    const u32 stale_drop_us = CalcRealtimeReorderStaleDropUs();
     RealtimeReorderWindow::PushResult push_result =
-        realtime_reorder_win_.Push(first_sn, frame, frame_size, *tran_addr, ts_us, &pack_mem_pool_);
+        realtime_reorder_win_.Push(first_sn, frame, frame_size, *tran_addr, ts_us, &pack_mem_pool_, stale_drop_us);
+    if (RealtimeReorderWindow::kPushGiveUpDrop == push_result) {
+        realtime_reorder_giveup_drop_ += 1;
+
+        #ifdef _SELFDEBUG
+        GtpLog(cb_.write_log_cb_, kGtpSessionMd, kGtpLogLevelDebug,
+               "%s:%u<-->%s:%u realtime reorder gave up on stale rescue(sn=%u expect_sn=%u cache_num=%u "\
+               "stale_drop_us=%uus now=%lluus).\r\n",
+               pb_dt_.self_ip_, (u32)(pb_dt_.self_port_), pb_dt_.peer_ip_, (u32)(pb_dt_.peer_port_),
+               first_sn, realtime_reorder_win_.ExpectSn(), realtime_reorder_win_.Count(), stale_drop_us,
+               (unsigned long long)ts_us);
+        #endif
+
+        return FlushRealtimeReorder(ts_us, gtp_hdl);
+    }
+
     if ((RealtimeReorderWindow::kPushDirect == push_result)
      || (RealtimeReorderWindow::kPushStaleDeliver == push_result)) {
         if (RealtimeReorderWindow::kPushStaleDeliver == push_result) {
@@ -3066,11 +3225,10 @@ timer_handler_continue_pos_:
     }
 
     #if (2 == APPLICATION_TYPE)
-    if ((GTP_ON == pb_dt_.alg_top_switch_) && (0 < gap_nack_hold_ticks_)) {
-        gap_nack_hold_ticks_ -= 1;
-        if (0 == gap_nack_hold_ticks_) {
-            new_gap_detected_ = 3;
-        }
+    if ((GTP_ON == pb_dt_.alg_top_switch_) && (0 != gap_nack_hold_start_us_)
+     && ((ts_us - gap_nack_hold_start_us_) >= CalcGapNackHoldUs())) {
+        gap_nack_hold_start_us_ = 0;
+        new_gap_detected_ = 3;
     }
     if ((GTP_ON == pb_dt_.alg_top_switch_) && (0 < new_gap_detected_)) {
         new_gap_detected_ -= 1;
@@ -3311,6 +3469,14 @@ void GtpSession::SecondTimerHandler(const u64 &cur_ts_us, ConsumeTime *wheel_con
             elevated_book_latched_ = GTP_NO;
         }
     }
+    #ifdef _SELFDEBUG
+    GtpLog(cb_.write_log_cb_, kGtpSessionMd, kGtpLogLevelDebug,
+           "loss_streak: %s:%u max_send_loss=%.2f game_fec_raw_loss=%.2f game_fec_policy_loss=%.2f "
+           "elevated_streak=%u low_streak=%u latched=%u.\r\n",
+           pb_dt_.self_ip_, (u32)(pb_dt_.self_port_),
+           pb_dt_.max_send_loss_per_s_, pb_dt_.game_fec_raw_loss_, pb_dt_.game_fec_policy_loss_,
+           (u32)elevated_loss_streak_, (u32)low_loss_streak_, (u32)elevated_book_latched_);
+    #endif
     #endif
 
     ai_learn_sn_delta_ = pb_dt_.recv_stat_.data_pack_pps_ + (pb_dt_.recv_stat_.data_pack_pps_ >> 1);
@@ -3550,7 +3716,50 @@ u8 GtpSession::CalcGameFecPolicy(void) const {
         {0xFF,  0xFF,   5,    5,     5,      5,      5},  // loss < 2%  (pps<50: FEC off; pps>=50: book5)
         {  5,     5,    5,    5,     5,      5,      5},  // 2% <= loss < 10%
         {  4,     4,    4,    4,     4,      4,      4},  // 10% <= loss < 25%
-        {0xFF,  0xFF, 0xFF, 0xFF,  0xFF,   0xFF,   0xFF},  // 25% <= loss < 50%  (not handled)
+        {0xFF,  0xFF, 0xFF, 0xFF,  0xFF,   0xFF,   0xFF},  // 25% <= loss < 50%  (not handled -- see
+                                                            // CalcGameFecPolicy()'s header comment: filling
+                                                            // this row with book4 was tried and reverted. It
+                                                            // fixed the book4<->5 flapping under sustained
+                                                            // high loss (confirmed: at 128pps/20% loss frame
+                                                            // loss dropped from ~8% to ~1-2%), but also
+                                                            // caused duplicate app-layer delivery at low pps
+                                                            // (45pps, reproduced via fec_loss_test TEST1/TEST2
+                                                            // and the pps x loss matrix). Root cause traced to
+                                                            // being a genuine timing/ordering-sensitive issue,
+                                                            // NOT a deterministic logic bug -- same binary + same
+                                                            // RNG seed does not reliably reproduce it (confirmed
+                                                            // empirically across two separate hunting sessions:
+                                                            // >160 seeded attempts total across multiple pps/loss
+                                                            // combos with a dup-delivery correlation harness
+                                                            // attached, only 3 spontaneous hits total, none
+                                                            // reproducible on rerun with identical seed and
+                                                            // binary -- ruling out pure RNG-driven determinism).
+                                                            // Refined hypothesis (still unconfirmed): book4's
+                                                            // dual H+V redundancy lets TryRecoveryPackByDataPack's
+                                                            // cascade (goodtp_fec2.cpp) recover a packet via a
+                                                            // *second-order* inference -- e.g. D0 recovered via H
+                                                            // when D1 arrives, which then lets D2 be recovered via
+                                                            // V using the now-present D0, all inside one cascade
+                                                            // triggered by D1's arrival. If D2 was only delayed
+                                                            // (not actually lost) and arrives moments later on
+                                                            // its own, dedup relies on first_sn matching between
+                                                            // the FEC-recovery path (Fec2RestoreFrameReceive,
+                                                            // first_sn = chg_zone->sort_sn_ read from the XOR-
+                                                            // reconstructed packet) and the genuine-arrival path
+                                                            // (goodtp_interface.cpp, same derivation from the real
+                                                            // packet's own ChangeZone) -- if those two ever
+                                                            // disagree (e.g. a variable-length-header XOR edge
+                                                            // case corrupting the reconstructed ChangeZone),
+                                                            // dedup silently fails. book5 (H-only) has no second
+                                                            // axis to cascade through, consistent with never
+                                                            // showing this. Needs either a deterministic-ordering
+                                                            // stress harness (control arrival order directly
+                                                            // instead of relying on real socket/thread timing) or
+                                                            // instrumenting Fec2RestoreFrameReceive to log the
+                                                            // reconstructed ChangeZone/first_sn on every recovery
+                                                            // for direct comparison against the genuine packet's
+                                                            // own -- both were beyond this investigation's reach
+                                                            // without a reliable repro to attach them to.
         {0xFF,  0xFF, 0xFF, 0xFF,  0xFF,   0xFF,   0xFF},  // 50% <= loss < 100%  (not handled)
         {0xFF,  0xFF, 0xFF, 0xFF,  0xFF,   0xFF,   0xFF}   // loss >= 100%  (not handled)
     };
@@ -3593,6 +3802,17 @@ u8 GtpSession::CalcGameFecPolicy(void) const {
     if ((1 == loss_idx) && (GTP_YES == elevated_book_latched_) && (2 > low_loss_streak_)) {
         loss_idx = 2;
     }
+
+    #ifdef _SELFDEBUG
+    GtpLog(cb_.write_log_cb_, kGtpSessionMd, kGtpLogLevelDebug,
+           "fec_policy: %s:%u policy_loss=%.4f loss_idx=%u pps_idx=%u policy_pps=%u "
+           "game_fec_policy_loss_=%.2f max_send_loss_per_s_=%.2f game_fec_raw_loss_=%.2f "
+           "elevated_streak=%u low_streak=%u latched=%u -> book=%u.\r\n",
+           pb_dt_.self_ip_, (u32)(pb_dt_.self_port_), policy_loss, loss_idx, pps_idx, policy_pps,
+           pb_dt_.game_fec_policy_loss_, pb_dt_.max_send_loss_per_s_, pb_dt_.game_fec_raw_loss_,
+           (u32)elevated_loss_streak_, (u32)low_loss_streak_, (u32)elevated_book_latched_,
+           (u32)game_fec_policy_table[loss_idx][pps_idx]);
+    #endif
 
     return game_fec_policy_table[loss_idx][pps_idx];
     #else
@@ -3895,8 +4115,9 @@ u32 GtpSession::PrintAlgorithmParam(u8 *out_str, const u32 &mem_size) {
     PrintAfterHandlerReturn(str_len, wrt_num, free_sz, wrt_pos);
 
     wrt_num = (u32)snprintf((char*)wrt_pos, free_sz,
-                            "\r\n realtime_reorder: rtt=%uus late_rescue=%llu",
-                            pb_dt_.rtt_us_, (unsigned long long)realtime_reorder_late_rescue_);
+                            "\r\n realtime_reorder: rtt=%uus late_rescue=%llu giveup_drop=%llu",
+                            pb_dt_.rtt_us_, (unsigned long long)realtime_reorder_late_rescue_,
+                            (unsigned long long)realtime_reorder_giveup_drop_);
     PrintAfterHandlerReturn(str_len, wrt_num, free_sz, wrt_pos);
 
     wrt_num = (u32)snprintf((char*)wrt_pos, free_sz, "\r\n%s=%lluus\r\n%s=%lluus\r\n%s=%lluus\r\n%s=%lluus",
@@ -4068,6 +4289,14 @@ void GtpSession::ResetSession(const u32 &cur_sn, const u32 &sort_sn, const u32 &
 }
 
 void GtpSession::RttHandler(const u32 &rtt_us) {
+    /* Reverted to RTT/2 (was briefly tried at RTT/4): tightening this ongoing ACK/NACK feedback
+       cadence measurably shifted retry timing but barely moved the metrics that matter (p99
+       delivery gap, loss rate) because the actual bottleneck for the tail isn't feedback
+       cadence -- it's that any ARQ round trip is structurally too slow to land inside a tight
+       delivery budget on real WiFi RTT (~50-90ms) regardless of how often it's retried. See
+       CalcRealtimeReorderWaitUs() and RealtimeReorderWindow::Push() for how late arrivals are
+       now handled instead (dropped rather than delivered out of order, with no artificial cap
+       on how long skip-ahead waits for them). */
     recv_idle_calc_period_us_ = (rtt_us >> 1);
 
     if (MAX_HANDLER_CALC_PERIOD_US < recv_idle_calc_period_us_) {

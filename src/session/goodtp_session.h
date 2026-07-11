@@ -166,7 +166,10 @@ PRIVATE:
     u32  CalcRealtimeReorderBaseIntervalUs() const;
     u32  CalcRealtimeReorderDeliverIntervalUs(const u32 &cache_count, const u32 &wait_us,
                                               const u64 &oldest_age_us) const;
+    u32  CalcFecMatrixIntervalMultiplier() const;
     u32  CalcRealtimeReorderWaitUs() const;
+    u32  CalcGapNackHoldUs() const;
+    u32  CalcRealtimeReorderStaleDropUs() const;
     u32  CalcRealtimeReorderMaxCacheNum() const;
     u32  CalcRealtimeNackFeedbackCap() const;
     u32  ShouldFeedbackRealtimeNack(const u32 &nack_sn, const u64 &ts_us);
@@ -192,7 +195,22 @@ PRIVATE:
     u32 rmv_close_alg_period_us_;
     u8 nack_burst_detected_;
     u8 new_gap_detected_;
-    u8 gap_nack_hold_ticks_;
+    // Gap-detection timestamp (last_active_ts_us_ scale), not a tick count and not a frozen
+    // deadline: was a fixed 2-tick countdown (~20ms at a typical 10ms app timer cadence) regardless
+    // of pps. That's tuned for CS2-range pps (128pps: FEC's 2-packet-interval completion floor is
+    // ~15.6ms, so 20ms lets FEC go first) but fires well before FEC's floor at Apex-range pps
+    // (40pps: FEC floor ~50ms, so a fixed 20ms NACK fires *first* every time, spending a retransmit
+    // on packets FEC would have recovered for free).
+    // Stores the START of the hold, not last_active_ts_us_+CalcGapNackHoldUs() as an absolute
+    // deadline: CalcGapNackHoldUs() depends on the current FEC book (CalcFecMatrixIntervalMultiplier())
+    // and must be re-evaluated live against elapsed time, the same way CalcRealtimeReorderWaitUs()'s
+    // floor is re-evaluated live against oldest_age_us_ on every tick -- not snapshotted once at
+    // gap-detection time. Freezing it as an absolute deadline meant a book switch mid-hold (e.g.
+    // book4's 3x -> book5's 2x) left the deadline computed under the stale, larger multiplier --
+    // firing NACK after wait_us's now-shorter floor had already given up on the gap, silently
+    // breaking the invariant that this must always match CalcRealtimeReorderWaitUs()'s floor.
+    // See CalcGapNackHoldUs(). 0 == no gap-hold pending.
+    u64 gap_nack_hold_start_us_;
     // Consecutive 1s windows where the per-second loss peak stayed >=10%. A lone short
     // burst only ever bumps this to 1 (the very next second is clean again), so gating
     // the FEC book4 upgrade on streak>=2 in CalcGameFecPolicy() keeps isolated spikes from
@@ -275,7 +293,8 @@ PRIVATE:
 
     RealtimeReorderWindow realtime_reorder_win_;
     u64 realtime_reorder_next_deliver_ts_us_;
-    u64 realtime_reorder_late_rescue_;  // kPushStaleDeliver hit count for late restore observations.
+    u64 realtime_reorder_late_rescue_;  // kPushStaleDeliver hit count for late-but-delivered rescue observations.
+    u64 realtime_reorder_giveup_drop_;  // kPushGiveUpDrop hit count: rescues past stale_drop_us, dropped by choice.
 
 PRIVATE:
     u32 rtt_us_;

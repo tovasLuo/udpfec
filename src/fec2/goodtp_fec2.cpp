@@ -1128,6 +1128,16 @@ void GtpFec2::ChangeFecMode(const u32 &new_code_book_id) {
         return;
     }
 
+    #ifdef _SELFDEBUG
+    if (using_fec_book_id_ != (u8)new_code_book_id) {
+        GtpLog(write_log_cb_, kGtpFecMd, kGtpLogLevelDebug,
+               "fec book switch: %s:%u %u -> %u.\r\n",
+               (NULL != pb_dt_) ? pb_dt_->self_ip_ : (const u8*)"?",
+               (NULL != pb_dt_) ? (u32)(pb_dt_->self_port_) : 0,
+               (u32)using_fec_book_id_, new_code_book_id);
+    }
+    #endif
+
     using_fec_book_id_ = new_code_book_id;
     return;
 }
@@ -2655,6 +2665,28 @@ void GtpFec2::ClearReceiveMatrixIfStale(const u32 &matrix_id, const goodtp_pos &
         return;
     }
 
+    #ifdef _SELFDEBUG
+    // DIAGNOSTIC (temporary, not gating any behavior): how close to complete was this matrix
+    // when it got evicted as stale? Counted before PopPack()/Clear() below wipe the state.
+    u32 dbg_data_present = 0;
+    {
+        goodtp_pos p = dm.start_pos_;
+        for (u8 i = 0; i < dm.matrix_size_; ++i) {
+            if (NULL != decode_.fec_buf_.pack_cache_[p]) {
+                dbg_data_present += 1;
+            }
+            p = (p + 1) & ((goodtp_pos)FEC2_CACHE_CAPACITY_MASK);
+        }
+    }
+    u32 dbg_h_parities_present = 0, dbg_v_parities_present = 0;
+    for (u32 i = 0; i < MAX_FEC2_MATRIX_H_SIZE; ++i) {
+        if (NULL != dm.h_fec_code_[i].fec_pack_) { dbg_h_parities_present += 1; }
+    }
+    for (u32 i = 0; i < MAX_FEC2_MATRIX_V_SIZE; ++i) {
+        if (NULL != dm.v_fec_code_[i].fec_pack_) { dbg_v_parities_present += 1; }
+    }
+    #endif
+
     goodtp_pos clear_pos = dm.start_pos_;
     u8 steps = 0;
     while (steps < dm.matrix_size_) {
@@ -2671,9 +2703,11 @@ void GtpFec2::ClearReceiveMatrixIfStale(const u32 &matrix_id, const goodtp_pos &
     #ifdef _SELFDEBUG
     GtpLog(write_log_cb_, kGtpFecMd, kGtpLogLevelDebug,
            "ClearReceiveUnUsedResource: clear stale matrix(m_id=%u start_sn=%u end_sn=%u "
-           "new_sn=%u start_pos=%u cur_pos=%u).\r\n",
+           "new_sn=%u start_pos=%u cur_pos=%u book_id=%u matrix_size=%u data_present=%u "
+           "h_parities_present=%u v_parities_present=%u).\r\n",
            matrix_id, dm.start_pack_sn_, matrix_end_sn, cur_sn,
-           (u32)(dm.start_pos_), (u32)current_pos_in_cache);
+           (u32)(dm.start_pos_), (u32)current_pos_in_cache, (u32)(dm.code_book_id_),
+           (u32)(dm.matrix_size_), dbg_data_present, dbg_h_parities_present, dbg_v_parities_present);
     #endif
 
     return;

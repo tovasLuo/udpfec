@@ -277,7 +277,7 @@ void RealtimeReorderWindow::AdvanceToFit(const u32 &sn) {
 
 RealtimeReorderWindow::PushResult RealtimeReorderWindow::Push(const u32 &sn, const u8 *frame, const u32 &frame_size,
                                                               const GtpAddr &tran_addr, const u64 &ts_us,
-                                                              TranMemPool *pack_mem_pool) {
+                                                              TranMemPool *pack_mem_pool, const u32 &stale_drop_us) {
     UpdateInterval(sn, ts_us);
 
     if (!inited_) {
@@ -301,6 +301,26 @@ RealtimeReorderWindow::PushResult RealtimeReorderWindow::Push(const u32 &sn, con
         if (has_reset_watermark_ && ((sn == reset_watermark_sn_) || SnBefore(sn, reset_watermark_sn_))) {
             return kPushDrop;
         }
+
+        // Give-up gate, restored: an earlier version of this code unconditionally dropped every
+        // late rescue instead of delivering it out of order (to guarantee strict in-order
+        // delivery), but that traded away too much recovery rate -- measured loss went from
+        // ~1% to ~7-8% on the real WiFi target scenario, since the majority of ARQ-recovered
+        // packets land within roughly one RTT and were being sacrificed even though they'd
+        // have arrived in time to be useful. Reverted to: deliver late unless it's past
+        // stale_drop_us (0 == disabled, always deliver -- matches the historical default),
+        // trading a bounded amount of out-of-order delivery for materially better recovery.
+        // Staleness is estimated from sn distance x the learned pacing interval rather than
+        // tracking a timestamp per skipped sn, so it costs no extra state; avg_interval_us_ is
+        // zeroed by Reset() so this gate stays out of the way immediately after a resync, for the
+        // same reason noted in the paragraph above.
+        if ((0 != stale_drop_us) && (0 != avg_interval_us_)) {
+            const u64 staleness_us = (u64)SnDistance(sn, expect_sn_) * (u64)avg_interval_us_;
+            if (staleness_us > (u64)stale_drop_us) {
+                return kPushGiveUpDrop;
+            }
+        }
+
         return kPushStaleDeliver;
     }
 
