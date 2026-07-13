@@ -107,6 +107,7 @@ PRIVATE:
     void CloneBoostNode(ArqNode *node, const u64 &ts_us);
     void TranFailedPostHandler(ArqNode *node, const u64 &cur_ts_us);
     void DelNodeByFirstSn(const u32 &first_sn, ArqNode **next_node);
+    u32  ShouldTriggerBoost(void) const;
 
  public:
     u32 rto_timeout_us_;
