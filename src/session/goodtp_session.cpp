@@ -2968,23 +2968,18 @@ u32 GtpSession::CalcRealtimeReorderStaleDropUs() const {
        NACK-triggered fast resend can complete; a recovery that needed more than one round trip is
        unlikely to still be useful and is better counted as loss than delivered very stale.
 
-       Gated on book4 being active (RecvFecBookId() == 4), not a separate loss estimator like the
-       earlier IsLowModerateLossRegime() version -- book4 only activates above the game policy
-       table's 10% threshold (CalcGameFecPolicy()), so this directly reuses that decision instead
-       of re-deriving "high loss" from a second signal. Below that threshold (book5/off), skip the
-       gate entirely and always deliver late rescues: loss is low enough there that stale rescues
-       are rare, and paying an ordering-guarantee completion-rate cost isn't worth it when the
-       thing it's guarding against barely happens. Only above the threshold, where the reorder
-       window is more likely to see genuinely stale recoveries, does the tradeoff favor dropping
-       them over delivering out of order.
+       Applies regardless of which book is active (book4 or book5) -- previously gated on
+       RecvFecBookId() == 4 only, on the reasoning that book5's loss is low enough that stale
+       rescues are rare there. That gate is removed: the 1x-RTT deadline is a statement about
+       "a recovery this late isn't worth delivering out of order" independent of which FEC
+       redundancy level produced the recovery, and book5 sessions can still see individual
+       packets take longer than 1 RTT to come back (a lost NACK, a lost ACK bitmap update, a
+       boost retry that also got dropped) even while the *average* loss stays under book4's 10%
+       escalation threshold -- those late stragglers deserve the same treatment book4 gets.
 
        Gated only on having a real RTT sample, so a brand-new session's first few frames are never
        dropped before there's been time to establish steady state. */
     if (0 == pb_dt_.rtt_us_) {
-        return 0;
-    }
-
-    if (4 != fec2_obj_.RecvFecBookId()) {
         return 0;
     }
 
