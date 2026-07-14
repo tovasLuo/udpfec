@@ -302,7 +302,12 @@ void GtpArq::AdjustRetranTimes(const u32 &max_retran_times) {
 }
 
 void GtpArq::AdjustRtoTimeout(const u32 &rto_timeout_us, const u32 &rtt_us) {
-    boost_period_us_ = (rtt_us >> 6);
+    // boost 副本的重试间隔应当给对端的 ACK 反馈留出时间，而不是贴着 timer tick 无脑连发
+    // （原 rtt>>6 在游戏典型 RTT 20-150ms 下算出 0.3-2.3us，被 MIN_BOOST_PERIOD_US 下限
+    //  钳死，实测真实触发间隔完全由外部 PeriodGtpTimer 调用周期决定，跟 RTT 无关）。
+    // 改为 rtt/2：同一 boost 节点的相邻两次重试间隔与 RTT 成比例，MIN/MAX_BOOST_PERIOD_US
+    // 在游戏常见 RTT(10-300ms) 范围内基本不会被夹住。
+    boost_period_us_ = (rtt_us >> 1);
     boost_period_us_ = GtpLimit(MIN_BOOST_PERIOD_US, MAX_BOOST_PERIOD_US, boost_period_us_);
     rto_timeout_us_  = GtpLimit(MIN_RTO_US, MAX_RTO_US, rto_timeout_us);
 
