@@ -658,7 +658,21 @@ report_net_quality_cont_pos_:
         session->arq_.GetStat(&(link_quality.total_ack_loss_num_), &(link_quality.total_rto_loss_num_),
                               &(link_quality.total_ack_err_num_), &(link_quality.total_ai_repair_num_));
 
-        session->arq_.AdjustRtoTimeout(rto_us, rtt_us);
+        // boost_period_us_ (AdjustRtoTimeout()'s second arg) spaces out repeated blind boost
+        // retransmits of the same lost packet -- it needs the link's typical RTT, not this one
+        // report's raw rtt_us sample. rtt_us here is SlidWin's cur_rtt_us_, overwritten wholesale on
+        // every report with no smoothing (see SlidWin::SetRttUs()); feeding it straight into
+        // boost_period_us_ meant a single lucky-fast or jitter-spiked report reshuffled the retry
+        // spacing for every in-flight boost node on the next CheckRtoRetran() tick (boost_period_us_
+        // is read live, not snapshotted per node), and this instability lands hardest exactly when
+        // ShouldTriggerBoost() is active -- sustained >=10% loss, which is also when RTT variance is
+        // highest. session->SrttUs() is GtpSession's own Jacobson-style smoothed RTT (see srtt_us_),
+        // updated from the same underlying per-packet samples via RttHandler() but damped instead of
+        // overwritten, so boost_period_us_ tracks the link's steady-state RTT rather than its noisiest
+        // single sample. Deliberately not touched: ShouldTriggerBoost()'s own s_cur_loss_rate_ gate
+        // (arq.cpp) stays on the near-real-time windowed loss ratio -- smoothing *that* would dull its
+        // ability to catch a short burst, which is a different job than this spacing calculation.
+        session->arq_.AdjustRtoTimeout(rto_us, session->SrttUs());
 
         if ((GTP_YES == rough_down_loss) || (GTP_YES == realtime_policy_freeze)) {
             goto goodtp_continue_rpt_quality_pos_;
@@ -1221,6 +1235,9 @@ GtpSession::GtpSession(const goodtp_sock &sfd, const u8 dst_sock_addr[], const u
     elevated_loss_streak_(0),
     low_loss_streak_(0),
     elevated_book_latched_(0),
+    giveup_loss_streak_(0),
+    giveup_recovered_streak_(0),
+    giveup_latched_(0),
     #ifdef _SELFDEBUG
     debug_feedback_reason_(kGtpFeedbackDebugUnknown),
     #endif
@@ -1245,6 +1262,8 @@ GtpSession::GtpSession(const goodtp_sock &sfd, const u8 dst_sock_addr[], const u
     ack_sn_(0),
     fac_(),
     rtt_us_(0),
+    srtt_us_(0),
+    rttvar_us_(0),
     max_peak_frame_period_us_(0),
     ai_learn_sn_delta_(DEF_MIX_QUINTUPLET_THRESHOLD),
     pb_dt_(gtp_hdl, ts_us),
@@ -1320,6 +1339,9 @@ GtpSession::GtpSession(GtpAddr *tran_addr, const GtpHandler &gtp_hdl, GtpMemPool
     elevated_loss_streak_(0),
     low_loss_streak_(0),
     elevated_book_latched_(0),
+    giveup_loss_streak_(0),
+    giveup_recovered_streak_(0),
+    giveup_latched_(0),
     #ifdef _SELFDEBUG
     debug_feedback_reason_(kGtpFeedbackDebugUnknown),
     #endif
@@ -1344,6 +1366,8 @@ GtpSession::GtpSession(GtpAddr *tran_addr, const GtpHandler &gtp_hdl, GtpMemPool
     ack_sn_(0),
     fac_(),
     rtt_us_(0),
+    srtt_us_(0),
+    rttvar_us_(0),
     max_peak_frame_period_us_(0),
     ai_learn_sn_delta_(DEF_MIX_QUINTUPLET_THRESHOLD),
     pb_dt_(gtp_hdl, ts_us),
@@ -2964,26 +2988,36 @@ u32 GtpSession::CalcRealtimeReorderStaleDropUs() const {
        table's comment), not this gate -- with the flapping bug fixed, the gate's actual cost is
        small and the ordering/staleness guarantee it buys back is worth it.
 
-       Deadline is exactly 1x measured RTT (not 2x, not floored/scaled): within a single RTT, a
+       Deadline is ~1x RTT plus a jitter margin, not a bare RTT sample: within a single RTT, a
        NACK-triggered fast resend can complete; a recovery that needed more than one round trip is
        unlikely to still be useful and is better counted as loss than delivered very stale.
 
+       Built from srtt_us_/rttvar_us_ (RttHandler()'s Jacobson-style smoothing of the raw rtt_us
+       samples), not pb_dt_.rtt_us_. An earlier version used pb_dt_.rtt_us_ (the bare last sample)
+       directly as the deadline, which had two problems: the deadline jumped around with every
+       single noisy sample instead of tracking the link's actual typical RTT, and it had zero
+       margin over goodtp_arq.cpp's boost-retransmit timing (boost_period_us_ = rtt/2, tuned to
+       land near this same 1xRTT line) -- ordinary jitter (common on real WiFi) turned "does the
+       retransmit beat the deadline" into a coin flip. srtt_us_ + 2x rttvar_us_ keeps the deadline
+       at ~1xRTT on a stable link (rttvar_us_ small) while giving it room to widen when the link is
+       actually jittery, instead of tightening or loosening on a single sample's whim.
+
        Applies regardless of which book is active (book4 or book5) -- previously gated on
        RecvFecBookId() == 4 only, on the reasoning that book5's loss is low enough that stale
-       rescues are rare there. That gate is removed: the 1x-RTT deadline is a statement about
-       "a recovery this late isn't worth delivering out of order" independent of which FEC
-       redundancy level produced the recovery, and book5 sessions can still see individual
-       packets take longer than 1 RTT to come back (a lost NACK, a lost ACK bitmap update, a
-       boost retry that also got dropped) even while the *average* loss stays under book4's 10%
-       escalation threshold -- those late stragglers deserve the same treatment book4 gets.
+       rescues are rare there. That gate is removed: the deadline is a statement about "a recovery
+       this late isn't worth delivering out of order" independent of which FEC redundancy level
+       produced the recovery, and book5 sessions can still see individual packets take longer than
+       1 RTT to come back (a lost NACK, a lost ACK bitmap update, a boost retry that also got
+       dropped) even while the *average* loss stays under book4's 10% escalation threshold -- those
+       late stragglers deserve the same treatment book4 gets.
 
-       Gated only on having a real RTT sample, so a brand-new session's first few frames are never
-       dropped before there's been time to establish steady state. */
-    if (0 == pb_dt_.rtt_us_) {
+       Gated only on having a real smoothed RTT sample, so a brand-new session's first few frames
+       are never dropped before there's been time to establish steady state. */
+    if (0 == srtt_us_) {
         return 0;
     }
 
-    return pb_dt_.rtt_us_;
+    return srtt_us_ + (rttvar_us_ << 1);
 }
 
 u32 GtpSession::CalcRealtimeReorderMaxCacheNum() const {
@@ -3464,13 +3498,38 @@ void GtpSession::SecondTimerHandler(const u64 &cur_ts_us, ConsumeTime *wheel_con
             elevated_book_latched_ = GTP_NO;
         }
     }
+
+    // Same streak+latch pattern one threshold up, gating the 25% "give up on FEC" line instead
+    // of the 10% book4-escalation line -- see giveup_loss_streak_'s declaration for why this is
+    // needed (policy_loss's raw-peak floor can cross 25% on a single noisy second even when the
+    // sustained loss never does, which is the book4<->5 flapping mechanism documented on
+    // game_fec_policy_table's 25%-50% row).
+    if ((25.0f <= pb_dt_.max_send_loss_per_s_) || (25.0f <= pb_dt_.game_fec_raw_loss_)) {
+        if (250 > giveup_loss_streak_) {
+            giveup_loss_streak_ += 1;
+        }
+        giveup_recovered_streak_ = 0;
+        if (2 <= giveup_loss_streak_) {
+            giveup_latched_ = GTP_YES;
+        }
+    } else {
+        giveup_loss_streak_ = 0;
+        if (250 > giveup_recovered_streak_) {
+            giveup_recovered_streak_ += 1;
+        }
+        if (2 <= giveup_recovered_streak_) {
+            giveup_latched_ = GTP_NO;
+        }
+    }
     #ifdef _SELFDEBUG
     GtpLog(cb_.write_log_cb_, kGtpSessionMd, kGtpLogLevelDebug,
            "loss_streak: %s:%u max_send_loss=%.2f game_fec_raw_loss=%.2f game_fec_policy_loss=%.2f "
-           "elevated_streak=%u low_streak=%u latched=%u.\r\n",
+           "elevated_streak=%u low_streak=%u latched=%u giveup_streak=%u giveup_recovered_streak=%u "
+           "giveup_latched=%u.\r\n",
            pb_dt_.self_ip_, (u32)(pb_dt_.self_port_),
            pb_dt_.max_send_loss_per_s_, pb_dt_.game_fec_raw_loss_, pb_dt_.game_fec_policy_loss_,
-           (u32)elevated_loss_streak_, (u32)low_loss_streak_, (u32)elevated_book_latched_);
+           (u32)elevated_loss_streak_, (u32)low_loss_streak_, (u32)elevated_book_latched_,
+           (u32)giveup_loss_streak_, (u32)giveup_recovered_streak_, (u32)giveup_latched_);
     #endif
     #endif
 
@@ -3755,6 +3814,25 @@ u8 GtpSession::CalcGameFecPolicy(void) const {
                                                             // for direct comparison against the genuine packet's
                                                             // own -- both were beyond this investigation's reach
                                                             // without a reliable repro to attach them to.
+                                                            //
+                                                            // giveup_loss_streak_/giveup_recovered_streak_/
+                                                            // giveup_latched_ (added later, see their declarations)
+                                                            // fix a DIFFERENT contributor to the same flapping
+                                                            // symptom without touching this row or book4's range:
+                                                            // policy_loss below is floored to this-second's raw
+                                                            // peak, so a single noisy second past 25% used to
+                                                            // cross into this row and fall back to book5 even when
+                                                            // the sustained/smoothed loss never got close (by
+                                                            // design confirmed: ~20%-average loss regularly spikes
+                                                            // to 33-48% for one second). That's now gated on 2
+                                                            // consecutive genuinely-severe seconds, same pattern as
+                                                            // elevated_loss_streak_'s book4-escalation guard above.
+                                                            // This does NOT touch what book gets used once the
+                                                            // give-up line is genuinely, sustainedly crossed --
+                                                            // still 0xFF/book5 here, per this row -- so it should
+                                                            // not reawaken the book4-cascade/dedup hypothesis this
+                                                            // comment documents; it only stops transient bursts
+                                                            // from reaching this row in the first place.
         {0xFF,  0xFF, 0xFF, 0xFF,  0xFF,   0xFF,   0xFF},  // 50% <= loss < 100%  (not handled)
         {0xFF,  0xFF, 0xFF, 0xFF,  0xFF,   0xFF,   0xFF}   // loss >= 100%  (not handled)
     };
@@ -3798,14 +3876,36 @@ u8 GtpSession::CalcGameFecPolicy(void) const {
         loss_idx = 2;
     }
 
+    // Same pattern one threshold up, gating the 25% "give up on FEC" line (loss_idx>=3, all
+    // 0xFF in the table above) instead of the 10% book4-escalation line. policy_loss is floored
+    // to this-second's raw peak a few lines up specifically so escalation into book4 reacts
+    // fast, but that same floor means one noisy second can push policy_loss past 25% while the
+    // sustained loss never gets close -- crossing the give-up line must not honor that until
+    // giveup_loss_streak_ confirms it persisted across 2 consecutive seconds (see its
+    // declaration; this is the book4<->5 flapping fix referenced in game_fec_policy_table's
+    // 25%-50% row comment).
+    if ((3 <= loss_idx) && (2 > giveup_loss_streak_)) {
+        loss_idx = 2;
+    }
+
+    // Symmetric guard for the recovery direction: once giveup_latched_ is set (link genuinely
+    // gave up), a single noisy second dropping back under 25% isn't enough to resume FEC
+    // handling -- hold the give-up state until giveup_recovered_streak_ confirms 2 straight
+    // clean seconds. Only gated by the latch, same reasoning as elevated_book_latched_ above.
+    if ((3 > loss_idx) && (GTP_YES == giveup_latched_) && (2 > giveup_recovered_streak_)) {
+        loss_idx = 3;
+    }
+
     #ifdef _SELFDEBUG
     GtpLog(cb_.write_log_cb_, kGtpSessionMd, kGtpLogLevelDebug,
            "fec_policy: %s:%u policy_loss=%.4f loss_idx=%u pps_idx=%u policy_pps=%u "
            "game_fec_policy_loss_=%.2f max_send_loss_per_s_=%.2f game_fec_raw_loss_=%.2f "
-           "elevated_streak=%u low_streak=%u latched=%u -> book=%u.\r\n",
+           "elevated_streak=%u low_streak=%u latched=%u giveup_streak=%u giveup_recovered_streak=%u "
+           "giveup_latched=%u -> book=%u.\r\n",
            pb_dt_.self_ip_, (u32)(pb_dt_.self_port_), policy_loss, loss_idx, pps_idx, policy_pps,
            pb_dt_.game_fec_policy_loss_, pb_dt_.max_send_loss_per_s_, pb_dt_.game_fec_raw_loss_,
            (u32)elevated_loss_streak_, (u32)low_loss_streak_, (u32)elevated_book_latched_,
+           (u32)giveup_loss_streak_, (u32)giveup_recovered_streak_, (u32)giveup_latched_,
            (u32)game_fec_policy_table[loss_idx][pps_idx]);
     #endif
 
@@ -4110,8 +4210,10 @@ u32 GtpSession::PrintAlgorithmParam(u8 *out_str, const u32 &mem_size) {
     PrintAfterHandlerReturn(str_len, wrt_num, free_sz, wrt_pos);
 
     wrt_num = (u32)snprintf((char*)wrt_pos, free_sz,
-                            "\r\n realtime_reorder: rtt=%uus late_rescue=%llu giveup_drop=%llu",
-                            pb_dt_.rtt_us_, (unsigned long long)realtime_reorder_late_rescue_,
+                            "\r\n realtime_reorder: rtt=%uus srtt=%uus rttvar=%uus stale_drop=%uus "
+                            "late_rescue=%llu giveup_drop=%llu",
+                            pb_dt_.rtt_us_, srtt_us_, rttvar_us_, CalcRealtimeReorderStaleDropUs(),
+                            (unsigned long long)realtime_reorder_late_rescue_,
                             (unsigned long long)realtime_reorder_giveup_drop_);
     PrintAfterHandlerReturn(str_len, wrt_num, free_sz, wrt_pos);
 
@@ -4284,6 +4386,31 @@ void GtpSession::ResetSession(const u32 &cur_sn, const u32 &sort_sn, const u32 &
 }
 
 void GtpSession::RttHandler(const u32 &rtt_us) {
+    /* Jacobson/Karels smoothing (RFC 6298: alpha=1/8 for SRTT, beta=1/4 for the mean-deviation
+       RTTVAR) of the raw per-sample rtt_us this function receives on every ACK/NACK/RTT-echo.
+       Feeds only CalcRealtimeReorderStaleDropUs()'s drop deadline -- rtt_us_/pb_dt_.rtt_us_ stay
+       the raw last sample on purpose (see srtt_us_'s declaration). Without this, the previous
+       "deadline == last raw RTT sample" was two bugs in one: (1) a single lucky-fast or
+       jitter-spiked ACK moved the drop deadline by its own full error every time, since nothing
+       damped the sample; (2) the deadline had zero margin over ARQ's own boost-retransmit timing
+       (goodtp_arq.cpp's boost_period_us_ = rtt/2, tuned to land near the same 1xRTT line), so
+       ordinary jitter turned "does the retransmit beat the deadline" into a coin flip instead of a
+       margin-backed race. srtt_us_ fixes (1); the rttvar_us_ margin CalcRealtimeReorderStaleDropUs()
+       adds on top fixes (2). Guarded on rtt_us != 0 defensively -- every call site only invokes this
+       with a just-computed now_us/cache_us timestamp delta, but a same-microsecond round trip on a
+       fast local link can legitimately compute to exactly 0, and treating that as a real sample
+       would collapse srtt_us_ toward zero. */
+    if (0 != rtt_us) {
+        if (0 == srtt_us_) {
+            srtt_us_   = rtt_us;
+            rttvar_us_ = rtt_us >> 1;
+        } else {
+            const u32 delta_us = (rtt_us >= srtt_us_) ? (rtt_us - srtt_us_) : (srtt_us_ - rtt_us);
+            rttvar_us_ = ((rttvar_us_ * 3) + delta_us) >> 2;
+            srtt_us_   = ((srtt_us_ * 7) + rtt_us) >> 3;
+        }
+    }
+
     /* Reverted to RTT/2 (was briefly tried at RTT/4): tightening this ongoing ACK/NACK feedback
        cadence measurably shifted retry timing but barely moved the metrics that matter (p99
        delivery gap, loss rate) because the actual bottleneck for the tail isn't feedback

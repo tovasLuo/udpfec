@@ -154,6 +154,12 @@ class GtpSession {
     void UpdatePeerIp(u8 sock_addr[], const u32 &sock_addr_len);
     void UpdateTransportAddressIfChanged(const GtpAddr &tran_addr);
 
+    // Jacobson-smoothed RTT (see srtt_us_'s declaration) -- the free function LinkQualityCallback()
+    // needs this to feed GtpArq::AdjustRtoTimeout()'s boost_period_us_ calc a stable RTT instead of
+    // a single raw sample, but srtt_us_ itself lives in the PRIVATE section below, so this accessor
+    // is the narrow opening for that one external caller instead of widening srtt_us_'s visibility.
+    u32 SrttUs(void) const { return srtt_us_; }
+
 PRIVATE:
     void SendSetRecvRttPacket(void);
     void SendRttTestResPacket(const u64 &ts_us);
@@ -232,6 +238,26 @@ PRIVATE:
     // seconds, since low_loss_streak_ alone can't tell "never escalated" apart from
     // "escalated, now recovering".
     u8 elevated_book_latched_;
+    // Same streak+latch pattern as elevated_loss_streak_/low_loss_streak_/elevated_book_latched_
+    // above, one threshold up: gates the 25% "give up on FEC" line (game_fec_policy_table's
+    // 25%-50%/50%-100%/100%+ rows, all 0xFF -- see CalcGameFecPolicy()'s book4<->5 flapping
+    // comment) instead of the 10% book4-escalation line. Needed because policy_loss (the value
+    // CalcGameFecPolicy() classifies) is deliberately floored to this-second's raw peak
+    // (max_send_loss_per_s_/game_fec_raw_loss_), not a smoothed trend -- that floor exists so
+    // escalation into book4 reacts fast, but it equally means one noisy second can push
+    // policy_loss past 25% while the sustained loss never gets close, which used to fire an
+    // ungated book4->5 downgrade for a burst that was never real. giveup_loss_streak_ requires
+    // 2 consecutive genuinely-severe seconds before honoring that downgrade.
+    u8 giveup_loss_streak_;
+    // Mirror for the recovery direction: consecutive 1s windows back under 25%, required before
+    // giveup_latched_ releases and FEC handling resumes -- same rationale as low_loss_streak_.
+    u8 giveup_recovered_streak_;
+    // Latches once giveup_loss_streak_ reaches 2 (genuinely gave up), releases once
+    // giveup_recovered_streak_ reaches 2 (genuinely recovered). Gates CalcGameFecPolicy()'s
+    // re-entry guard the same way elevated_book_latched_ gates book5's -- a session that has
+    // never given up must stay free to pick book4/5 normally instead of being incorrectly held
+    // at the 25%+ bracket while giveup_recovered_streak_ is still ramping up from 0.
+    u8 giveup_latched_;
     #ifdef _SELFDEBUG
     u8 debug_feedback_reason_;
     #endif
@@ -298,6 +324,15 @@ PRIVATE:
 
 PRIVATE:
     u32 rtt_us_;
+
+    // Jacobson/Karels-style smoothing (RFC 6298 alpha=1/8, beta=1/4) of rtt_us_'s raw per-sample
+    // measurements, maintained purely for CalcRealtimeReorderStaleDropUs()'s drop deadline -- see
+    // RttHandler() for the update and CalcRealtimeReorderStaleDropUs() for why a single noisy
+    // sample isn't safe to use as a hard deadline. Deliberately NOT folded into rtt_us_/pb_dt_.rtt_us_
+    // itself: pb_dt_.rtt_us_ is reported to the app as "current RTT" and must keep meaning the raw
+    // last sample, not a smoothed derivative, to avoid a silent behavior change for external callers.
+    u32 srtt_us_;
+    u32 rttvar_us_;
 
     enum {
         kRealtimeNackFeedbackSlots = 1024,
