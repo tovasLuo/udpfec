@@ -3147,16 +3147,19 @@ u32 GtpSession::DeliverFrameInOrder(GtpHandler_p gtp_hdl, const u32 &first_sn, c
         return DeliverFrameNow(gtp_hdl, frame, frame_size, tran_addr);
     }
 
-    // TEST-ONLY BYPASS (temporary, see conversation): skip RealtimeReorderWindow entirely for
-    // kRealTimeStream and deliver every frame the instant it's decoded/recovered, in whatever
-    // order that happens to be, instead of holding gap-blocked frames for up to wait_us to
-    // preserve in-order delivery. Purpose: A/B-test in a real game (CS2) whether the app's own
-    // snapshot/tick sequencing already discards stale out-of-order data on its own, which would
-    // make this window's added latency pure cost with no real ordering benefit. Revert by deleting
-    // this early return and re-enabling the #if 0 block below.
-    return DeliverFrameNow(gtp_hdl, frame, frame_size, tran_addr);
-
-#if 0
+    // TEST-ONLY BYPASS -- tried and reverted (see conversation): skipping RealtimeReorderWindow
+    // entirely for kRealTimeStream and delivering every frame immediately, in wire-arrival order,
+    // was A/B-tested against real CS2 traffic (~9% loss) to check whether the game's own
+    // snapshot/tick sequencing already tolerates/discards out-of-order data on its own. It does
+    // not: GoodTP's own recv_loss_ actually improved (0.89% vs 2.37% with the window enabled,
+    // confirming almost everything was still arriving, just out of order), yet CS2 was unplayable
+    // -- frequent red loss indicator, 100-200ms jitter, visible stutter. FEC recoveries are
+    // structurally delayed by CalcFecMatrixIntervalMultiplier() packet intervals relative to their
+    // block siblings (book4's 2x2 needs the other 3 cells to complete a row/column XOR), so without
+    // this window every recovery lands as a rewind to an already-superseded sn instead of an
+    // in-order delivery -- CS2 evidently can't absorb that gracefully. Left here commented out
+    // (not deleted) only as a record of a ruled-out design; do not re-enable without new evidence.
+    // #if 0
     const u64 ts_us = last_active_ts_us_;
     const u32 stale_drop_us = CalcRealtimeReorderStaleDropUs();
     RealtimeReorderWindow::PushResult push_result =
@@ -3207,7 +3210,7 @@ u32 GtpSession::DeliverFrameInOrder(GtpHandler_p gtp_hdl, const u32 &first_sn, c
     #endif
 
     return FlushRealtimeReorder(ts_us, gtp_hdl);
-#endif  // TEST-ONLY BYPASS above short-circuits before this point -- see comment at function start.
+    // #endif
 }
 
 void GtpSession::TimerHandler(const u64 &ts_us, ConsumeTime *wheel_consume) {
