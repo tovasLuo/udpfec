@@ -3147,6 +3147,16 @@ u32 GtpSession::DeliverFrameInOrder(GtpHandler_p gtp_hdl, const u32 &first_sn, c
         return DeliverFrameNow(gtp_hdl, frame, frame_size, tran_addr);
     }
 
+    // TEST-ONLY BYPASS (temporary, see conversation): skip RealtimeReorderWindow entirely for
+    // kRealTimeStream and deliver every frame the instant it's decoded/recovered, in whatever
+    // order that happens to be, instead of holding gap-blocked frames for up to wait_us to
+    // preserve in-order delivery. Purpose: A/B-test in a real game (CS2) whether the app's own
+    // snapshot/tick sequencing already discards stale out-of-order data on its own, which would
+    // make this window's added latency pure cost with no real ordering benefit. Revert by deleting
+    // this early return and re-enabling the #if 0 block below.
+    return DeliverFrameNow(gtp_hdl, frame, frame_size, tran_addr);
+
+#if 0
     const u64 ts_us = last_active_ts_us_;
     const u32 stale_drop_us = CalcRealtimeReorderStaleDropUs();
     RealtimeReorderWindow::PushResult push_result =
@@ -3197,6 +3207,7 @@ u32 GtpSession::DeliverFrameInOrder(GtpHandler_p gtp_hdl, const u32 &first_sn, c
     #endif
 
     return FlushRealtimeReorder(ts_us, gtp_hdl);
+#endif  // TEST-ONLY BYPASS above short-circuits before this point -- see comment at function start.
 }
 
 void GtpSession::TimerHandler(const u64 &ts_us, ConsumeTime *wheel_consume) {
