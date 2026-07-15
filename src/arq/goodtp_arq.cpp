@@ -180,7 +180,7 @@ u32 GtpArq::PacketEntryList(GtpPacket *pack, GtpAddr *tran_addr, const u32 &firs
     node->failed_ack_      = GTP_NO;
     node->has_boost_node_  = GTP_NO;
     node->boost_node_flg_  = GTP_NO;
-    node->boost_threshold_ = ((0 == max_boost_times_) ? DEFAULT_BOOST_TIMES :  max_boost_times_);
+    node->boost_threshold_ = max_boost_times_;
     node->pack_sn_         = pack->pack_sn_;
     node->first_pack_sn_   = first_pack_sn;
 
@@ -454,10 +454,6 @@ arq_32bit_quick_resend_pos_:
                 #if (1 == ENABLE_ARQ_BOOST_FLAG)
                 if ((GTP_NO == del_node->has_boost_node_) && (GTP_YES == ShouldTriggerBoost())) {
                     CloneBoostNode(del_node, cur_ts_us);
-
-                    if (0 == max_boost_times_) {
-                        max_boost_times_ = DEFAULT_BOOST_TIMES;
-                    }
                 }
                 #endif
 
@@ -613,10 +609,6 @@ arq_64bit_quick_resend_pos_:
                 #if (1 == ENABLE_ARQ_BOOST_FLAG)
                 if ((GTP_NO == del_node->has_boost_node_) && (GTP_YES == ShouldTriggerBoost())) {
                     CloneBoostNode(del_node, cur_ts_us);
-
-                    if (0 == max_boost_times_) {
-                        max_boost_times_ = DEFAULT_BOOST_TIMES;
-                    }
                 }
                 #endif
 
@@ -922,10 +914,6 @@ nack_quick_resend_pos_:
                 #if (1 == ENABLE_ARQ_BOOST_FLAG)
                 if ((GTP_NO == del_node->has_boost_node_) && (GTP_YES == ShouldTriggerBoost())) {
                     CloneBoostNode(del_node, cur_ts_us);
-
-                    if (0 == max_boost_times_) {
-                        max_boost_times_ = DEFAULT_BOOST_TIMES;
-                    }
                 }
                 #endif
 
@@ -1158,13 +1146,22 @@ u32 GtpArq::ShouldTriggerBoost(void) const {
         return GTP_NO;
     }
 
+    // max_boost_times_==0 is a real, load-bearing value coming out of goodtp_session.cpp's
+    // boost_alg_param table (e.g. the game table's loss>=23% rows), meaning "loss is bad enough
+    // that boost is a waste of bandwidth, don't bother" -- not "uninitialized, guess a default".
+    // INIT_BOOST_TIMES is DEFAULT_BOOST_TIMES for both APPLICATION_TYPE configs, so a session that
+    // hasn't had its first quality report yet already reads as non-zero here; treating 0 as
+    // "disabled" is therefore unambiguous.
+    if (0 == max_boost_times_) {
+        return GTP_NO;
+    }
+
     if (kRealTimeStream == pb_dt_->tran_addr_.stream_type_) {
         const f32 kBoostLossThreshold = 10.0f;
         return (s_cur_loss_rate_ >= kBoostLossThreshold) ? GTP_YES : GTP_NO;
     }
 
-    const u32 effective_max_boost = (0 == max_boost_times_) ? DEFAULT_BOOST_TIMES : (u32)max_boost_times_;
-    const u32 boost_backlog_thresh = 1u + 2u * effective_max_boost;
+    const u32 boost_backlog_thresh = 1u + 2u * (u32)max_boost_times_;
 
     return (arq_list_.node_num_ >= boost_backlog_thresh) ? GTP_YES : GTP_NO;
 }
