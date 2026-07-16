@@ -277,7 +277,8 @@ void RealtimeReorderWindow::AdvanceToFit(const u32 &sn) {
 
 RealtimeReorderWindow::PushResult RealtimeReorderWindow::Push(const u32 &sn, const u8 *frame, const u32 &frame_size,
                                                               const GtpAddr &tran_addr, const u64 &ts_us,
-                                                              TranMemPool *pack_mem_pool, const u32 &stale_drop_us) {
+                                                              TranMemPool *pack_mem_pool,
+                                                              const u32 &max_late_reorder_sn) {
     UpdateInterval(sn, ts_us);
 
     if (!inited_) {
@@ -302,23 +303,17 @@ RealtimeReorderWindow::PushResult RealtimeReorderWindow::Push(const u32 &sn, con
             return kPushDrop;
         }
 
-        // Give-up gate, restored: an earlier version of this code unconditionally dropped every
-        // late rescue instead of delivering it out of order (to guarantee strict in-order
-        // delivery), but that traded away too much recovery rate -- measured loss went from
-        // ~1% to ~7-8% on the real WiFi target scenario, since the majority of ARQ-recovered
-        // packets land within roughly one RTT and were being sacrificed even though they'd
-        // have arrived in time to be useful. Reverted to: deliver late unless it's past
-        // stale_drop_us (0 == disabled, always deliver -- matches the historical default),
-        // trading a bounded amount of out-of-order delivery for materially better recovery.
-        // Staleness is estimated from sn distance x the learned pacing interval rather than
-        // tracking a timestamp per skipped sn, so it costs no extra state; avg_interval_us_ is
-        // zeroed by Reset() so this gate stays out of the way immediately after a resync, for the
-        // same reason noted in the paragraph above.
-        if ((0 != stale_drop_us) && (0 != avg_interval_us_)) {
-            const u64 staleness_us = (u64)SnDistance(sn, expect_sn_) * (u64)avg_interval_us_;
-            if (staleness_us > (u64)stale_drop_us) {
-                return kPushGiveUpDrop;
-            }
+        // Give-up gate: sn-distance only, replacing the previous RTT-derived stale_drop_us
+        // estimate. A late rescue within max_late_reorder_sn packets of expect_sn_ is still
+        // delivered out of order; anything further behind is by then almost certainly superseded
+        // in the app's own state (see DeliverFrameInOrder()'s comment on why stale rewinds hurt),
+        // so retransmitting/delivering it is no longer useful -- drop outright instead of
+        // estimating elapsed time from the learned pacing interval. Caller scales the tolerance
+        // by pps (see CalcRealtimeReorderMaxLateSn()) -- at low pps, 2 packets of sn distance
+        // covers noticeably more wall-clock time than at high pps, so the same fixed count isn't
+        // an equivalent staleness bound across traffic rates.
+        if (SnDistance(sn, expect_sn_) > max_late_reorder_sn) {
+            return kPushGiveUpDrop;
         }
 
         return kPushStaleDeliver;

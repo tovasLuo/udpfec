@@ -2976,9 +2976,12 @@ u32 GtpSession::CalcGapNackHoldUs() const {
 }
 
 u32 GtpSession::CalcRealtimeReorderStaleDropUs() const {
-    /* Give-up gate for RealtimeReorderWindow::Push()'s late-rescue path -- SRT calls the
-       equivalent mechanism TLPKTDROP (too-late packet drop): a hard deadline past which a
-       recovered packet is dropped instead of delivered late/out-of-order.
+    /* Diagnostic-only RTT-derived estimate of the same "how stale is too stale" question --
+       kept for PrintAlgorithmParam() observability. No longer feeds RealtimeReorderWindow::Push(),
+       which now gates the late-rescue give-up decision purely on sn distance
+       (RealtimeReorderWindow::kMaxLateReorderSn) instead of an RTT-estimated deadline; see that
+       function for why. SRT calls the RTT-deadline mechanism this used to drive TLPKTDROP
+       (too-late packet drop) -- history below kept for context on how this number is derived.
 
        Restored (was briefly disabled -- see git history/this session's earlier turns -- after
        measuring ~92% completion at 20% loss, with only 12/154 lost frames at 128pps being
@@ -3018,6 +3021,19 @@ u32 GtpSession::CalcRealtimeReorderStaleDropUs() const {
     }
 
     return srtt_us_ + (rttvar_us_ << 1);
+}
+
+u32 GtpSession::CalcRealtimeReorderMaxLateSn() const {
+    // Same fixed sn count covers less wall-clock time as pps rises, so a 2-sn tolerance that's
+    // reasonable at 128pps (~15.6ms) is comparatively generous at 30pps (~66ms) -- tighten to 1sn
+    // below 100pps so the tolerance stays in roughly the same time budget across traffic rates.
+    // Keep GtpArq::IsRetranTooStale()'s matching threshold (goodtp_arq.cpp) in sync with this.
+    u32 pps = pb_dt_.recv_stat_.data_pack_pps_;
+    if (pps < pb_dt_.send_stat_.data_pack_pps_) {
+        pps = pb_dt_.send_stat_.data_pack_pps_;
+    }
+
+    return (100 <= pps) ? 2 : 1;
 }
 
 u32 GtpSession::CalcRealtimeReorderMaxCacheNum() const {
@@ -3161,18 +3177,19 @@ u32 GtpSession::DeliverFrameInOrder(GtpHandler_p gtp_hdl, const u32 &first_sn, c
     // (not deleted) only as a record of a ruled-out design; do not re-enable without new evidence.
     // #if 0
     const u64 ts_us = last_active_ts_us_;
-    const u32 stale_drop_us = CalcRealtimeReorderStaleDropUs();
+    const u32 max_late_reorder_sn = CalcRealtimeReorderMaxLateSn();
     RealtimeReorderWindow::PushResult push_result =
-        realtime_reorder_win_.Push(first_sn, frame, frame_size, *tran_addr, ts_us, &pack_mem_pool_, stale_drop_us);
+        realtime_reorder_win_.Push(first_sn, frame, frame_size, *tran_addr, ts_us, &pack_mem_pool_,
+                                   max_late_reorder_sn);
     if (RealtimeReorderWindow::kPushGiveUpDrop == push_result) {
         realtime_reorder_giveup_drop_ += 1;
 
         #ifdef _SELFDEBUG
         GtpLog(cb_.write_log_cb_, kGtpSessionMd, kGtpLogLevelDebug,
                "%s:%u<-->%s:%u realtime reorder gave up on stale rescue(sn=%u expect_sn=%u cache_num=%u "\
-               "stale_drop_us=%uus now=%lluus).\r\n",
+               "max_late_sn=%u now=%lluus).\r\n",
                pb_dt_.self_ip_, (u32)(pb_dt_.self_port_), pb_dt_.peer_ip_, (u32)(pb_dt_.peer_port_),
-               first_sn, realtime_reorder_win_.ExpectSn(), realtime_reorder_win_.Count(), stale_drop_us,
+               first_sn, realtime_reorder_win_.ExpectSn(), realtime_reorder_win_.Count(), max_late_reorder_sn,
                (unsigned long long)ts_us);
         #endif
 
@@ -3779,10 +3796,18 @@ u8 GtpSession::CalcGameFecPolicy(void) const {
     #if (2 == APPLICATION_TYPE)
     const u32 policy_pps = GetSendBusinessPps();
 
+    // loss<2%/2-10%/10-25% rows unified to book4 (2x2 H+V) across all pps brackets -- book5
+    // (H-only) and the low-pps FEC-off cells previously here traded bandwidth for a lower
+    // recovery ceiling; book4's dual-axis redundancy recovers more of the loss book5 can't, at
+    // the cost of ~2x parity overhead everywhere below the 25% give-up line instead of only
+    // 10-25%. This collapses the loss_idx 1<->2 boundary that elevated_loss_streak_/
+    // low_loss_streak_/elevated_book_latched_ below exist to debounce -- that hysteresis is now
+    // inert for book selection (both sides of the boundary resolve to the same book4), left in
+    // place rather than removed since it's still exercised/logged and this is easy to revert.
     static const u8 game_fec_policy_table[][7] = {
         // pps:  <20  20-49 50-79 80-109 110-139 140-169 170+
-        {0xFF,  0xFF,   5,    5,     5,      5,      5},  // loss < 2%  (pps<50: FEC off; pps>=50: book5)
-        {  5,     5,    5,    5,     5,      5,      5},  // 2% <= loss < 10%
+        {  4,     4,    4,    4,     4,      4,      4},  // loss < 2%
+        {  4,     4,    4,    4,     4,      4,      4},  // 2% <= loss < 10%
         {  4,     4,    4,    4,     4,      4,      4},  // 10% <= loss < 25%
         {0xFF,  0xFF, 0xFF, 0xFF,  0xFF,   0xFF,   0xFF},  // 25% <= loss < 50%  (not handled -- see
                                                             // CalcGameFecPolicy()'s header comment: filling
@@ -4189,6 +4214,13 @@ u32 GtpSession::PrintHarqParam(u8 *out_str, const u32 &mem_size) {
     PrintAfterHandlerReturn(str_len, wrt_num, free_sz, wrt_pos);
 
     wrt_num = (u32)snprintf((char*)wrt_pos, free_sz, "\r\n boost_resend_counter= %u", arq_.arq_list_.ai_repair_sum_);
+    PrintAfterHandlerReturn(str_len, wrt_num, free_sz, wrt_pos);
+
+    wrt_num = (u32)snprintf((char*)wrt_pos, free_sz, "\r\n ack_err_counter= %u", arq_.ack_err_counter_);
+    PrintAfterHandlerReturn(str_len, wrt_num, free_sz, wrt_pos);
+
+    wrt_num = (u32)snprintf((char*)wrt_pos, free_sz, "\r\n stale_retran_skip_counter= %u",
+                            arq_.stale_retran_skip_counter_);
     PrintAfterHandlerReturn(str_len, wrt_num, free_sz, wrt_pos);
 
     return str_len;

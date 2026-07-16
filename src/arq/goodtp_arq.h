@@ -108,6 +108,7 @@ PRIVATE:
     void TranFailedPostHandler(ArqNode *node, const u64 &cur_ts_us);
     void DelNodeByFirstSn(const u32 &first_sn, ArqNode **next_node);
     u32  ShouldTriggerBoost(void) const;
+    u32  IsRetranTooStale(const ArqNode *node, const u32 &head_sn) const;
 
  public:
     u32 rto_timeout_us_;
@@ -127,6 +128,18 @@ PRIVATE:
 
     u32 rto_resend_counter_;
     u32 ack_resend_counter_;
+
+    // Retransmissions skipped by IsRetranTooStale() -- distinct from ack_err_counter_ (which
+    // also fires for genuinely exhausted retry counts): this one is "never even attempted because
+    // it would've been dropped on arrival anyway", not "attempted and gave up".
+    u32 stale_retran_skip_counter_;
+
+    // Latest receiver window low edge (head_sn from ProcAck()/ProcNack()), kept around so
+    // CheckRtoRetran()'s RTO-driven path -- which has no ACK/NACK of its own to read a fresh
+    // head_sn from -- can still apply the same staleness check the quick-resend paths apply
+    // inline. See IsRetranTooStale().
+    u32  last_known_head_sn_;
+    u32  has_known_head_sn_:1;
 
     ArqList arq_list_;
 

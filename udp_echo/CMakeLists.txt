@@ -46,3 +46,7 @@ target_link_libraries(loss_transition_test PRIVATE ${COMMON_LIBS})
 # ── 卡头阻塞修复快速验证（S1/S2/L15/L25 定向复现） ──
 add_executable(quick_repro_test quick_repro_test.cpp)
 target_link_libraries(quick_repro_test PRIVATE ${COMMON_LIBS})
+
+# ── 详细指标矩阵报告（FEC恢复占比/ARQ成功丢弃/boost占比/延迟带宽） ──
+add_executable(metrics_matrix_test metrics_matrix_test.cpp)
+target_link_libraries(metrics_matrix_test PRIVATE ${COMMON_LIBS})

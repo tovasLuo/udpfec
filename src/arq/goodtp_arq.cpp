@@ -32,6 +32,23 @@ static inline u32 GtpArqSnSpan(const u32 &head_sn, const u32 &sn) {
     return sn + (0xFFFFFFFF - head_sn) + 1;
 }
 
+// Keep in sync with GtpSession::CalcRealtimeReorderMaxLateSn() (goodtp_session.cpp) -- a
+// retransmission whose logical position is already further behind the receiver's window than
+// that tolerance is guaranteed to be dropped there on arrival. Same pps split (>=100pps: 2sn,
+// <100pps: 1sn) for the same reason: a fixed sn count is a smaller time budget at high pps than
+// at low pps. See IsRetranTooStale().
+#define GTP_ARQ_LATE_RETRAN_PPS_THRESHOLD    (100)
+#define GTP_ARQ_HIGH_PPS_MAX_LATE_RETRAN_SN  (2)
+#define GTP_ARQ_LOW_PPS_MAX_LATE_RETRAN_SN   (1)
+
+// Signed-wraparound "how far behind ref_sn is sn", 0 if sn is at or ahead of ref_sn. Same idea as
+// RealtimeReorderWindow::SnBefore()/SnDistance(), duplicated locally since this layer doesn't
+// depend on the session-level reorder window.
+static inline u32 GtpArqSnBehindBy(const u32 &sn, const u32 &ref_sn) {
+    const u32 behind_span = ref_sn - sn;
+    return (0x80000000U > behind_span) ? behind_span : 0;
+}
+
 static inline u16 GtpArqReadNackOffset(const u16 *nack_sn_offset, const u32 &pos) {
     return GtpReadU16Unaligned(((const u8*)nack_sn_offset) + (pos * sizeof(u16)));
 }
@@ -122,9 +139,12 @@ GtpArq::GtpArq(const u32 &rto_timeout_us, const u32 &max_retran_times, const Gtp
     s_cur_loss_rate_(0.0),
     s_loss_dir_(0),
     r_loss_dir_(0),
+    ack_err_counter_(0),
     rto_resend_counter_(0),
     ack_resend_counter_(0),
-    ack_err_counter_(0),
+    stale_retran_skip_counter_(0),
+    last_known_head_sn_(0),
+    has_known_head_sn_(0),
     send_pack_cb_(NULL),
     cb_(cb),
     pack_mem_pool_(pack_mem_pool) {
@@ -244,6 +264,16 @@ void GtpArq::CheckRtoRetran(const u64 &cur_ts_us) {
 
         retran_type = JudgeCanRtoReSend(cur_head, rto_ts_us, bst_ts_us);
         if (HarqReTranType::kNotRetranType != retran_type) {
+            // No fresh head_sn of our own at RTO-scan time (unlike the ACK/NACK quick-resend
+            // paths) -- reuse the last one observed from ProcAck()/ProcNack(). Mark stale instead
+            // of popping/resending; JudgeIsTranFailed() picks up failed_ack_ on the next tick and
+            // runs the normal cleanup path, so this doesn't leave the node stuck forever.
+            if ((GTP_YES == has_known_head_sn_) && (GTP_YES == IsRetranTooStale(cur_head, last_known_head_sn_))) {
+                stale_retran_skip_counter_ += 1;
+                cur_head->failed_ack_ = GTP_YES;
+                goto harq_check_resend_next_pos_;
+            }
+
             PopArqNode(arq_list_, cur_head);
 
             ret = retran_cb_(pb_dt_->session_, cur_head, (GtpAddr*)(cur_head->tran_addr_), cur_ts_us);
@@ -316,6 +346,9 @@ void GtpArq::AdjustRtoTimeout(const u32 &rto_timeout_us, const u32 &rtt_us) {
 
 void GtpArq::ProcAck(const u8 ack_sn_bitmap[], const u32 &bitmap_sz, const u32 &head_sn,
                      const u32 &tail_sn, const u32 &rto_sn, const u32 &recv_loss) {
+    last_known_head_sn_ = head_sn;
+    has_known_head_sn_  = GTP_YES;
+
     #ifdef _SELFDEBUG
     GtpLog(cb_.write_log_cb_, kGtpArqMd, kGtpLogLevelInfo, "%s:%u<->%s:%u proc ack head_sn=%u tail_sn=%u "\
            "rto_sn=%u.\r\n", pb_dt_->self_ip_, (u32)(pb_dt_->self_port_),
@@ -417,6 +450,18 @@ void GtpArq::ProcArqIn32BitSys(const u8 ack_sn_bitmap[], const u32 &bitmap_sz, c
             if (head_rto_sn_span >= head_curr_sn_span) {
 arq_32bit_quick_resend_pos_:
                 // current list is harq list.
+                if (GTP_YES == IsRetranTooStale(cur_node, head_sn)) {
+                    stale_retran_skip_counter_ += 1;
+                    cur_node->failed_ack_ = GTP_YES;
+
+                    #if (0 == SUPPORT_RELIABLE_TRAN)
+                    goto ack_32bit_del_node_pos_;
+                    #endif
+
+                    cur_node = cur_node->nxt_node_;
+                    goto arq_32bit_next_normal_pos_;
+                }
+
                 if (GTP_YES == JudgeExhautResendNum(cur_node)) {
                     // this can't call frame_failed_cb_(), because this may dirty application env.
                     cur_node->failed_ack_ = GTP_YES;
@@ -572,6 +617,18 @@ void GtpArq::ProcArqIn64BitSys(const u8 ack_sn_bitmap[], const u32 &bitmap_sz, c
             if (head_rto_sn_span >= head_curr_sn_span) {
 arq_64bit_quick_resend_pos_:
                 // current list is harq list.
+                if (GTP_YES == IsRetranTooStale(cur_node, head_sn)) {
+                    stale_retran_skip_counter_ += 1;
+                    cur_node->failed_ack_ = GTP_YES;
+
+                    #if (0 == SUPPORT_RELIABLE_TRAN)
+                    goto ack_64bit_del_node_pos_;
+                    #endif
+
+                    cur_node = cur_node->nxt_node_;
+                    goto arq_64bit_next_normal_pos_;
+                }
+
                 if (GTP_YES == JudgeExhautResendNum(cur_node)) {
                     // this can't call frame_failed_cb_(), because this maybe pollute application env.
                     cur_node->failed_ack_ = GTP_YES;
@@ -653,6 +710,9 @@ arq_64bit_next_normal_pos_:
 
 void GtpArq::ProcNack(const u16 nack_sn_offset[], const u32 &nack_num, const u32 &head_sn, const u32 &tail_sn,
                       const u32 &rto_sn) {
+    last_known_head_sn_ = head_sn;
+    has_known_head_sn_  = GTP_YES;
+
     #ifdef _SELFDEBUG
     GtpLog(cb_.write_log_cb_, kGtpArqMd, kGtpLogLevelInfo, "%s:%u<->%s:%u proc nack head_sn=%u tail_sn=%u "\
            "rto_sn=%u nack_num=%u.\r\n", pb_dt_->self_ip_, (u32)(pb_dt_->self_port_),
@@ -732,6 +792,18 @@ void GtpArq::ProcNotLossNack(const u32 &head_sn, const u32 &tail_sn) {
                    (u32)(pb_dt_->peer_port_), (u32)(cur_node->retran_counter_), (u32)max_retran_times_,
                    head_sn, tail_sn, cur_node->pack_sn_);
             #endif
+
+            if (GTP_YES == IsRetranTooStale(cur_node, head_sn)) {
+                stale_retran_skip_counter_ += 1;
+                cur_node->failed_ack_ = GTP_YES;
+
+                #if (0 == SUPPORT_RELIABLE_TRAN)
+                goto nack_noloss_del_node_pos_;
+                #endif
+
+                cur_node = cur_node->nxt_node_;
+                goto no_nack_next_normal_pos_;
+            }
 
             if (GTP_YES == JudgeExhautResendNum(cur_node)) {
                 // this can't call frame_failed_cb_(), because this maybe pollute application env.
@@ -877,6 +949,18 @@ void GtpArq::ProcHasLossNack(const u16_p &nack_sn_offset, const u32 &nack_num, c
             if (head_rto_sn_span >= head_curr_sn_span) {
 nack_quick_resend_pos_:
                 // current list is harq list.
+                if (GTP_YES == IsRetranTooStale(cur_node, head_sn)) {
+                    stale_retran_skip_counter_ += 1;
+                    cur_node->failed_ack_ = GTP_YES;
+
+                    #if (0 == SUPPORT_RELIABLE_TRAN)
+                    goto nack_hasloss_del_node_pos_;
+                    #endif
+
+                    cur_node = cur_node->nxt_node_;
+                    goto has_nack_next_normal_pos_;
+                }
+
                 if (GTP_YES == JudgeExhautResendNum(cur_node)) {
                     // this can't call frame_failed_cb_(), because this maybe pollute application env.
                     cur_node->failed_ack_ = GTP_YES;
@@ -1164,6 +1248,29 @@ u32 GtpArq::ShouldTriggerBoost(void) const {
     const u32 boost_backlog_thresh = 1u + 2u * (u32)max_boost_times_;
 
     return (arq_list_.node_num_ >= boost_backlog_thresh) ? GTP_YES : GTP_NO;
+}
+
+// A pending retransmission whose logical stream position (first_pack_sn_ -- same numbering the
+// receiving side's RealtimeReorderWindow keys expect_sn_ against) is already more than the
+// pps-scaled tolerance behind the receiver's reported window edge (head_sn) will be dropped on
+// arrival by that same tolerance -- sending it just spends bandwidth for nothing. Only real-time
+// streams have that drop-on-arrival behavior (DeliverFrameInOrder() only runs the reorder window
+// for kRealTimeStream); reliable streams must still eventually deliver everything so this doesn't
+// apply to them.
+u32 GtpArq::IsRetranTooStale(const ArqNode *node, const u32 &head_sn) const {
+    if (kRealTimeStream != pb_dt_->tran_addr_.stream_type_) {
+        return GTP_NO;
+    }
+
+    u32 pps = pb_dt_->recv_stat_.data_pack_pps_;
+    if (pps < pb_dt_->send_stat_.data_pack_pps_) {
+        pps = pb_dt_->send_stat_.data_pack_pps_;
+    }
+
+    const u32 max_late_sn = (GTP_ARQ_LATE_RETRAN_PPS_THRESHOLD <= pps) ? GTP_ARQ_HIGH_PPS_MAX_LATE_RETRAN_SN
+                                                                        : GTP_ARQ_LOW_PPS_MAX_LATE_RETRAN_SN;
+
+    return (max_late_sn < GtpArqSnBehindBy(node->first_pack_sn_, head_sn)) ? GTP_YES : GTP_NO;
 }
 
 void GtpArq::CloneBoostNode(ArqNode *org_node, const u64 &ts_us) {

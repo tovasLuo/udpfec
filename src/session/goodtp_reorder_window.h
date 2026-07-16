@@ -14,7 +14,7 @@ class RealtimeReorderWindow {
         kPushDirect,
         kPushCached,
         kPushStaleDeliver,  // Late FEC/ARQ rescue arriving after its slot was skipped; delivered anyway, out of order.
-        kPushGiveUpDrop     // Late FEC/ARQ rescue past stale_drop_us; dropped instead of delivered stale.
+        kPushGiveUpDrop     // Late FEC/ARQ rescue more than max_late_reorder_sn behind expect_sn_; dropped.
     };
 
     struct Frame {
@@ -52,7 +52,8 @@ class RealtimeReorderWindow {
     State Snapshot(const u64 &ts_us) const;
 
     PushResult Push(const u32 &sn, const u8 *frame, const u32 &frame_size, const GtpAddr &tran_addr,
-                    const u64 &ts_us, TranMemPool *pack_mem_pool = NULL, const u32 &stale_drop_us = 0);
+                    const u64 &ts_us, TranMemPool *pack_mem_pool = NULL,
+                    const u32 &max_late_reorder_sn = kDefaultMaxLateReorderSn);
     bool PopReady(const u64 &ts_us, const u32 &target_cache_num, const u32 &wait_us, Frame *out_frame);
 
  private:
@@ -75,6 +76,11 @@ class RealtimeReorderWindow {
     void ClearLateSlots(void);
     void AdvanceToFit(const u32 &sn);
     Slot* SlotBySn(const u32 &sn);
+
+    // Fallback for Push()'s max_late_reorder_sn when the caller doesn't scale it by pps itself.
+    // GtpSession passes an explicit pps-scaled value (CalcRealtimeReorderMaxLateSn()) instead --
+    // see there for why the tolerance differs by traffic rate.
+    static const u32 kDefaultMaxLateReorderSn = 2;
 
     static const u32 kWindowCapacity = 128;
     static const u32 kBitmapWordBits = 64;
