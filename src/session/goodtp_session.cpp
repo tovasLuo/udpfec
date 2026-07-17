@@ -3820,18 +3820,10 @@ u8 GtpSession::CalcGameFecPolicy(void) const {
     #if (2 == APPLICATION_TYPE)
     const u32 policy_pps = GetSendBusinessPps();
 
-    // loss<2%/2-10%/10-25% rows unified to book4 (2x2 H+V) across all pps brackets -- book5
-    // (H-only) and the low-pps FEC-off cells previously here traded bandwidth for a lower
-    // recovery ceiling; book4's dual-axis redundancy recovers more of the loss book5 can't, at
-    // the cost of ~2x parity overhead everywhere below the 25% give-up line instead of only
-    // 10-25%. This collapses the loss_idx 1<->2 boundary that elevated_loss_streak_/
-    // low_loss_streak_/elevated_book_latched_ below exist to debounce -- that hysteresis is now
-    // inert for book selection (both sides of the boundary resolve to the same book4), left in
-    // place rather than removed since it's still exercised/logged and this is easy to revert.
     static const u8 game_fec_policy_table[][7] = {
         // pps:  <20  20-49 50-79 80-109 110-139 140-169 170+
-        {  4,     4,    4,    4,     4,      4,      4},  // loss < 2%
-        {  4,     4,    4,    4,     4,      4,      4},  // 2% <= loss < 10%
+        {0xFF,  0xFF,   5,    5,     5,      5,      5},  // loss < 2%  (pps<50: FEC off; pps>=50: book5)
+        {  5,     5,    5,    5,     5,      5,      5},  // 2% <= loss < 10%
         {  4,     4,    4,    4,     4,      4,      4},  // 10% <= loss < 25%
         {0xFF,  0xFF, 0xFF, 0xFF,  0xFF,   0xFF,   0xFF},  // 25% <= loss < 50%  (not handled -- see
                                                             // CalcGameFecPolicy()'s header comment: filling
