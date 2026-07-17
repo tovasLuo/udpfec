@@ -50,3 +50,7 @@ target_link_libraries(quick_repro_test PRIVATE ${COMMON_LIBS})
 # ── 详细指标矩阵报告（FEC恢复占比/ARQ成功丢弃/boost占比/延迟带宽） ──
 add_executable(metrics_matrix_test metrics_matrix_test.cpp)
 target_link_libraries(metrics_matrix_test PRIVATE ${COMMON_LIBS})
+
+# ── stream_key 是否污染FEC矩阵起始序号：阻断ARQ反馈路径，隔离出纯FEC恢复能力对比 ──
+add_executable(streamkey_fec_isolation_test streamkey_fec_isolation_test.cpp)
+target_link_libraries(streamkey_fec_isolation_test PRIVATE ${COMMON_LIBS})

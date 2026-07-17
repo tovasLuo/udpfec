@@ -32,11 +32,16 @@ static inline u32 GtpArqSnSpan(const u32 &head_sn, const u32 &sn) {
     return sn + (0xFFFFFFFF - head_sn) + 1;
 }
 
-// Keep in sync with GtpSession::CalcRealtimeReorderMaxLateSn() (goodtp_session.cpp) -- a
-// retransmission whose logical position is already further behind the receiver's window than
-// that tolerance is guaranteed to be dropped there on arrival. Same pps split (>=100pps: 2sn,
-// <100pps: 1sn) for the same reason: a fixed sn count is a smaller time budget at high pps than
-// at low pps. See IsRetranTooStale().
+// Approximates the receiver-side give-up line, which is no longer sn-count based (see
+// RealtimeReorderWindow::Push()/GtpSession::CalcRealtimeReorderLateGraceUs() -- the receiver now
+// tracks real elapsed time since it gave up waiting on a specific sn, not sn distance). This layer
+// can't replicate that exactly: GtpArq only has pb_dt_ (pps/RTT), not the receiver's book id or
+// its live wait_us clock, so there's no way to compute the receiver's actual current budget from
+// here. This stays a coarse pps-scaled sn-distance pre-filter -- deliberately generous (errs
+// toward "still attempt the retransmission" when unsure, consistent with this codebase's existing
+// bias against dropping possibly-still-useful sends) -- not a precise mirror of the receiver's
+// per-sn deadline. Only worth tightening further if stale_retran_skip_counter_ (goodtp_arq.h)
+// shows this filter passing through a lot of retransmissions the receiver ends up dropping anyway.
 #define GTP_ARQ_LATE_RETRAN_PPS_THRESHOLD    (100)
 #define GTP_ARQ_HIGH_PPS_MAX_LATE_RETRAN_SN  (2)
 #define GTP_ARQ_LOW_PPS_MAX_LATE_RETRAN_SN   (1)

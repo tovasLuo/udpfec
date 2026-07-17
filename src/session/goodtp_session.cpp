@@ -2813,6 +2813,11 @@ u32 GtpSession::CalcRealtimeReorderWaitUs() const {
         return 0;
     }
 
+    // Fallback ceiling for when the book-aware floor below isn't computed (non-game
+    // APPLICATION_TYPE, or pps==0 momentarily while wait_us is still nonzero from a stale
+    // AvgIntervalUs() sample) -- kept at the old flat value for those paths only.
+    u32 wait_ceiling_us = 80000;
+
     #if (2 == APPLICATION_TYPE)
     if (0 != pps) {
         const u32 interval_us = 1000000U / pps;
@@ -2865,24 +2870,41 @@ u32 GtpSession::CalcRealtimeReorderWaitUs() const {
         if (wait_us < kMatrixIntervalFloorUs) {
             wait_us = kMatrixIntervalFloorUs;
         }
+
+        // Ceiling floats kMaxExtraJitterAboveFloorUs above the *physical* matrix floor instead of
+        // sitting at a fixed constant. Two reasons this replaces the old flat 80ms:
+        //   1. Jitter budget: at CS2-range pps the flat 80ms cap was 3-5x the physical floor
+        //      (~23ms at 128pps/book4) -- a lost packet could sit in the cache that much longer
+        //      than FEC/NACK actually need, which is visible in-game as a stutter. Capping at
+        //      floor+10ms means skip-ahead never waits more than ~10ms past the point FEC's own
+        //      row/column completion time (or a NACK fired at that same floor, see
+        //      CalcGapNackHoldUs()) had a fair chance to land.
+        //   2. This also closes the EWMA-runaway failure mode documented below without needing a
+        //      fixed safety constant at all: kMatrixIntervalFloorUs is recomputed fresh from
+        //      current pps/book on every call (not accumulated), so even if AvgIntervalUs() balloons
+        //      arbitrarily large under sustained loss, the ceiling can't be dragged up with it --
+        //      it's pinned to a live physical quantity, not the thing that was ballooning.
+        // NOT matched by CalcGapNackHoldUs() on purpose -- NACK's own hold stays at the bare
+        // kMatrixIntervalFloorUs (no +10ms) so it fires 10ms *before* this ceiling, leaving that
+        // window as round-trip budget for the resend to actually land, instead of firing right as
+        // skip-ahead gives up (which would guarantee the resend arrives too late to matter here,
+        // even though it could still be delivered late via the sn-distance tolerance).
+        const u32 kMaxExtraJitterAboveFloorUs = 10000;
+        wait_ceiling_us = kMatrixIntervalFloorUs + kMaxExtraJitterAboveFloorUs;
     }
     #endif
 
-    /* Hard safety ceiling -- NOT a latency-tuning knob, a correctness bound. A prior version of
-       this function removed the ceiling entirely (reasoning: since late arrivals are now dropped
-       rather than delivered out of order, "wait longer" seemed strictly better -- catches more
-       recoveries in-window instead of losing them). That broke badly under sustained loss:
+    /* Old history (why a ceiling exists at all, not why it's now floor-relative): a prior version
+       of this function removed the ceiling entirely (reasoning: since late arrivals are now
+       dropped rather than delivered out of order, "wait longer" seemed strictly better -- catches
+       more recoveries in-window instead of losing them). That broke badly under sustained loss:
        AvgIntervalUs() (this function's wait_us baseline) is an EWMA of observed packet spacing,
        and under real loss it can itself balloon arbitrarily large, which fed straight back into
        an ever-growing wait -- skip-ahead stopped firing, everything piled up undelivered, and
        fec_loss_test's high-loss scenarios saw single delivery gaps over a second and up to 100%
-       apparent loss (nothing left the cache before the test ended). This ceiling exists purely to
-       guarantee skip-ahead always fires within a bounded time regardless of how bad the link gets;
-       80ms was chosen to clear the low-pps FEC floor above (50ms at 40pps) with margin, not to hit
-       any particular jitter target. */
-    const u32 kWaitSafetyCeilingUs = 80000;
-    if (wait_us > kWaitSafetyCeilingUs) {
-        wait_us = kWaitSafetyCeilingUs;
+       apparent loss (nothing left the cache before the test ended). */
+    if (wait_us > wait_ceiling_us) {
+        wait_us = wait_ceiling_us;
     }
 
     return wait_us;
@@ -2944,8 +2966,11 @@ u32 GtpSession::CalcGapNackHoldUs() const {
        book4), this needed to move with it -- holding NACK to the old flat 2x while wait_us's own
        floor moved to 3x for book4 would have reintroduced the exact bug this function's history
        already flags: NACK firing before wait_us gives up is required for its resend to have any
-       chance of counting once it lands. No safety ceiling needed here (unlike
-       CalcRealtimeReorderWaitUs()'s 80ms cap): computed fresh from current pps/book on every
+       chance of counting once it lands. Deliberately stays at the bare floor, NOT
+       CalcRealtimeReorderWaitUs()'s floor+10ms ceiling -- that 10ms is reserved as the resend's
+       round-trip budget, not spent here deciding whether to ask for one (see that function's
+       ceiling comment). No safety ceiling needed on this function itself: computed fresh from
+       current pps/book on every
        TimerHandler tick against gap_nack_hold_start_us_ (not accumulated via an EWMA, so it can't
        run away unbounded), NOT snapshotted once at gap-detection time -- a book switch mid-hold
        must be picked up immediately so this keeps tracking CalcRealtimeReorderWaitUs()'s own live
@@ -3023,17 +3048,16 @@ u32 GtpSession::CalcRealtimeReorderStaleDropUs() const {
     return srtt_us_ + (rttvar_us_ << 1);
 }
 
-u32 GtpSession::CalcRealtimeReorderMaxLateSn() const {
-    // Same fixed sn count covers less wall-clock time as pps rises, so a 2-sn tolerance that's
-    // reasonable at 128pps (~15.6ms) is comparatively generous at 30pps (~66ms) -- tighten to 1sn
-    // below 100pps so the tolerance stays in roughly the same time budget across traffic rates.
+u32 GtpSession::CalcRealtimeReorderLateGraceUs() const {
+    // Same number as CalcRealtimeReorderWaitUs()'s kMaxExtraJitterAboveFloorUs -- one shared
+    // jitter budget, not two independently-tuned ones. A late FEC/NACK/ARQ/boost rescue gets
+    // judged by the same clock skip-ahead itself uses: it's worth delivering out of order if it
+    // beats this grace period counted from the moment RealtimeReorderWindow gave up waiting for
+    // it, dropped otherwise, regardless of which mechanism eventually produced it. Flat, not
+    // pps-scaled -- unlike the sn-count tolerance this replaces, this is already a direct wall-
+    // clock quantity, so it doesn't need pps to translate it into one.
     // Keep GtpArq::IsRetranTooStale()'s matching threshold (goodtp_arq.cpp) in sync with this.
-    u32 pps = pb_dt_.recv_stat_.data_pack_pps_;
-    if (pps < pb_dt_.send_stat_.data_pack_pps_) {
-        pps = pb_dt_.send_stat_.data_pack_pps_;
-    }
-
-    return (100 <= pps) ? 2 : 1;
+    return 10000;
 }
 
 u32 GtpSession::CalcRealtimeReorderMaxCacheNum() const {
@@ -3177,19 +3201,19 @@ u32 GtpSession::DeliverFrameInOrder(GtpHandler_p gtp_hdl, const u32 &first_sn, c
     // (not deleted) only as a record of a ruled-out design; do not re-enable without new evidence.
     // #if 0
     const u64 ts_us = last_active_ts_us_;
-    const u32 max_late_reorder_sn = CalcRealtimeReorderMaxLateSn();
+    const u32 late_grace_us = CalcRealtimeReorderLateGraceUs();
     RealtimeReorderWindow::PushResult push_result =
         realtime_reorder_win_.Push(first_sn, frame, frame_size, *tran_addr, ts_us, &pack_mem_pool_,
-                                   max_late_reorder_sn);
+                                   late_grace_us);
     if (RealtimeReorderWindow::kPushGiveUpDrop == push_result) {
         realtime_reorder_giveup_drop_ += 1;
 
         #ifdef _SELFDEBUG
         GtpLog(cb_.write_log_cb_, kGtpSessionMd, kGtpLogLevelDebug,
                "%s:%u<-->%s:%u realtime reorder gave up on stale rescue(sn=%u expect_sn=%u cache_num=%u "\
-               "max_late_sn=%u now=%lluus).\r\n",
+               "late_grace_us=%u now=%lluus).\r\n",
                pb_dt_.self_ip_, (u32)(pb_dt_.self_port_), pb_dt_.peer_ip_, (u32)(pb_dt_.peer_port_),
-               first_sn, realtime_reorder_win_.ExpectSn(), realtime_reorder_win_.Count(), max_late_reorder_sn,
+               first_sn, realtime_reorder_win_.ExpectSn(), realtime_reorder_win_.Count(), late_grace_us,
                (unsigned long long)ts_us);
         #endif
 

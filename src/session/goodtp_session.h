@@ -176,7 +176,7 @@ PRIVATE:
     u32  CalcRealtimeReorderWaitUs() const;
     u32  CalcGapNackHoldUs() const;
     u32  CalcRealtimeReorderStaleDropUs() const;
-    u32  CalcRealtimeReorderMaxLateSn() const;
+    u32  CalcRealtimeReorderLateGraceUs() const;
     u32  CalcRealtimeReorderMaxCacheNum() const;
     u32  CalcRealtimeNackFeedbackCap() const;
     u32  ShouldFeedbackRealtimeNack(const u32 &nack_sn, const u64 &ts_us);

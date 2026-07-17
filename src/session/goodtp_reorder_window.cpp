@@ -92,9 +92,16 @@ RealtimeReorderWindow::Slot::Slot() :
     frame_() {
 }
 
+RealtimeReorderWindow::GiveUpRecord::GiveUpRecord() :
+    valid_(false),
+    sn_(0),
+    ts_us_(0) {
+}
+
 RealtimeReorderWindow::RealtimeReorderWindow() :
     slots_(),
     occupied_bitmap_{0, 0},
+    give_up_records_(),
     count_(0),
     expect_sn_(0),
     last_arrival_ts_us_(0),
@@ -169,6 +176,9 @@ void RealtimeReorderWindow::Reset(void) {
     std::vector<Slot>().swap(slots_);
     occupied_bitmap_[0]   = 0;
     occupied_bitmap_[1]   = 0;
+    for (u32 i = 0; i < kWindowCapacity; ++i) {
+        give_up_records_[i].valid_ = false;
+    }
     count_              = 0;
     expect_sn_          = 0;
     last_arrival_ts_us_ = 0;
@@ -221,6 +231,23 @@ RealtimeReorderWindow::Slot* RealtimeReorderWindow::SlotBySn(const u32 &sn) {
     return &(slots_[sn & (kWindowCapacity - 1)]);
 }
 
+void RealtimeReorderWindow::MarkGivenUp(const u32 &sn, const u64 &ts_us) {
+    GiveUpRecord &rec = give_up_records_[sn & (kWindowCapacity - 1)];
+    rec.valid_ = true;
+    rec.sn_    = sn;
+    rec.ts_us_ = ts_us;
+}
+
+bool RealtimeReorderWindow::LookupGiveUpTs(const u32 &sn, u64 *out_ts_us) const {
+    const GiveUpRecord &rec = give_up_records_[sn & (kWindowCapacity - 1)];
+    if ((!rec.valid_) || (rec.sn_ != sn)) {
+        return false;
+    }
+
+    *out_ts_us = rec.ts_us_;
+    return true;
+}
+
 void RealtimeReorderWindow::EnsureSlots(void) {
     if (slots_.empty()) {
         slots_.resize(kWindowCapacity);
@@ -260,13 +287,19 @@ void RealtimeReorderWindow::ClearLateSlots(void) {
     }
 }
 
-void RealtimeReorderWindow::AdvanceToFit(const u32 &sn) {
+void RealtimeReorderWindow::AdvanceToFit(const u32 &sn, const u64 &ts_us) {
     while (kWindowCapacity <= SnDistance(expect_sn_, sn)) {
         if (!slots_.empty()) {
             const u32 slot_idx = expect_sn_ & (kWindowCapacity - 1);
             Slot *slot = &(slots_[slot_idx]);
             if (slot->used_ && (slot->sn_ == expect_sn_)) {
                 ClearSlot(slot_idx);
+            } else {
+                // expect_sn_ never arrived -- being force-abandoned here (a new arrival is more
+                // than a full window ahead), not just skipped-ahead-and-maybe-still-coming. Same
+                // give-up bookkeeping as PopReady()'s skip-ahead so a late straggler for this sn
+                // still gets a correct elapsed-time reading in Push().
+                MarkGivenUp(expect_sn_, ts_us);
             }
         }
         expect_sn_ += 1;
@@ -278,7 +311,7 @@ void RealtimeReorderWindow::AdvanceToFit(const u32 &sn) {
 RealtimeReorderWindow::PushResult RealtimeReorderWindow::Push(const u32 &sn, const u8 *frame, const u32 &frame_size,
                                                               const GtpAddr &tran_addr, const u64 &ts_us,
                                                               TranMemPool *pack_mem_pool,
-                                                              const u32 &max_late_reorder_sn) {
+                                                              const u32 &late_grace_us) {
     UpdateInterval(sn, ts_us);
 
     if (!inited_) {
@@ -303,16 +336,29 @@ RealtimeReorderWindow::PushResult RealtimeReorderWindow::Push(const u32 &sn, con
             return kPushDrop;
         }
 
-        // Give-up gate: sn-distance only, replacing the previous RTT-derived stale_drop_us
-        // estimate. A late rescue within max_late_reorder_sn packets of expect_sn_ is still
-        // delivered out of order; anything further behind is by then almost certainly superseded
-        // in the app's own state (see DeliverFrameInOrder()'s comment on why stale rewinds hurt),
-        // so retransmitting/delivering it is no longer useful -- drop outright instead of
-        // estimating elapsed time from the learned pacing interval. Caller scales the tolerance
-        // by pps (see CalcRealtimeReorderMaxLateSn()) -- at low pps, 2 packets of sn distance
-        // covers noticeably more wall-clock time than at high pps, so the same fixed count isn't
-        // an equivalent staleness bound across traffic rates.
-        if (SnDistance(sn, expect_sn_) > max_late_reorder_sn) {
+        // Give-up gate: real elapsed time since the window gave up waiting for this exact sn
+        // (recorded by MarkGivenUp() at the moment PopReady()/AdvanceToFit() skipped past it),
+        // not an sn-distance proxy. Whatever rescued it -- FEC completing late, a NACK-triggered
+        // ARQ resend, a boost clone -- gets judged by the same clock: if it shows up within
+        // late_grace_us of being abandoned, still deliver it out of order; past that, it's no more
+        // useful than dropping it outright (see DeliverFrameInOrder()'s comment on why stale
+        // rewinds hurt). Caller passes CalcRealtimeReorderWaitUs()'s own +10ms grace margin (see
+        // that function's ceiling comment) so this give-up line and the skip-ahead ceiling share
+        // one budget instead of two independently-tuned numbers.
+        //
+        // No recorded timestamp (LookupGiveUpTs() fails) means this specific sn was never actually
+        // abandoned by this window -- filter_win_ upstream already screens out duplicates of
+        // normally in-order-delivered packets before they ever reach here, so the only way to land
+        // in this branch without a record is an sn old enough that its give_up_records_ slot has
+        // since been overwritten by a more recent sn cycling through the same ring position (more
+        // than kWindowCapacity sn's later). That's unambiguously stale -- drop it.
+        u64 given_up_ts_us = 0;
+        if (!LookupGiveUpTs(sn, &given_up_ts_us)) {
+            return kPushGiveUpDrop;
+        }
+
+        const u64 staleness_us = (ts_us >= given_up_ts_us) ? (ts_us - given_up_ts_us) : 0;
+        if (staleness_us > late_grace_us) {
             return kPushGiveUpDrop;
         }
 
@@ -324,7 +370,7 @@ RealtimeReorderWindow::PushResult RealtimeReorderWindow::Push(const u32 &sn, con
         return kPushDirect;
     }
 
-    AdvanceToFit(sn);
+    AdvanceToFit(sn, ts_us);
     EnsureSlots();
 
     Slot *slot = SlotBySn(sn);
@@ -401,6 +447,15 @@ bool RealtimeReorderWindow::PopReady(const u64 &ts_us, const u32 &target_cache_n
         const u64 age_us = ts_us >= arrival_ts_us ? (ts_us - arrival_ts_us) : (arrival_ts_us - ts_us);
         if ((count_ < target_cache_num) && (age_us < wait_us)) {
             return false;
+        }
+
+        // Giving up on every sn strictly between expect_sn_ and the slot we're skipping to --
+        // record when, so a late arrival for any of them can look up its own real elapsed time in
+        // Push() instead of a distance-based estimate. Bounded by nearest_slot's distance, which
+        // FindNearest() only ever returns from within this same kWindowCapacity ring, so this loop
+        // is small.
+        for (u32 gone_sn = expect_sn_; gone_sn != nearest_slot->sn_; gone_sn += 1) {
+            MarkGivenUp(gone_sn, ts_us);
         }
 
         expect_sn_ = nearest_slot->sn_;
