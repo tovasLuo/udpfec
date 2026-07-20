@@ -1100,6 +1100,21 @@ fec2_decode_judge_book_chg_pos_:
 }
 
 u32 GtpFec2::CacheDataPack(GtpPacket *pack, const u64 &ts_us) {
+    // ARQ retransmits (repeat_counter_ != 0) get a freshly-assigned pack_sn_ at resend time (see
+    // GtpSession::PackRetransmit()/FramePrepHandlerWithSelfVer() -- pack_sn_ increments on every
+    // resend just like an original send), which has no relationship to the FEC matrix block/
+    // position the ORIGINAL send was encoded into. By the time a retransmit lands (at least one
+    // RTO/NACK round trip later) that original block has almost always already expired via
+    // ClearResource(), so caching it here would be a wasted lookup at best -- and at worst, if the
+    // new pack_sn_ happens to fall inside some OTHER, unrelated, still-active decode matrix block's
+    // sn range, PushPack()/the matrix lookup below would insert this retransmitted payload into a
+    // slot that block's real recovery expects to hold a DIFFERENT original packet's content,
+    // corrupting that block's XOR recovery. Retransmits already have their own independent delivery
+    // guarantee via ARQ; skip FEC bookkeeping for them entirely rather than risk either.
+    if (0 != ((u8)(pack->repeat_counter_))) {
+        return GTP_OK;
+    }
+
     GtpPackCacheStru *cache = decode_.fec_buf_.PushPack(pack, GTP_NO);
 
     if (NULL == cache) {
@@ -1119,6 +1134,69 @@ cache_data_pack_exit_pos_:
     ClearReceiveUnUsedResource(CalcPosInPackCache(pack->pack_sn_));
 
     return GTP_OK;
+}
+
+// Lets GtpSession's gap-hold logic (goodtp_session.cpp:TimerHandler(), the
+// CalcGapNackHoldUs()-timed wait before firing a gap-triggered NACK) ask "is FEC provably unable to
+// recover this sn right now" instead of always waiting out the full grace period even when the
+// answer already can't change. GTP_YES only when every direction this book actually uses (book5:
+// H only; book4: H+V) has already shown its parity packet and that row/column still has 2+ missing
+// members -- at that point no amount of additional waiting makes FEC recover it, because both
+// XOR equations touching it are already known to be underdetermined.
+//
+// Deliberately conservative everywhere else (returns GTP_NO, "keep waiting"): no tracked matrix
+// block for this sn (parity may not have arrived yet), or a direction's own parity hasn't shown up
+// yet (it might still save this sn once it does) both fall back to the pre-existing elapsed-time
+// wait. uh_flag_/dh_flag_ (book0/1/3's diagonal directions) are unreachable via
+// CalcGameFecPolicy()'s game-mode table (only ever selects book4/book5) and this function has only
+// been exercised against h/v -- rather than risk a wrong "hopeless" call on an untested path, any
+// book with diagonals enabled bails to GTP_NO unconditionally.
+u32 GtpFec2::IsRecoveryHopeless(const u32 &pack_sn) {
+    u32 matrix_id = CalcRecvMatrixIdByPackSn(pack_sn);
+    if (MAX_RECV_FEC2_MATRIX_NUM <= matrix_id) {
+        return GTP_NO;
+    }
+
+    Fec2EnDeCodeMatrix &decode_matrix = decode_.decode_matrix_[matrix_id];
+
+    if ((GTP_YES == decode_matrix.uh_flag_) || (GTP_YES == decode_matrix.dh_flag_)) {
+        return GTP_NO;
+    }
+
+    const goodtp_pos cache_pos     = CalcPosInPackCache(pack_sn);
+    const goodtp_pos pos_in_matrix = CalcPackPosInMatrix(cache_pos, (u32)(decode_matrix.matrix_size_), write_log_cb_);
+
+    const encode_pos h_pos = CalcHorizontalEncodePos(decode_matrix, pos_in_matrix, write_log_cb_);
+    const encode_pos v_pos = CalcVerticalEncodePos(decode_matrix, pos_in_matrix, write_log_cb_);
+    if ((INVALID_ENCODE_POS == h_pos) || (INVALID_ENCODE_POS == v_pos)) {
+        return GTP_NO;
+    }
+
+    if (GTP_YES == decode_matrix.h_flag_) {
+        if (NULL == decode_matrix.h_fec_code_[h_pos].fec_pack_) {
+            return GTP_NO;   // H parity hasn't arrived yet -- still might save it.
+        }
+
+        const goodtp_pos h_start = CalcFirstHorizontalPosInCache(cache_pos, v_pos);
+        if (MAX_FEC2_CACHE_CAPACITY > CalcRestorePosByHDir(h_start, h_pos, decode_matrix)) {
+            return GTP_NO;   // H direction can recover it right now (or already has).
+        }
+    }
+
+    if (GTP_YES == CheckVerticalEncodeEnabled(decode_matrix, v_pos)) {
+        if (NULL == decode_matrix.v_fec_code_[v_pos].fec_pack_) {
+            return GTP_NO;   // V parity hasn't arrived yet -- still might save it.
+        }
+
+        const goodtp_pos v_start = CalcFirstVerticalPosInCache(cache_pos, h_pos, (u8)(decode_matrix.h_size_));
+        if (MAX_FEC2_CACHE_CAPACITY > CalcRestorePosByVDir(v_start, v_pos, decode_matrix)) {
+            return GTP_NO;   // V direction can recover it right now (or already has).
+        }
+    }
+
+    // Every direction this book actually uses has already shown its parity and it wasn't enough
+    // (>=2 missing in that row/col) -- no further waiting changes the outcome.
+    return GTP_YES;
 }
 
 void GtpFec2::ChangeFecMode(const u32 &new_code_book_id) {

@@ -1232,6 +1232,7 @@ GtpSession::GtpSession(const goodtp_sock &sfd, const u8 dst_sock_addr[], const u
     nack_burst_detected_(0),
     new_gap_detected_(0),
     gap_nack_hold_start_us_(0),
+    gap_nack_hold_sn_(0),
     elevated_loss_streak_(0),
     low_loss_streak_(0),
     elevated_book_latched_(0),
@@ -1336,6 +1337,7 @@ GtpSession::GtpSession(GtpAddr *tran_addr, const GtpHandler &gtp_hdl, GtpMemPool
     nack_burst_detected_(0),
     new_gap_detected_(0),
     gap_nack_hold_start_us_(0),
+    gap_nack_hold_sn_(0),
     elevated_loss_streak_(0),
     low_loss_streak_(0),
     elevated_book_latched_(0),
@@ -2465,6 +2467,7 @@ u32 GtpSession::PackPostHandler(GtpPacket *pack, const u32 &size, GtpAddr *tran_
             #if (2 == APPLICATION_TYPE)
             if ((0 != recv_max_data_sn_) && (1 < ((i32)(pack->pack_sn_ - recv_max_data_sn_)))) {
                 gap_nack_hold_start_us_ = last_active_ts_us_;
+                gap_nack_hold_sn_       = recv_max_data_sn_ + 1;   // earliest hole in the gap
             }
 
             if ((0 == recv_max_data_sn_) || (0 < ((i32)(pack->pack_sn_ - recv_max_data_sn_)))) {
@@ -3322,10 +3325,24 @@ timer_handler_continue_pos_:
     }
 
     #if (2 == APPLICATION_TYPE)
-    if ((GTP_ON == pb_dt_.alg_top_switch_) && (0 != gap_nack_hold_start_us_)
-     && ((ts_us - gap_nack_hold_start_us_) >= CalcGapNackHoldUs())) {
-        gap_nack_hold_start_us_ = 0;
-        new_gap_detected_ = 3;
+    if ((GTP_ON == pb_dt_.alg_top_switch_) && (0 != gap_nack_hold_start_us_)) {
+        // Two independent reasons to stop waiting: the grace period we give FEC to land has
+        // elapsed, OR FEC has already provably lost this specific sn (both H and V parity for its
+        // row/column have arrived and neither had exactly one missing member -- see
+        // GtpFec2::IsRecoveryHopeless()). The second check is cheap (a handful of array reads on
+        // the already-live decode matrix, no allocation) and short-circuits the common "book4 loses
+        // both packets of a row" case immediately instead of always paying the full
+        // CalcGapNackHoldUs() wait for a recovery that was never going to happen.
+        u32 elapsed_enough = (((ts_us - gap_nack_hold_start_us_) >= CalcGapNackHoldUs()) ? GTP_YES : GTP_NO);
+        u32 fec_hopeless   = GTP_NO;
+        #if (1 == ENABLE_FEC)
+        fec_hopeless = fec2_obj_.IsRecoveryHopeless(gap_nack_hold_sn_);
+        #endif
+
+        if ((GTP_YES == elapsed_enough) || (GTP_YES == fec_hopeless)) {
+            gap_nack_hold_start_us_ = 0;
+            new_gap_detected_ = 3;
+        }
     }
     if ((GTP_ON == pb_dt_.alg_top_switch_) && (0 < new_gap_detected_)) {
         new_gap_detected_ -= 1;

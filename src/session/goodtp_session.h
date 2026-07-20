@@ -218,6 +218,13 @@ PRIVATE:
     // breaking the invariant that this must always match CalcRealtimeReorderWaitUs()'s floor.
     // See CalcGapNackHoldUs(). 0 == no gap-hold pending.
     u64 gap_nack_hold_start_us_;
+    // The specific missing sn the current gap-hold is waiting on (set alongside
+    // gap_nack_hold_start_us_, same lifetime). Lets TimerHandler() ask
+    // GtpFec2::IsRecoveryHopeless() "can FEC still save this one" every tick and short-circuit the
+    // hold the moment the answer is no (both directions' parity already arrived and neither has
+    // exactly one missing), instead of always waiting out the full CalcGapNackHoldUs() grace period
+    // even when it's provably wasted time. Meaningless while gap_nack_hold_start_us_ == 0.
+    u32 gap_nack_hold_sn_;
     // Consecutive 1s windows where the per-second loss peak stayed >=10%. A lone short
     // burst only ever bumps this to 1 (the very next second is clean again), so gating
     // the FEC book4 upgrade on streak>=2 in CalcGameFecPolicy() keeps isolated spikes from

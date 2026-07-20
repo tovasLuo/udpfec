@@ -96,6 +96,7 @@ class GtpFec2 {
     u32  CacheDataPack(GtpPacket *pack, const u64 &ts_us);
     void ChangeFecMode(const u32 &new_code_book_id);
     u8   RecvFecBookId(void) const;
+    u32  IsRecoveryHopeless(const u32 &pack_sn);
     u32  PrintFec2Param(u8 *out_str, const u32 &mem_size);
     void ClearResource(const f32 &loss, const u64 &ts_us);
 
