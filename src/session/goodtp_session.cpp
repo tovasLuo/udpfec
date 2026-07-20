@@ -2133,7 +2133,20 @@ u32 GtpSession::FramePostHandler(GtpAddr *tran_addr, GtpPacket *pack, const u32 
     // step3: process arq.
     #if (1 == ENABLE_ARQ)
     if (GTP_ON == pb_dt_.alg_top_switch_) {
-        arq_.PacketEntryList(pack, tran_addr, first_pack_sn, last_active_ts_us_);
+        run_result = arq_.PacketEntryList(pack, tran_addr, first_pack_sn, last_active_ts_us_);
+        if (GTP_OK != run_result) {
+            // Not fatal to the send itself -- send_pack_cb_() already put the packet on the wire
+            // before this step runs (see GtpFrameSend()/RetransmitPack()'s call order). This just
+            // means the packet won't be tracked for retransmission: a real loss on this specific
+            // packet won't be recovered by ARQ. PacketEntryList() already logs the underlying
+            // cause (arq_node_mem_pool_ exhaustion) at its own call site; this is only here so
+            // FramePostHandler() doesn't silently swallow a nonzero return like every other step
+            // in this function checks its own run_result.
+            GtpLog(cb_.write_log_cb_, kGtpSessionMd, kGtpLogLevelError, "%s:%u<-->%s:%u calling "\
+                   "arq_.PacketEntryList() failed(0x%08x), pack_sn=%u won't be tracked for retransmission.\r\n",
+                   pb_dt_.self_ip_, (u32)(pb_dt_.self_port_), pb_dt_.peer_ip_, (u32)(pb_dt_.peer_port_),
+                   run_result, pack->pack_sn_);
+        }
     }
     #endif
 
@@ -4237,6 +4250,10 @@ u32 GtpSession::PrintHarqParam(u8 *out_str, const u32 &mem_size) {
 
     wrt_num = (u32)snprintf((char*)wrt_pos, free_sz, "\r\n stale_retran_skip_counter= %u",
                             arq_.stale_retran_skip_counter_);
+    PrintAfterHandlerReturn(str_len, wrt_num, free_sz, wrt_pos);
+
+    wrt_num = (u32)snprintf((char*)wrt_pos, free_sz, "\r\n cap_evict_counter= %u",
+                            arq_.cap_evict_counter_);
     PrintAfterHandlerReturn(str_len, wrt_num, free_sz, wrt_pos);
 
     return str_len;

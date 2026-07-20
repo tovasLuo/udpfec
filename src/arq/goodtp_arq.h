@@ -134,6 +134,13 @@ PRIVATE:
     // it would've been dropped on arrival anyway", not "attempted and gave up".
     u32 stale_retran_skip_counter_;
 
+    // Oldest unacked node force-evicted by PacketEntryList() because arq_list_.node_num_ hit
+    // MAX_ARQ_NODE_PER_SESSION -- see that constant's comment. Stays 0 under any healthy session;
+    // a nonzero value means this session's peer went unresponsive for long enough (not just
+    // lossy -- genuinely not acking) that admission-time eviction had to kick in instead of the
+    // normal RTO-driven CheckRtoRetran() cleanup.
+    u32 cap_evict_counter_;
+
     // Latest receiver window low edge (head_sn from ProcAck()/ProcNack()), kept around so
     // CheckRtoRetran()'s RTO-driven path -- which has no ACK/NACK of its own to read a fresh
     // head_sn from -- can still apply the same staleness check the quick-resend paths apply

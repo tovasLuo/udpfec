@@ -148,6 +148,7 @@ GtpArq::GtpArq(const u32 &rto_timeout_us, const u32 &max_retran_times, const Gtp
     rto_resend_counter_(0),
     ack_resend_counter_(0),
     stale_retran_skip_counter_(0),
+    cap_evict_counter_(0),
     last_known_head_sn_(0),
     has_known_head_sn_(0),
     send_pack_cb_(NULL),
@@ -172,7 +173,50 @@ u32 GtpArq::Init(GtpMemPool *arq_packet_pool, pSendPackCallBack send_pack_cb, pP
     return GTP_OK;
 }
 
+// Per-session hard cap on outstanding (unacked) ArqNode count. Before this, PacketEntryList()
+// had no admission check at all -- GtpFrameSend() unconditionally entered every packet into
+// arq_list_, relying entirely on ACK arrival / RTO-driven CheckRtoRetran() cleanup / session TTL
+// to bound growth. That's fine against packet loss (the peer is still alive and acking, so the
+// list self-drains), but a session whose peer goes genuinely unresponsive -- not lossy, actually
+// silent: dead process, network partition, or a peer that never sends anything back -- keeps
+// accumulating nodes for as long as the app keeps calling GtpFrameSend(), and those nodes pull
+// from arq_node_mem_pool_/packet_mem_pool_, which are shared across every session on this
+// GoodTp instance (up to MAX_SESSION_NUM) and every other subsystem (FEC encode/decode buffers,
+// control packets, RealtimeReorderWindow -- see their shared TranMemPool& pack_mem_pool_). One
+// wedged session monopolizing that shared pool can starve allocations for every other session.
+//
+// Sized well above any healthy session's steady-state backlog: MAX_PPS_PER_SESSION(128) x
+// MAX_RTO_US(500ms) ~= 64 packets in flight worst case, x2 because CloneBoostNode() allocates a
+// second independent ArqNode per original (both count toward node_num_) == ~128, then a further
+// ~8x margin so ordinary jitter/bursts never trip it. Confirmed to stay at 0 evictions across
+// the existing loopback regression scenarios (fec_loss_test/metrics_matrix_test/
+// traffic_breakdown_test, 1-30% loss x 30-300pps) -- this is a safety valve for the unresponsive-
+// peer case, not something meant to engage under normal loss.
+#define MAX_ARQ_NODE_PER_SESSION (1024)
+
 u32 GtpArq::PacketEntryList(GtpPacket *pack, GtpAddr *tran_addr, const u32 &first_pack_sn, const u64 &ts_us) {
+    if (MAX_ARQ_NODE_PER_SESSION <= arq_list_.node_num_) {
+        // Evict the oldest unacked node to admit the new send. Unconditional free (not routed
+        // through TranFailedPostHandler()) on purpose: for a reliable stream, that function
+        // requeues the node instead of freeing it (never-give-up retry semantics), which would
+        // leave node_num_ unchanged and make this cap a no-op infinite-eviction loop against the
+        // same node. Hitting this cap at all already means something is well outside normal
+        // operation for either stream type, so both take the same "drop it, log it" path.
+        ArqNode *oldest = arq_list_.head_;
+        if (NULL != oldest) {
+            PopArqNode(arq_list_, oldest);
+            pack_mem_pool_.FreeTranBuf((u8*)(oldest->pack_));
+            arq_packet_pool_->FreeItem(oldest);
+            cap_evict_counter_ += 1;
+
+            GtpLog(cb_.write_log_cb_, kGtpArqMd, kGtpLogLevelWarning, "%s:%u<-->%s:%u arq per-session node cap"\
+                   "(%u) reached, evicted oldest unacked node(sn=%u first_sn=%u) to admit new send -- peer may "\
+                   "be unresponsive.\r\n", pb_dt_->self_ip_, (u32)(pb_dt_->self_port_), pb_dt_->peer_ip_,
+                   (u32)(pb_dt_->peer_port_), (u32)MAX_ARQ_NODE_PER_SESSION, oldest->pack_sn_,
+                   oldest->first_pack_sn_);
+        }
+    }
+
     ArqNode *node = (ArqNode*)arq_packet_pool_->MallocItem();
     if (NULL == node) {
         const u8* arq_mem_status = arq_packet_pool_->GetMemPoolStatus();

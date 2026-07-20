@@ -58,3 +58,7 @@ target_link_libraries(streamkey_fec_isolation_test PRIVATE ${COMMON_LIBS})
 # ── 流量分类占比（DATA首发/ARQ重传/boost/FEC/ACK/NACK）──
 add_executable(traffic_breakdown_test traffic_breakdown_test.cpp)
 target_link_libraries(traffic_breakdown_test PRIVATE ${COMMON_LIBS})
+
+# ── ARQ per-session节点数硬上限验证（peer完全静默场景）──
+add_executable(arq_cap_test arq_cap_test.cpp)
+target_link_libraries(arq_cap_test PRIVATE ${COMMON_LIBS})
