@@ -54,3 +54,7 @@ target_link_libraries(metrics_matrix_test PRIVATE ${COMMON_LIBS})
 # ── stream_key 是否污染FEC矩阵起始序号：阻断ARQ反馈路径，隔离出纯FEC恢复能力对比 ──
 add_executable(streamkey_fec_isolation_test streamkey_fec_isolation_test.cpp)
 target_link_libraries(streamkey_fec_isolation_test PRIVATE ${COMMON_LIBS})
+
+# ── 流量分类占比（DATA首发/ARQ重传/boost/FEC/ACK/NACK）──
+add_executable(traffic_breakdown_test traffic_breakdown_test.cpp)
+target_link_libraries(traffic_breakdown_test PRIVATE ${COMMON_LIBS})

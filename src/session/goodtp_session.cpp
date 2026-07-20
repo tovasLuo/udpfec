@@ -3823,7 +3823,7 @@ u8 GtpSession::CalcGameFecPolicy(void) const {
     static const u8 game_fec_policy_table[][7] = {
         // pps:  <20  20-49 50-79 80-109 110-139 140-169 170+
         {0xFF,  0xFF,   5,    5,     5,      5,      5},  // loss < 2%  (pps<50: FEC off; pps>=50: book5)
-        {  5,     5,    5,    5,     5,      5,      5},  // 2% <= loss < 10%
+        {  4,     4,    4,    4,     4,      4,      4},  // 2% <= loss < 10%  (book5->book4: 实测流量+20~27%换取更低丢包，见提交说明)
         {  4,     4,    4,    4,     4,      4,      4},  // 10% <= loss < 25%
         {0xFF,  0xFF, 0xFF, 0xFF,  0xFF,   0xFF,   0xFF},  // 25% <= loss < 50%  (not handled -- see
                                                             // CalcGameFecPolicy()'s header comment: filling
